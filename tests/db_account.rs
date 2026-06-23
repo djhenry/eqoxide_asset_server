@@ -20,8 +20,32 @@ fn md5_and_sha1_digests_match() {
 }
 
 #[test]
-fn scrypt_and_garbage_rejected() {
-    assert!(!verify_password("$7$C6..../....rGaOSiQiV418brT0oYIaxzvw9n/wO0yPkVZDDog.k.9$Xbeb5mHt44YtHheFjR7Xx6mOq5D8rL5kQbvC/4Ct1J.", "anything"));
+fn scrypt_password_round_trips() {
+    use sodiumoxide::crypto::pwhash::scryptsalsa208sha256 as sc;
+    sodiumoxide::init().unwrap();
+    // Generate a real libsodium $7$ hash for a known password (same function EQEmu uses),
+    // then verify through our verify_password.
+    let hp = sc::pwhash("keeblerpw".as_bytes(), sc::OPSLIMIT_INTERACTIVE, sc::MEMLIMIT_INTERACTIVE).unwrap();
+    let s = std::str::from_utf8(&hp.0).unwrap().trim_end_matches('\0').to_string();
+    assert!(s.starts_with("$7$"), "got {s}");
+    assert!(verify_password(&s, "keeblerpw"));
+    assert!(!verify_password(&s, "wrongpw"));
+}
+
+#[test]
+fn argon2_password_round_trips() {
+    use sodiumoxide::crypto::pwhash::argon2id13 as pw;
+    sodiumoxide::init().unwrap();
+    let hp = pw::pwhash("argonpw".as_bytes(), pw::OPSLIMIT_INTERACTIVE, pw::MEMLIMIT_INTERACTIVE).unwrap();
+    let s = std::str::from_utf8(&hp.0).unwrap().trim_end_matches('\0').to_string();
+    assert!(s.starts_with("$argon2"), "got {s}");
+    assert!(verify_password(&s, "argonpw"));
+    assert!(!verify_password(&s, "nope"));
+}
+
+#[test]
+fn unsupported_dollar_and_garbage_rejected() {
+    assert!(!verify_password("$6$unknownsha512cryptformat", "anything"));
     assert!(!verify_password("tooshort", "x"));
 }
 

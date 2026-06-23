@@ -32,6 +32,7 @@ sha1 = "0.10"
 sha2 = "0.10"
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+sodiumoxide = "0.2"
 libeq_pfs = { git = "https://github.com/cjab/libeq", package = "libeq_pfs" }
 libeq_wld = { git = "https://github.com/cjab/libeq", package = "libeq_wld" }
 image = { version = "0.25", default-features = false, features = ["bmp", "png", "dds"] }

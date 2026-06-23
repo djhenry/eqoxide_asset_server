@@ -15,14 +15,20 @@ fn hex_digest<D: Digest>(input: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
-/// Verify a provided password against the EQEmu `login_accounts.account_password`
-/// digest. EQEmu's loginserver hashes by its EncryptionMode; we detect the hex
-/// digest variant by length. The `$`-prefixed SCrypt/Argon2 modes are not
-/// supported in v1 and are rejected with a warning.
+/// Verify a provided password against an EQEmu `login_accounts.account_password`
+/// digest. EQEmu hashes by its loginserver EncryptionMode; we detect the stored
+/// format per-account: `$7$` = libsodium scrypt (mode 14), `$argon2` = libsodium
+/// argon2 (mode 13), else a hex digest by length (128→SHA512, 40→SHA1, 32→MD5).
 pub fn verify_password(stored: &str, provided: &str) -> bool {
     let stored = stored.trim();
+    if stored.starts_with("$7$") {
+        return scrypt_verify(stored, provided);
+    }
+    if stored.starts_with("$argon2") {
+        return argon2_verify(stored, provided);
+    }
     if stored.starts_with('$') {
-        tracing::warn!("account uses scrypt/argon2 password hashing; not supported in v1");
+        tracing::warn!("unsupported password hash format (prefix '$')");
         return false;
     }
     let computed = match stored.len() {
@@ -32,6 +38,52 @@ pub fn verify_password(stored: &str, provided: &str) -> bool {
         _ => return false,
     };
     computed.eq_ignore_ascii_case(stored)
+}
+
+fn scrypt_verify(stored: &str, provided: &str) -> bool {
+    use sodiumoxide::crypto::pwhash::scryptsalsa208sha256 as sc;
+    if sodiumoxide::init().is_err() {
+        tracing::error!("libsodium init failed");
+        return false;
+    }
+    let mut buf = [0u8; sc::HASHEDPASSWORDBYTES];
+    let b = stored.as_bytes();
+    if b.len() > buf.len() {
+        return false;
+    }
+    buf[..b.len()].copy_from_slice(b);
+    sc::pwhash_verify(&sc::HashedPassword(buf), provided.as_bytes())
+}
+
+fn argon2_verify(stored: &str, provided: &str) -> bool {
+    if sodiumoxide::init().is_err() {
+        tracing::error!("libsodium init failed");
+        return false;
+    }
+    let b = stored.as_bytes();
+    // Dispatch by prefix to the correct argon2 variant module.
+    // EQEmu mode 13 uses libsodium's generic crypto_pwhash_str_verify which
+    // accepts both argon2id ($argon2id$) and argon2i ($argon2i$) hashes.
+    if stored.starts_with("$argon2id$") {
+        use sodiumoxide::crypto::pwhash::argon2id13 as pw;
+        let mut buf = [0u8; pw::HASHEDPASSWORDBYTES];
+        if b.len() > buf.len() {
+            return false;
+        }
+        buf[..b.len()].copy_from_slice(b);
+        pw::pwhash_verify(&pw::HashedPassword(buf), provided.as_bytes())
+    } else if stored.starts_with("$argon2i$") {
+        use sodiumoxide::crypto::pwhash::argon2i13 as pw;
+        let mut buf = [0u8; pw::HASHEDPASSWORDBYTES];
+        if b.len() > buf.len() {
+            return false;
+        }
+        buf[..b.len()].copy_from_slice(b);
+        pw::pwhash_verify(&pw::HashedPassword(buf), provided.as_bytes())
+    } else {
+        tracing::warn!("unsupported argon2 variant in hash");
+        false
+    }
 }
 
 pub struct MariaAccountStore {
