@@ -43,6 +43,7 @@ impl AccountStore for MariaAccountStore {
         }
         // Miss: block on a DB fetch. `verify` is sync (called from an async
         // handler); use a current-thread block to query, then cache.
+        // requires the multi-thread runtime (guaranteed by #[tokio::main] full features); a current_thread runtime would panic here
         let stored = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(self.fetch_password(username))
         });

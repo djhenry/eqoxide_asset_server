@@ -34,12 +34,12 @@ pub fn build_from_raw(
     Ok(vec![common])
 }
 
-fn collect_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
-            collect_files(root, &path, out)?;
+            collect_files(&path, out)?;
         } else {
             out.push(path);
         }
@@ -54,7 +54,7 @@ pub fn ingest_dir(
     dir: &Path,
 ) -> anyhow::Result<Manifest> {
     let mut paths = Vec::new();
-    collect_files(dir, dir, &mut paths)?;
+    collect_files(dir, &mut paths)?;
     paths.sort();
 
     let mut files = Vec::new();
