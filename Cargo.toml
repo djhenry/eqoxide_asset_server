@@ -1,0 +1,33 @@
+[package]
+name = "eqoxide_asset_server"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "eqoxide_asset_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "eqoxide-assets"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+thiserror = "1"
+blake3 = "1"
+fastcdc = "3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+axum = "0.7"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+sqlx = { version = "0.8", default-features = false, features = ["mysql", "runtime-tokio"] }
+hex = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
