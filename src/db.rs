@@ -51,7 +51,11 @@ impl AccountStore for MariaAccountStore {
                 self.creds.write().unwrap().insert(username.to_string(), pw.clone());
                 verify_password(&pw, password)
             }
-            _ => false,
+            Ok(None) => false, // unknown account
+            Err(e) => {
+                tracing::warn!("account lookup failed for {username}: {e}");
+                false
+            }
         }
     }
 }
