@@ -12,6 +12,8 @@ eq_client_lite client over HTTP, authenticated against EQEmu's MariaDB.
     EQEMU_DB_URL=mysql://peq:peqpass@127.0.0.1:3306/peq \
       cargo run --release -- serve --data ./data --addr 0.0.0.0:8088 --secret-file ./data/secret
 
+> The server reads `EQEMU_DB_URL` from the environment. When running the container directly with `podman run`, pass `-e EQEMU_DB_URL=mysql://peq:peqpass@<host>:3306/peq` and ensure `/data/secret` exists.
+
 ## Run alongside EQEmu (podman)
     podman compose -f ~/git/EQEmu/compose.yaml -f compose.assets.yaml up --build
 

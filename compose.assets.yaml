@@ -7,10 +7,12 @@ services:
     build:
       context: .
       dockerfile: Containerfile
+    restart: unless-stopped
     depends_on:
       mariadb:
         condition: service_healthy
     environment:
+      # EQEMU_DB_PASSWORD must match EQEmu's compose stack (its MARIADB_PASSWORD); override via .env if changed.
       EQEMU_DB_URL: mysql://peq:${EQEMU_DB_PASSWORD:-peqpass}@mariadb:3306/peq
     volumes:
       - eqemu-assets-data:/data
