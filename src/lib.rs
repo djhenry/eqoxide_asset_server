@@ -4,6 +4,7 @@ pub mod auth;
 pub mod cas;
 pub mod chunker;
 pub mod manifest;
+pub mod server;
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
