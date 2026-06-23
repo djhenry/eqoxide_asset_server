@@ -1,6 +1,7 @@
 //! eqoxide_asset_server — derived-asset delivery for EQEmu.
 
 pub mod cas;
+pub mod chunker;
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
