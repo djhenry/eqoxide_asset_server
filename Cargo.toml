@@ -29,6 +29,11 @@ sqlx = { version = "0.8", default-features = false, features = ["mysql", "runtim
 hex = "0.4"
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+libeq_pfs = { git = "https://github.com/cjab/libeq", package = "libeq_pfs" }
+libeq_wld = { git = "https://github.com/cjab/libeq", package = "libeq_wld" }
+image = { version = "0.25", default-features = false, features = ["bmp", "png", "dds"] }
+gltf = { version = "1", features = ["import", "extras"] }
+glam = "0.29"
 
 [dev-dependencies]
 tempfile = "3"

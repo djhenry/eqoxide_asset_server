@@ -22,8 +22,9 @@ struct Cli {
 enum Cmd {
     /// Chunk a directory of derived assets into the CAS + a manifest.
     Build {
-        #[arg(long)] set: String,
-        #[arg(long)] from: PathBuf,
+        #[arg(long)] set: Option<String>,
+        #[arg(long)] from: Option<PathBuf>,
+        #[arg(long)] raw: Option<PathBuf>,
         #[arg(long)] out: PathBuf,
     },
     /// Run the HTTP asset server.
@@ -47,11 +48,19 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     match Cli::parse().cmd {
-        Cmd::Build { set, from, out } => {
+        Cmd::Build { set, from, raw, out } => {
             let cas = Cas::new(&out);
             let store = ManifestStore::new(&out);
-            let m = ingest_dir(&cas, &store, &set, &from)?;
-            println!("built set '{}' version {} ({} files)", m.set, m.version, m.files.len());
+            if let Some(raw_dir) = raw {
+                let work = out.join("work");
+                let ms = eqoxide_asset_server::build::build_from_raw(&cas, &store, &raw_dir, &work)?;
+                println!("built {} set(s) from raw archives", ms.len());
+            } else {
+                let set = set.expect("--set required without --raw");
+                let from = from.expect("--from required without --raw");
+                let m = ingest_dir(&cas, &store, &set, &from)?;
+                println!("built set '{}' version {} ({} files)", m.set, m.version, m.files.len());
+            }
             Ok(())
         }
         Cmd::Serve { data, addr, db, secret_file } => {

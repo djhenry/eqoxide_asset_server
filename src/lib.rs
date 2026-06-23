@@ -4,6 +4,7 @@ pub mod auth;
 pub mod build;
 pub mod cas;
 pub mod chunker;
+pub mod convert;
 pub mod db;
 pub mod manifest;
 pub mod server;
