@@ -2,6 +2,7 @@
 
 pub mod cas;
 pub mod chunker;
+pub mod manifest;
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
