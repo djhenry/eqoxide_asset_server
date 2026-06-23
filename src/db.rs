@@ -1,5 +1,10 @@
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{OnceLock, RwLock};
+
+fn ensure_sodium() -> bool {
+    static SODIUM: OnceLock<bool> = OnceLock::new();
+    *SODIUM.get_or_init(|| sodiumoxide::init().is_ok())
+}
 
 use md5::Md5;
 use sha1::Sha1;
@@ -42,13 +47,14 @@ pub fn verify_password(stored: &str, provided: &str) -> bool {
 
 fn scrypt_verify(stored: &str, provided: &str) -> bool {
     use sodiumoxide::crypto::pwhash::scryptsalsa208sha256 as sc;
-    if sodiumoxide::init().is_err() {
+    if !ensure_sodium() {
         tracing::error!("libsodium init failed");
         return false;
     }
     let mut buf = [0u8; sc::HASHEDPASSWORDBYTES];
     let b = stored.as_bytes();
-    if b.len() > buf.len() {
+    if b.len() >= buf.len() {
+        tracing::warn!("stored password hash too long / missing NUL terminator slot");
         return false;
     }
     buf[..b.len()].copy_from_slice(b);
@@ -56,7 +62,7 @@ fn scrypt_verify(stored: &str, provided: &str) -> bool {
 }
 
 fn argon2_verify(stored: &str, provided: &str) -> bool {
-    if sodiumoxide::init().is_err() {
+    if !ensure_sodium() {
         tracing::error!("libsodium init failed");
         return false;
     }
@@ -67,7 +73,8 @@ fn argon2_verify(stored: &str, provided: &str) -> bool {
     if stored.starts_with("$argon2id$") {
         use sodiumoxide::crypto::pwhash::argon2id13 as pw;
         let mut buf = [0u8; pw::HASHEDPASSWORDBYTES];
-        if b.len() > buf.len() {
+        if b.len() >= buf.len() {
+            tracing::warn!("stored password hash too long / missing NUL terminator slot");
             return false;
         }
         buf[..b.len()].copy_from_slice(b);
@@ -75,7 +82,8 @@ fn argon2_verify(stored: &str, provided: &str) -> bool {
     } else if stored.starts_with("$argon2i$") {
         use sodiumoxide::crypto::pwhash::argon2i13 as pw;
         let mut buf = [0u8; pw::HASHEDPASSWORDBYTES];
-        if b.len() > buf.len() {
+        if b.len() >= buf.len() {
+            tracing::warn!("stored password hash too long / missing NUL terminator slot");
             return false;
         }
         buf[..b.len()].copy_from_slice(b);
