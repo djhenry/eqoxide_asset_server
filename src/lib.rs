@@ -1,5 +1,6 @@
 //! eqoxide_asset_server — derived-asset delivery for EQEmu.
 
+pub mod auth;
 pub mod cas;
 pub mod chunker;
 pub mod manifest;

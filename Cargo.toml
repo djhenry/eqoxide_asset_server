@@ -27,6 +27,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sqlx = { version = "0.8", default-features = false, features = ["mysql", "runtime-tokio"] }
 hex = "0.4"
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3"
