@@ -1,15 +1,37 @@
 use std::collections::HashMap;
 use std::sync::RwLock;
 
+use md5::Md5;
+use sha1::Sha1;
+use sha2::{Digest, Sha512};
 use sqlx::mysql::MySqlPoolOptions;
 use sqlx::{MySqlPool, Row};
 
 use crate::auth::AccountStore;
 
+fn hex_digest<D: Digest>(input: &str) -> String {
+    let mut hasher = D::new();
+    hasher.update(input.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Verify a provided password against the EQEmu `login_accounts.account_password`
+/// digest. EQEmu's loginserver hashes by its EncryptionMode; we detect the hex
+/// digest variant by length. The `$`-prefixed SCrypt/Argon2 modes are not
+/// supported in v1 and are rejected with a warning.
 pub fn verify_password(stored: &str, provided: &str) -> bool {
-    // v1: EQEmu local/minilogin accounts store plaintext in account.password.
-    // Follow-up: if EncryptionMode is set, hash `provided` the same way before compare.
-    stored == provided
+    let stored = stored.trim();
+    if stored.starts_with('$') {
+        tracing::warn!("account uses scrypt/argon2 password hashing; not supported in v1");
+        return false;
+    }
+    let computed = match stored.len() {
+        128 => hex_digest::<Sha512>(provided),
+        40 => hex_digest::<Sha1>(provided),
+        32 => hex_digest::<Md5>(provided),
+        _ => return false,
+    };
+    computed.eq_ignore_ascii_case(stored)
 }
 
 pub struct MariaAccountStore {
@@ -27,11 +49,11 @@ impl MariaAccountStore {
     }
 
     async fn fetch_password(&self, username: &str) -> anyhow::Result<Option<String>> {
-        let row = sqlx::query("SELECT password FROM account WHERE name = ? LIMIT 1")
+        let row = sqlx::query("SELECT account_password FROM login_accounts WHERE account_name = ? LIMIT 1")
             .bind(username)
             .fetch_optional(&self.pool)
             .await?;
-        Ok(row.map(|r| r.get::<String, _>("password")))
+        Ok(row.map(|r| r.get::<String, _>("account_password")))
     }
 }
 
