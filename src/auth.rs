@@ -24,6 +24,8 @@ impl TokenIssuer {
     }
 
     pub fn issue(&self, username: &str) -> String {
+        // token fields are '|'-separated; usernames must not contain '|'
+        debug_assert!(!username.contains('|'), "username must not contain '|'");
         let expiry = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
