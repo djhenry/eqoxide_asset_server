@@ -1,0 +1,28 @@
+# Overlay run alongside EQEmu's compose:
+#   podman compose -f ~/git/EQEmu/compose.yaml -f compose.assets.yaml up
+# EQEmu's repo is not modified.
+name: eqemu
+services:
+  assets:
+    build:
+      context: .
+      dockerfile: Containerfile
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    environment:
+      EQEMU_DB_URL: mysql://peq:${EQEMU_DB_PASSWORD:-peqpass}@mariadb:3306/peq
+    volumes:
+      - eqemu-assets-data:/data
+    ports:
+      - "0.0.0.0:8088:8088/tcp"
+    networks:
+      - eqemu-net
+
+volumes:
+  eqemu-assets-data:
+
+networks:
+  eqemu-net:
+    external: true
+    name: eqemu_eqemu-net
