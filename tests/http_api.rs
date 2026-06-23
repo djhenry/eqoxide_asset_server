@@ -60,6 +60,10 @@ async fn auth_then_fetch_manifest_and_chunk() {
     let noauth = http.get(format!("{base}/manifest/common")).send().await.unwrap();
     assert_eq!(noauth.status(), 401);
 
+    // chunk without token => 401
+    let noauth_chunk = http.get(format!("{base}/chunk/anyvalue")).send().await.unwrap();
+    assert_eq!(noauth_chunk.status(), 401);
+
     // manifest with token => 200 and has our file
     let m = http
         .get(format!("{base}/manifest/common"))
