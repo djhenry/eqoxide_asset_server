@@ -100,6 +100,147 @@ pub fn load_placed_objects(main_s3d: &Path, obj_s3d: &Path) -> anyhow::Result<Ve
     Ok(placed)
 }
 
+/// Extract terrain meshes from a zone's main `.s3d`, keeping texture names, in
+/// raw libeq coordinates. Mirrors the non-skinned mesh loop in
+/// `convert::convert_s3d_to_glb` (src/convert/mod.rs ~lines 126-207): walk
+/// `wld.meshes()`, flatten per-primitive indices, pick the base-color texture
+/// source. Zone terrain has no skin groups, so the bind-pose posing path used
+/// by the character converter does not apply here.
+fn load_terrain(main_s3d: &Path) -> anyhow::Result<Vec<ZoneMesh>> {
+    let file = std::fs::File::open(main_s3d).with_context(|| format!("open {}", main_s3d.display()))?;
+    let mut pfs = libeq_pfs::PfsReader::open(file)
+        .with_context(|| format!("parse PFS {}", main_s3d.display()))?;
+    let names: Vec<String> = pfs.filenames()?;
+    let mut out = Vec::new();
+    for wn in names.iter().filter(|f| f.to_lowercase().ends_with(".wld")) {
+        let bytes = match pfs.get(wn) {
+            Ok(Some(b)) => b,
+            Ok(None) => continue,
+            Err(e) => { eprintln!("zone: failed to read {wn}: {e}"); continue; }
+        };
+        let wld = match libeq_wld::load(&bytes) { Ok(w) => w, Err(_) => continue };
+        for mesh in wld.meshes() {
+            let all_pos = mesh.positions();
+            if all_pos.is_empty() { continue; }
+            let all_nrm = mesh.normals();
+            let all_uv = mesh.texture_coordinates();
+            for prim in mesh.primitives() {
+                let idx: Vec<u32> = prim.indices();
+                if idx.is_empty() { continue; }
+                let positions = idx.iter().map(|&i| all_pos[i as usize]).collect();
+                let normals = idx.iter().map(|&i| all_nrm.get(i as usize).copied().unwrap_or([0.0, 0.0, 1.0])).collect();
+                let uvs = idx.iter().map(|&i| all_uv.get(i as usize).copied().unwrap_or([0.0, 0.0])).collect();
+                let texture_name = prim.material().base_color_texture().and_then(|t| t.source());
+                out.push(ZoneMesh {
+                    positions, normals, uvs,
+                    indices: (0..idx.len() as u32).collect(),
+                    texture_name,
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Bake a zone into a single glb: terrain from `main_s3d` plus placed objects
+/// from `obj_s3d` (when present). Positions stay in raw libeq space (no
+/// re-orientation). Each distinct EQ texture name becomes one named glTF
+/// material+image, decoded from whichever archive contains it. Reuses
+/// `convert::write_glb` and `convert::load_texture_from_archive`.
+pub fn bake_zone(main_s3d: &Path, obj_s3d: Option<&Path>, output_glb: &Path) -> anyhow::Result<()> {
+    use crate::convert::{load_texture_from_archive, write_glb, MaterialData, MeshData, PrimitiveData, TextureData};
+
+    // Gather every mesh: terrain + placed objects, all in raw libeq coords.
+    let mut meshes = load_terrain(main_s3d)?;
+    if let Some(obj) = obj_s3d {
+        meshes.extend(load_placed_objects(main_s3d, obj)?);
+    }
+    if meshes.is_empty() {
+        anyhow::bail!("no zone meshes found in {}", main_s3d.display());
+    }
+
+    // Open archives once for texture decode (textures may live in either).
+    let mut pfs_list: Vec<libeq_pfs::PfsReader<std::fs::File>> = Vec::new();
+    pfs_list.push(libeq_pfs::PfsReader::open(
+        std::fs::File::open(main_s3d).with_context(|| format!("open {}", main_s3d.display()))?,
+    )?);
+    if let Some(obj) = obj_s3d {
+        pfs_list.push(libeq_pfs::PfsReader::open(
+            std::fs::File::open(obj).with_context(|| format!("open {}", obj.display()))?,
+        )?);
+    }
+
+    // Merge all meshes into one glTF mesh with per-mesh primitives, one named
+    // material per distinct texture name.
+    let mut merged_positions: Vec<[f32; 3]> = Vec::new();
+    let mut merged_normals: Vec<[f32; 3]> = Vec::new();
+    let mut merged_uvs: Vec<[f32; 2]> = Vec::new();
+    let mut primitives: Vec<PrimitiveData> = Vec::new();
+    let mut materials: Vec<MaterialData> = Vec::new();
+    let mut textures: Vec<TextureData> = Vec::new();
+    let mut tex_map: HashMap<String, usize> = HashMap::new(); // tex name -> texture idx
+    let mut mat_map: HashMap<String, usize> = HashMap::new(); // tex name -> material idx
+
+    for m in &meshes {
+        if m.positions.is_empty() || m.indices.is_empty() { continue; }
+        let offset = merged_positions.len() as u32;
+        merged_positions.extend_from_slice(&m.positions);
+        merged_normals.extend_from_slice(&m.normals);
+        merged_uvs.extend_from_slice(&m.uvs);
+        let indices: Vec<u32> = m.indices.iter().map(|&i| i + offset).collect();
+
+        let key = m.texture_name.clone().unwrap_or_else(|| "untextured".to_string());
+        let material_idx = match mat_map.get(&key) {
+            Some(&idx) => idx,
+            None => {
+                let texture_idx = if let Some(src) = &m.texture_name {
+                    match tex_map.get(src) {
+                        Some(&t) => Some(t),
+                        None => {
+                            let lower = src.to_lowercase();
+                            let png = pfs_list.iter_mut()
+                                .find_map(|pfs| load_texture_from_archive(pfs, &lower));
+                            match png {
+                                Some(png_bytes) => {
+                                    let t = textures.len();
+                                    textures.push(TextureData { name: lower, png_bytes });
+                                    tex_map.insert(src.clone(), t);
+                                    Some(t)
+                                }
+                                None => None,
+                            }
+                        }
+                    }
+                } else {
+                    None
+                };
+                let idx = materials.len();
+                materials.push(MaterialData {
+                    name: m.texture_name.clone().unwrap_or_else(|| "untextured".to_string()),
+                    texture_idx,
+                    base_color: [1.0, 1.0, 1.0, 1.0],
+                });
+                mat_map.insert(key.clone(), idx);
+                idx
+            }
+        };
+        primitives.push(PrimitiveData { indices, material_idx });
+    }
+
+    if primitives.is_empty() {
+        anyhow::bail!("no renderable primitives for {}", main_s3d.display());
+    }
+
+    let mesh = vec![MeshData {
+        name: "zone".to_string(),
+        positions: merged_positions,
+        normals: merged_normals,
+        uvs: merged_uvs,
+        primitives,
+    }];
+    write_glb(output_glb, &mesh, &materials, &textures)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -10,28 +10,28 @@ use libeq_wld::parser::{
     Dag, DmSpriteDef2, HierarchicalSpriteDef, Track, TrackDef, WldDoc,
 };
 
-struct PrimitiveData {
-    indices: Vec<u32>,
-    material_idx: usize,
+pub(crate) struct PrimitiveData {
+    pub(crate) indices: Vec<u32>,
+    pub(crate) material_idx: usize,
 }
 
-struct MeshData {
-    name: String,
-    positions: Vec<[f32; 3]>,
-    normals: Vec<[f32; 3]>,
-    uvs: Vec<[f32; 2]>,
-    primitives: Vec<PrimitiveData>,
+pub(crate) struct MeshData {
+    pub(crate) name: String,
+    pub(crate) positions: Vec<[f32; 3]>,
+    pub(crate) normals: Vec<[f32; 3]>,
+    pub(crate) uvs: Vec<[f32; 2]>,
+    pub(crate) primitives: Vec<PrimitiveData>,
 }
 
-struct TextureData {
-    name: String,
-    png_bytes: Vec<u8>,
+pub(crate) struct TextureData {
+    pub(crate) name: String,
+    pub(crate) png_bytes: Vec<u8>,
 }
 
-struct MaterialData {
-    name: String,
-    texture_idx: Option<usize>,
-    base_color: [f32; 4],
+pub(crate) struct MaterialData {
+    pub(crate) name: String,
+    pub(crate) texture_idx: Option<usize>,
+    pub(crate) base_color: [f32; 4],
 }
 
 pub fn s3d_to_glb(input_s3d: &Path, output_glb: &Path, skinned: bool) -> Result<()> {
@@ -280,7 +280,7 @@ fn get_or_create_material(
     idx
 }
 
-fn load_texture_from_archive(pfs: &mut libeq_pfs::PfsReader<fs::File>, name: &str) -> Option<Vec<u8>> {
+pub(crate) fn load_texture_from_archive(pfs: &mut libeq_pfs::PfsReader<fs::File>, name: &str) -> Option<Vec<u8>> {
     let lower = name.to_lowercase();
 
     // Try the name as-is first
@@ -1393,7 +1393,7 @@ fn analyze_anims(input: &Path) -> Result<()> {
     Ok(())
 }
 
-fn write_glb(
+pub(crate) fn write_glb(
     output: &Path,
     meshes: &[MeshData],
     materials: &[MaterialData],
