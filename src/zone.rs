@@ -48,7 +48,11 @@ pub fn load_placed_objects(main_s3d: &Path, obj_s3d: &Path) -> anyhow::Result<Ve
     let obj_names: Vec<String> = obj_pfs.filenames()?;
     let mut models: HashMap<String, Vec<ZoneMesh>> = HashMap::new();
     for wn in obj_names.iter().filter(|f| f.to_lowercase().ends_with(".wld")) {
-        let bytes = match obj_pfs.get(wn) { Ok(Some(b)) => b, _ => continue };
+        let bytes = match obj_pfs.get(wn) {
+            Ok(Some(b)) => b,
+            Ok(None) => continue,
+            Err(e) => { eprintln!("zone: failed to read {wn}: {e}"); continue; }
+        };
         let wld = match libeq_wld::load(&bytes) { Ok(w) => w, Err(_) => continue };
         for mesh in wld.meshes() {
             let base = match mesh.name() { Some(n) => object_base_name(n), None => continue };
@@ -77,7 +81,11 @@ pub fn load_placed_objects(main_s3d: &Path, obj_s3d: &Path) -> anyhow::Result<Ve
     let main_names: Vec<String> = main_pfs.filenames()?;
     let mut placed = Vec::new();
     for wn in main_names.iter().filter(|f| f.to_lowercase().ends_with(".wld")) {
-        let bytes = match main_pfs.get(wn) { Ok(Some(b)) => b, _ => continue };
+        let bytes = match main_pfs.get(wn) {
+            Ok(Some(b)) => b,
+            Ok(None) => continue,
+            Err(e) => { eprintln!("zone: failed to read {wn}: {e}"); continue; }
+        };
         let wld = match libeq_wld::load(&bytes) { Ok(w) => w, Err(_) => continue };
         for obj in wld.objects() {
             let base = match obj.model_name() { Some(n) => object_base_name(n), None => continue };
