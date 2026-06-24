@@ -204,7 +204,34 @@ fn load_terrain(main_s3d: &Path) -> anyhow::Result<Vec<ZoneMesh>> {
             }
         }
     }
-    Ok(out)
+    // EQ zone WLDs split terrain into thousands of tiny primitives (qeynos: ~8500).
+    // Emitting one glb mesh primitive per WLD primitive makes the client's from_glb
+    // pathologically slow + memory-hungry (per-primitive glTF overhead). Merge all
+    // terrain primitives that share a texture into one mesh — the renderer merges by
+    // texture at upload anyway, so this is the same geometry in far fewer primitives.
+    Ok(merge_by_texture(out))
+}
+
+/// Concatenate meshes that share a `texture_name` into one (offsetting indices).
+/// Reduces a zone's terrain from thousands of tiny primitives to one-per-texture.
+fn merge_by_texture(meshes: Vec<ZoneMesh>) -> Vec<ZoneMesh> {
+    use std::collections::HashMap;
+    let mut groups: HashMap<Option<String>, ZoneMesh> = HashMap::new();
+    for m in meshes {
+        let entry = groups.entry(m.texture_name.clone()).or_insert_with(|| ZoneMesh {
+            positions: Vec::new(),
+            normals: Vec::new(),
+            uvs: Vec::new(),
+            indices: Vec::new(),
+            texture_name: m.texture_name.clone(),
+        });
+        let base = entry.positions.len() as u32;
+        entry.positions.extend(m.positions);
+        entry.normals.extend(m.normals);
+        entry.uvs.extend(m.uvs);
+        entry.indices.extend(m.indices.iter().map(|&i| i + base));
+    }
+    groups.into_values().collect()
 }
 
 /// Bake a zone into a single glb: terrain from `main_s3d` plus placed objects
