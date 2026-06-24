@@ -183,12 +183,16 @@ fn load_terrain(main_s3d: &Path) -> anyhow::Result<Vec<ZoneMesh>> {
         for mesh in wld.meshes() {
             let all_pos = mesh.positions();
             if all_pos.is_empty() { continue; }
+            // Terrain mesh vertices are local to the mesh's center; fold the center
+            // into world-space positions (glb has no per-mesh center field), exactly
+            // as load_object_models does — otherwise every terrain mesh piles at 0,0,0.
+            let (cx, cy, cz) = mesh.center();
             let all_nrm = mesh.normals();
             let all_uv = mesh.texture_coordinates();
             for prim in mesh.primitives() {
                 let idx: Vec<u32> = prim.indices();
                 if idx.is_empty() { continue; }
-                let positions = idx.iter().map(|&i| all_pos[i as usize]).collect();
+                let positions = idx.iter().map(|&i| { let p = all_pos[i as usize]; [p[0] + cx, p[1] + cy, p[2] + cz] }).collect();
                 let normals = idx.iter().map(|&i| all_nrm.get(i as usize).copied().unwrap_or([0.0, 0.0, 1.0])).collect();
                 let uvs = idx.iter().map(|&i| all_uv.get(i as usize).copied().unwrap_or([0.0, 0.0])).collect();
                 let texture_name = prim.material().base_color_texture().and_then(|t| t.source());
