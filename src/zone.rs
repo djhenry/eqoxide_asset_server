@@ -100,6 +100,35 @@ pub fn load_placed_objects(main_s3d: &Path, obj_s3d: &Path) -> anyhow::Result<Ve
     Ok(placed)
 }
 
+/// Deduplicates identical `(position, normal, uv)` vertices (keyed by `f32::to_bits`,
+/// exact/lossless) and rebuilds the index buffer, preserving `texture_name`.
+pub fn weld(mesh: &ZoneMesh) -> ZoneMesh {
+    use std::collections::HashMap;
+    // key on the bit patterns of position+normal+uv (exact, lossless)
+    let mut map: HashMap<[u32; 8], u32> = HashMap::new();
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    let mut uvs = Vec::new();
+    let mut indices = Vec::with_capacity(mesh.indices.len());
+    for &i in &mesh.indices {
+        let i = i as usize;
+        let p = mesh.positions[i];
+        let n = mesh.normals.get(i).copied().unwrap_or([0.0, 0.0, 1.0]);
+        let u = mesh.uvs.get(i).copied().unwrap_or([0.0, 0.0]);
+        let key = [
+            p[0].to_bits(), p[1].to_bits(), p[2].to_bits(),
+            n[0].to_bits(), n[1].to_bits(), n[2].to_bits(),
+            u[0].to_bits(), u[1].to_bits(),
+        ];
+        let idx = *map.entry(key).or_insert_with(|| {
+            positions.push(p); normals.push(n); uvs.push(u);
+            (positions.len() - 1) as u32
+        });
+        indices.push(idx);
+    }
+    ZoneMesh { positions, normals, uvs, indices, texture_name: mesh.texture_name.clone() }
+}
+
 /// Extract terrain meshes from a zone's main `.s3d`, keeping texture names, in
 /// raw libeq coordinates. Mirrors the non-skinned mesh loop in
 /// `convert::convert_s3d_to_glb` (src/convert/mod.rs ~lines 126-207): walk
@@ -239,6 +268,30 @@ pub fn bake_zone(main_s3d: &Path, obj_s3d: Option<&Path>, output_glb: &Path) -> 
         primitives,
     }];
     write_glb(output_glb, &mesh, &materials, &textures)
+}
+
+#[cfg(test)]
+mod weld_tests {
+    use super::*;
+    #[test]
+    fn welds_duplicate_vertices() {
+        // A de-indexed quad: 2 triangles, 6 vertices, but only 4 are distinct.
+        let v = |x: f32, z: f32| [x, 0.0, z];
+        let m = ZoneMesh {
+            positions: vec![v(0.,0.), v(1.,0.), v(1.,1.),   v(0.,0.), v(1.,1.), v(0.,1.)],
+            normals:   vec![[0.,1.,0.]; 6],
+            uvs:       vec![[0.,0.]; 6],
+            indices:   vec![0,1,2,3,4,5],
+            texture_name: Some("floor.bmp".into()),
+        };
+        let w = weld(&m);
+        assert_eq!(w.positions.len(), 4, "4 distinct corners");
+        assert_eq!(w.indices.len(), 6, "still 6 indices (2 triangles)");
+        // reconstructed triangles equal the original positions
+        let recon: Vec<[f32;3]> = w.indices.iter().map(|&i| w.positions[i as usize]).collect();
+        assert_eq!(recon, m.positions);
+        assert_eq!(w.texture_name.as_deref(), Some("floor.bmp"));
+    }
 }
 
 #[cfg(test)]
