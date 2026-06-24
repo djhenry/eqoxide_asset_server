@@ -8,12 +8,21 @@ use crate::zone::bake_zone;
 /// The `common` model set: (source archive, model code, output `.glb`). A `None`
 /// model code converts the whole archive (one model per `global*_chr.s3d`); a
 /// `Some("XXX")` extracts that single 3-char EQ model out of a multi-model archive.
-/// Mirrors the historical `tools/import_models.sh` recipe so `common` is fully
-/// reproducible from raw EQ files (no curated/hand-built artifacts). Other EQEmu
-/// operators get the same set from their own `EQ_Files`. Missing/unparseable
+/// Reproducible from raw EQ files alone (no curated/hand-built artifacts) — other
+/// EQEmu operators get the same set from their own `EQ_Files`. Missing/unparseable
 /// archives are skipped with a warning, not fatal.
+///
+/// Two groups:
+///  1. The client's render archetypes (`humanoid`, `elf`, … — the names
+///     `models::archetype_to_chr_s3d` loads). These must keep their exact names +
+///     source archives so the client renders unchanged.
+///  2. Every playable race+gender as `race_<archivecode>.glb` (the widest base-race
+///     set, for the client to map spawns onto). Named by raw archive code rather
+///     than race name to avoid mislabeling (EQ's `hom`/`ham` half-elf/halfling
+///     codes are easy to swap).
 const COMMON_MODELS: &[(&str, Option<&str>, &str)] = &[
-    ("globalhom_chr.s3d",     None,        "humanoid.glb"),  // half-elf male (generic humanoid)
+    // --- client render archetypes (match models::archetype_to_chr_s3d) ---
+    ("globalhum_chr.s3d",     None,        "humanoid.glb"),  // human male
     ("globalelf_chr.s3d",     None,        "elf.glb"),       // wood elf
     ("globaldwf_chr.s3d",     None,        "dwarf.glb"),     // dwarf
     ("globalgnm_chr.s3d",     None,        "gnoll.glb"),     // gnome (placeholder for gnoll)
@@ -29,6 +38,22 @@ const COMMON_MODELS: &[(&str, Option<&str>, &str)] = &[
     ("airplane_chr.s3d",      Some("WAS"), "wasp.glb"),
     ("burningwood_chr.s3d",   Some("WUR"), "worm.glb"),      // wurm (serpentine)
     ("airplane_chr.s3d",      Some("AVI"), "bird.glb"),      // aviak
+    // --- playable races with a standalone model in their own archive, both genders ---
+    // Omitted: dark elf (dam/daf), erudite (erm/erf), halfling (ham/haf), high elf (him/hif).
+    // Their `_chr` archives carry only texture/variation data and share another race's
+    // skeleton, so converting them standalone yields a ~350 KB partial ("blob"). EQ/the
+    // client renders them from a base race anyway (DKE/HEF→elf, ERU→humanoid).
+    ("globalhum_chr.s3d",     None, "race_hum.glb"), ("globalhuf_chr.s3d", None, "race_huf.glb"),
+    ("globalbam_chr.s3d",     None, "race_bam.glb"), ("globalbaf_chr.s3d", None, "race_baf.glb"),
+    ("globalelm_chr.s3d",     None, "race_elm.glb"), ("globalelf_chr.s3d", None, "race_elf.glb"),
+    ("globalhom_chr.s3d",     None, "race_hom.glb"), ("globalhof_chr.s3d", None, "race_hof.glb"),
+    ("globaldwm_chr.s3d",     None, "race_dwm.glb"), ("globaldwf_chr.s3d", None, "race_dwf.glb"),
+    ("globalgnm_chr.s3d",     None, "race_gnm.glb"), ("globalgnf_chr.s3d", None, "race_gnf.glb"),
+    ("globalikm_chr.s3d",     None, "race_ikm.glb"), ("globalikf_chr.s3d", None, "race_ikf.glb"),
+    ("globalkem_chr.s3d",     None, "race_kem.glb"), ("globalkef_chr.s3d", None, "race_kef.glb"),
+    ("globalogm_chr.s3d",     None, "race_ogm.glb"), ("globalogf_chr.s3d", None, "race_ogf.glb"),
+    ("globaltrm_chr.s3d",     None, "race_trm.glb"), ("globaltrf_chr.s3d", None, "race_trf.glb"),
+    ("globalpcfroglok_chr.s3d", None, "race_pcfroglok.glb"),
 ];
 
 pub fn build_from_raw(
