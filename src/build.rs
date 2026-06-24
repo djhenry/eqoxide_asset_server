@@ -39,10 +39,9 @@ const COMMON_MODELS: &[(&str, Option<&str>, &str)] = &[
     ("burningwood_chr.s3d",   Some("WUR"), "worm.glb"),      // wurm (serpentine)
     ("airplane_chr.s3d",      Some("AVI"), "bird.glb"),      // aviak
     // --- playable races with a standalone model in their own archive, both genders ---
-    // Omitted: dark elf (dam/daf), erudite (erm/erf), halfling (ham/haf), high elf (him/hif).
-    // Their `_chr` archives carry only texture/variation data and share another race's
-    // skeleton, so converting them standalone yields a ~350 KB partial ("blob"). EQ/the
-    // client renders them from a base race anyway (DKE/HEF→elf, ERU→humanoid).
+    // Every playable race+gender has its own `global<code>_chr.s3d` skeletal model in
+    // the Titanium client (the client loads a distinct archive per race; there is no
+    // model sharing). The client maps each race to its own model with no fallback.
     ("globalhum_chr.s3d",     None, "race_hum.glb"), ("globalhuf_chr.s3d", None, "race_huf.glb"),
     ("globalbam_chr.s3d",     None, "race_bam.glb"), ("globalbaf_chr.s3d", None, "race_baf.glb"),
     ("globalelm_chr.s3d",     None, "race_elm.glb"), ("globalelf_chr.s3d", None, "race_elf.glb"),
@@ -53,6 +52,10 @@ const COMMON_MODELS: &[(&str, Option<&str>, &str)] = &[
     ("globalkem_chr.s3d",     None, "race_kem.glb"), ("globalkef_chr.s3d", None, "race_kef.glb"),
     ("globalogm_chr.s3d",     None, "race_ogm.glb"), ("globalogf_chr.s3d", None, "race_ogf.glb"),
     ("globaltrm_chr.s3d",     None, "race_trm.glb"), ("globaltrf_chr.s3d", None, "race_trf.glb"),
+    ("globalerm_chr.s3d",     None, "race_erm.glb"), ("globalerf_chr.s3d", None, "race_erf.glb"),
+    ("globalhim_chr.s3d",     None, "race_him.glb"), ("globalhif_chr.s3d", None, "race_hif.glb"),
+    ("globaldam_chr.s3d",     None, "race_dam.glb"), ("globaldaf_chr.s3d", None, "race_daf.glb"),
+    ("globalham_chr.s3d",     None, "race_ham.glb"), ("globalhaf_chr.s3d", None, "race_haf.glb"),
     ("globalpcfroglok_chr.s3d", None, "race_pcfroglok.glb"),
 ];
 

@@ -30,6 +30,24 @@ enum Cmd {
         /// existing common untouched; avoids re-converting character archives).
         #[arg(long)] zones_only: bool,
     },
+    /// Convert a single `.s3d` archive to a `.glb` model (skinned by default).
+    /// Useful for producing one race/character model without re-baking the whole set.
+    Convert {
+        /// Path to the input `.s3d` archive.
+        #[arg(long)] archive: PathBuf,
+        /// Output `.glb` path.
+        #[arg(long)] out: PathBuf,
+        /// Select a single model by its 3-char EQ code (e.g. "SKE") from a
+        /// multi-model archive. Omit for one-model-per-archive `global*_chr.s3d`.
+        #[arg(long)] model_code: Option<String>,
+        /// Convert as a static (non-skinned) model.
+        #[arg(long)] static_model: bool,
+    },
+    /// Print the skeleton bone names and animation track-name prefixes inside a
+    /// character `.s3d` archive (diagnostic for missing animations).
+    Analyze {
+        #[arg(long)] archive: PathBuf,
+    },
     /// Run the HTTP asset server.
     Serve {
         #[arg(long)] data: PathBuf,
@@ -69,6 +87,20 @@ async fn main() -> anyhow::Result<()> {
                 println!("built set '{}' version {} ({} files)", m.set, m.version, m.files.len());
             }
             Ok(())
+        }
+        Cmd::Convert { archive, out, model_code, static_model } => {
+            if let Some(parent) = out.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            eqoxide_asset_server::convert::s3d_to_glb_model(
+                &archive, &out, !static_model, model_code.as_deref(),
+            )?;
+            let bytes = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
+            println!("converted {} -> {} ({} bytes)", archive.display(), out.display(), bytes);
+            Ok(())
+        }
+        Cmd::Analyze { archive } => {
+            eqoxide_asset_server::convert::analyze_anims(&archive)
         }
         Cmd::Serve { data, addr, db, secret_file } => {
             let accounts = MariaAccountStore::connect(&db).await?;

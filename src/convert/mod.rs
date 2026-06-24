@@ -741,6 +741,94 @@ fn gather_anims(doc: &WldDoc, skel: &Skel) -> Vec<Anim> {
     anims
 }
 
+/// The 3-char EQ model code of a skeleton (e.g. "DAM"), taken from the leading
+/// chars of a bone's base-track name (`DAM_TRACK`, `DAMPEBIP01_TRACK`, ...).
+fn skel_model_code(skel: &Skel) -> Option<String> {
+    skel.base_track.iter().find(|b| b.len() >= 3).map(|b| b[..3].to_string())
+}
+
+/// A handful of human-like reskin races ship a `_chr.s3d` with the mesh + bind
+/// pose but NO animation tracks; the Titanium client animates them from a base
+/// race with an identical skeleton. Maps a model code to its
+/// `(donor archive filename, donor model code)`. Bones match across the two by
+/// name once the 3-char model code is stripped (verified: only the cosmetic
+/// hair-point leaf differs, which simply holds its bind pose).
+fn anim_donor(code: &str) -> Option<(&'static str, &'static str)> {
+    match code.to_ascii_uppercase().as_str() {
+        "DAM" | "HIM" | "HAM" | "ERM" => Some(("globalhum_chr.s3d", "HUM")), // -> Human male
+        "DAF" | "HIF" | "HAF" | "ERF" => Some(("globalhuf_chr.s3d", "HUF")), // -> Human female
+        _ => None,
+    }
+}
+
+/// Borrow animation clips for a skeleton that has none, from its donor race's
+/// archive (see [`anim_donor`]). Donor clips are re-indexed onto the target
+/// skeleton by matching bone names with the 3-char model code stripped. Returns
+/// an empty vec when there is no donor or the donor archive can't be read.
+fn borrow_anims(input: &Path, target: &Skel) -> Vec<Anim> {
+    let Some(code) = skel_model_code(target) else { return Vec::new() };
+    let Some((donor_file, _donor_code)) = anim_donor(&code) else { return Vec::new() };
+    let Some(donor_path) = input.parent().map(|p| p.join(donor_file)) else { return Vec::new() };
+
+    let file = match fs::File::open(&donor_path) {
+        Ok(f) => f,
+        Err(_) => {
+            tracing::warn!("anim donor {} missing — {} will have no animations", donor_path.display(), code);
+            return Vec::new();
+        }
+    };
+    let mut pfs = match libeq_pfs::PfsReader::open(file) {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+    let names = match pfs.filenames() {
+        Ok(n) => n,
+        Err(_) => return Vec::new(),
+    };
+    for wld_name in names.iter().filter(|f| f.to_lowercase().ends_with(".wld")) {
+        let bytes = match pfs.get(wld_name) {
+            Ok(Some(b)) => b,
+            _ => continue,
+        };
+        let doc = match WldDoc::parse(&bytes) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        let donor_skel = match build_skel(&doc, None) {
+            Some(s) => s,
+            None => continue,
+        };
+        let donor_anims = gather_anims(&doc, &donor_skel);
+        if donor_anims.is_empty() {
+            continue;
+        }
+        // donor bone suffix (code stripped) -> donor bone index
+        let donor_by_suffix: HashMap<&str, usize> = donor_skel.base_track.iter().enumerate()
+            .filter(|(_, b)| b.len() > 3)
+            .map(|(j, b)| (&b[3..], j))
+            .collect();
+        // target bone i -> donor bone j (same code-stripped suffix)
+        let map: Vec<Option<usize>> = target.base_track.iter()
+            .map(|b| if b.len() > 3 { donor_by_suffix.get(&b[3..]).copied() } else { None })
+            .collect();
+
+        let matched = map.iter().filter(|m| m.is_some()).count();
+        let remapped: Vec<Anim> = donor_anims.into_iter().map(|a| {
+            let mut bones: Vec<Option<Vec<(Vec3, Quat)>>> = vec![None; target.base_track.len()];
+            for (i, donor_j) in map.iter().enumerate() {
+                if let Some(j) = donor_j {
+                    bones[i] = a.bones.get(*j).cloned().flatten();
+                }
+            }
+            Anim { code: a.code, frame_ms: a.frame_ms, bones }
+        }).collect();
+        tracing::info!("{} borrowed {} anim clips from {} ({}/{} bones matched)",
+            code, remapped.len(), donor_file, matched, target.base_track.len());
+        return remapped;
+    }
+    Vec::new()
+}
+
 /// Map an EQ animation code (first 3 chars, e.g. "L01") to a semantic keyword so
 /// the renderer's name-substring clip selection ("idle"/"walk"/"run"/...) works.
 /// Standard EQ WLD locomotion/passive codes.
@@ -849,7 +937,12 @@ fn convert_s3d_to_glb_skinned(input: &Path, output: &Path, model_code: Option<&s
             Some(s) => s,
             None => continue,
         };
-        let anims = gather_anims(&doc, &skel);
+        let mut anims = gather_anims(&doc, &skel);
+        // Reskin races (dark/high/half elf, erudite) ship with no animation tracks;
+        // borrow them from a base race with the same skeleton.
+        if anims.is_empty() {
+            anims = borrow_anims(input, &skel);
+        }
 
         // When extracting one model from a multi-model archive, only its meshes
         // (name starts with the code) belong to this skeleton's skin_assignment bones.
@@ -1340,7 +1433,7 @@ fn list_models(input: &Path) -> Result<()> {
 }
 
 /// Inspect the skeleton and animation track naming inside a character archive.
-fn analyze_anims(input: &Path) -> Result<()> {
+pub fn analyze_anims(input: &Path) -> Result<()> {
     use std::collections::BTreeMap;
     let file = fs::File::open(input)?;
     let mut pfs = libeq_pfs::PfsReader::open(file)?;
@@ -1373,6 +1466,14 @@ fn analyze_anims(input: &Path) -> Result<()> {
                     println!("  dag[{}] base_track='{}'", i, tname);
                 }
                 base_names.push(tname.to_string());
+            }
+            // Dump every code-stripped bone suffix (skip leading 3-char model code)
+            // for donor-skeleton comparison.
+            if std::env::var("DUMP_BONES").is_ok() {
+                for b in &base_names {
+                    let suffix = if b.len() > 3 { &b[3..] } else { b.as_str() };
+                    println!("BONE {}", suffix);
+                }
             }
         }
         // Group ALL track names by leading 3-char animation code (Cxx/Lxx/etc.).
@@ -1873,6 +1974,23 @@ fn compute_bounds_f32x3(positions: &[[f32; 3]]) -> ([f32; 3], [f32; 3]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anim_donor_maps_reskin_races_to_human() {
+        // Male reskins -> human male; female -> human female.
+        for c in ["DAM", "HIM", "HAM", "ERM"] {
+            assert_eq!(anim_donor(c), Some(("globalhum_chr.s3d", "HUM")), "{c}");
+        }
+        for c in ["DAF", "HIF", "HAF", "ERF"] {
+            assert_eq!(anim_donor(c), Some(("globalhuf_chr.s3d", "HUF")), "{c}");
+        }
+        // Case-insensitive.
+        assert_eq!(anim_donor("dam"), Some(("globalhum_chr.s3d", "HUM")));
+        // Races that ship their own animations have no donor.
+        for c in ["HUM", "BAM", "ELM", "OGM", "TRM"] {
+            assert_eq!(anim_donor(c), None, "{c}");
+        }
+    }
 
     #[test]
     #[ignore = "requires ~/eq_assets/EQ_Files/globalhum_chr.s3d"]
