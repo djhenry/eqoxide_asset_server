@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use crate::cas::Cas;
 use crate::convert::s3d_to_glb;
 use crate::manifest::{Manifest, ManifestStore};
+use crate::zone::bake_zone;
 
 /// (archive filename, output model filename, skinned)
 const COMMON_MODELS: &[(&str, &str, bool)] = &[
@@ -32,6 +33,43 @@ pub fn build_from_raw(
     }
     let common = ingest_dir(cas, store, "common", &common_out)?;
     Ok(vec![common])
+}
+
+fn is_zone_archive(name: &str) -> bool {
+    let n = name.to_lowercase();
+    n.ends_with(".s3d")
+        && !n.starts_with("global")
+        && !n.ends_with("_obj.s3d")
+        && !n.ends_with("_chr.s3d")
+        && !n.ends_with("_amr.s3d")
+}
+
+pub fn build_zones_from_raw(cas: &Cas, store: &ManifestStore, raw_dir: &Path, work_dir: &Path)
+    -> anyhow::Result<Vec<String>>
+{
+    let mut baked = Vec::new();
+    for entry in std::fs::read_dir(raw_dir)? {
+        let path = entry?.path();
+        let fname = match path.file_name().and_then(|s| s.to_str()) { Some(f) => f, None => continue };
+        if !is_zone_archive(fname) { continue; }
+        let short = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        let obj = raw_dir.join(format!("{short}_obj.s3d"));
+        let zdir = work_dir.join("zone").join(&short);
+        std::fs::create_dir_all(&zdir)?;
+        let glb = zdir.join(format!("{short}.glb"));
+        let result = std::panic::catch_unwind(|| {
+            bake_zone(&path, obj.exists().then_some(obj.as_path()), &glb)
+        });
+        match result {
+            Ok(Ok(())) => {
+                ingest_dir(cas, store, &format!("zone/{short}"), &zdir)?;
+                baked.push(short);
+            }
+            Ok(Err(e)) => tracing::warn!("skip zone {short}: {e}"),
+            Err(_) => tracing::warn!("skip zone {short}: bake_zone panicked"),
+        }
+    }
+    Ok(baked)
 }
 
 fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {

@@ -55,6 +55,8 @@ async fn main() -> anyhow::Result<()> {
                 let work = out.join("work");
                 let ms = eqoxide_asset_server::build::build_from_raw(&cas, &store, &raw_dir, &work)?;
                 println!("built {} set(s) from raw archives", ms.len());
+                let zones = eqoxide_asset_server::build::build_zones_from_raw(&cas, &store, &raw_dir, &work)?;
+                println!("baked {} zone(s)", zones.len());
             } else {
                 let set = set.expect("--set required without --raw");
                 let from = from.expect("--from required without --raw");
