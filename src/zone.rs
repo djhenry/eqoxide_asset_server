@@ -90,6 +90,9 @@ pub fn load_object_models(obj_s3d: &Path) -> anyhow::Result<HashMap<String, Vec<
             for prim in mesh.primitives() {
                 let idx: Vec<u32> = prim.indices();
                 if idx.is_empty() { continue; }
+                // Some WLDs reference vertex indices past the mesh's position array; skip
+                // such malformed primitives rather than panicking on the whole zone.
+                if idx.iter().any(|&i| i as usize >= all_pos.len()) { continue; }
                 let positions = idx.iter().map(|&i| { let p = all_pos[i as usize]; [p[0]+cx, p[1]+cy, p[2]+cz] }).collect();
                 let normals = idx.iter().map(|&i| all_nrm.get(i as usize).copied().unwrap_or([0.0,0.0,1.0])).collect();
                 let uvs = idx.iter().map(|&i| all_uv.get(i as usize).copied().unwrap_or([0.0,0.0])).collect();
@@ -192,6 +195,9 @@ fn load_terrain(main_s3d: &Path) -> anyhow::Result<Vec<ZoneMesh>> {
             for prim in mesh.primitives() {
                 let idx: Vec<u32> = prim.indices();
                 if idx.is_empty() { continue; }
+                // Skip primitives whose indices exceed the position array (malformed WLD)
+                // instead of panicking on the whole zone.
+                if idx.iter().any(|&i| i as usize >= all_pos.len()) { continue; }
                 let positions = idx.iter().map(|&i| { let p = all_pos[i as usize]; [p[0] + cx, p[1] + cy, p[2] + cz] }).collect();
                 let normals = idx.iter().map(|&i| all_nrm.get(i as usize).copied().unwrap_or([0.0, 0.0, 1.0])).collect();
                 let uvs = idx.iter().map(|&i| all_uv.get(i as usize).copied().unwrap_or([0.0, 0.0])).collect();

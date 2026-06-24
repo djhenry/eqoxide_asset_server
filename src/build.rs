@@ -44,6 +44,11 @@ fn is_zone_archive(name: &str) -> bool {
     if stem.starts_with("global") || stem.starts_with("gequip") || stem == "sky" {
         return false;
     }
+    // Non-terrain archives that sit in EQ_Files: loading-screen bitmaps (bmpwad*),
+    // per-zone lighting (`*_lit`), and the shared grass texture archive.
+    if stem.starts_with("bmpwad") || stem.ends_with("_lit") || stem == "grass" {
+        return false;
+    }
     // Reject companion archives: a `_chr`/`_obj`/`_amr` tag followed only by digits.
     for tag in ["_chr", "_obj", "_amr"] {
         if let Some(pos) = stem.rfind(tag) {
