@@ -1,18 +1,34 @@
 use std::path::{Path, PathBuf};
 
 use crate::cas::Cas;
-use crate::convert::s3d_to_glb;
+use crate::convert::s3d_to_glb_model;
 use crate::manifest::{Manifest, ManifestStore};
 use crate::zone::bake_zone;
 
-/// (archive filename, output model filename, skinned)
-const COMMON_MODELS: &[(&str, &str, bool)] = &[
-    ("globalhum_chr.s3d", "humanoid.glb", true),
-    ("globalhuf_chr.s3d", "humanoid_f.glb", true),
-    ("globalelm_chr.s3d", "elf.glb", true),
-    ("globalelf_chr.s3d", "elf_f.glb", true),
-    ("globaldwm_chr.s3d", "dwarf.glb", true),
-    ("globaldwf_chr.s3d", "dwarf_f.glb", true),
+/// The `common` model set: (source archive, model code, output `.glb`). A `None`
+/// model code converts the whole archive (one model per `global*_chr.s3d`); a
+/// `Some("XXX")` extracts that single 3-char EQ model out of a multi-model archive.
+/// Mirrors the historical `tools/import_models.sh` recipe so `common` is fully
+/// reproducible from raw EQ files (no curated/hand-built artifacts). Other EQEmu
+/// operators get the same set from their own `EQ_Files`. Missing/unparseable
+/// archives are skipped with a warning, not fatal.
+const COMMON_MODELS: &[(&str, Option<&str>, &str)] = &[
+    ("globalhom_chr.s3d",     None,        "humanoid.glb"),  // half-elf male (generic humanoid)
+    ("globalelf_chr.s3d",     None,        "elf.glb"),       // wood elf
+    ("globaldwf_chr.s3d",     None,        "dwarf.glb"),     // dwarf
+    ("globalgnm_chr.s3d",     None,        "gnoll.glb"),     // gnome (placeholder for gnoll)
+    ("globalfroglok_chr.s3d", None,        "frog.glb"),      // froglok
+    ("global_chr.s3d",        Some("SKE"), "skeleton.glb"),
+    ("befallen_chr.s3d",      Some("ZOM"), "zombie.glb"),
+    ("acrylia_chr.s3d",       Some("SPI"), "creature.glb"),  // spider
+    ("global2_chr.s3d",       Some("BEA"), "bear.glb"),
+    ("global6_chr.s3d",       Some("WOL"), "wolf.glb"),
+    ("akanon_chr.s3d",        Some("RAT"), "rat.glb"),
+    ("acrylia_chr.s3d",       Some("SNA"), "snake.glb"),
+    ("befallen_chr.s3d",      Some("BAT"), "bat.glb"),
+    ("airplane_chr.s3d",      Some("WAS"), "wasp.glb"),
+    ("burningwood_chr.s3d",   Some("WUR"), "worm.glb"),      // wurm (serpentine)
+    ("airplane_chr.s3d",      Some("AVI"), "bird.glb"),      // aviak
 ];
 
 pub fn build_from_raw(
@@ -23,12 +39,20 @@ pub fn build_from_raw(
 ) -> anyhow::Result<Vec<Manifest>> {
     let common_out = work_dir.join("common");
     std::fs::create_dir_all(&common_out)?;
-    for (archive, out_name, skinned) in COMMON_MODELS {
+    for (archive, model_code, out_name) in COMMON_MODELS {
         let src = raw_dir.join(archive);
-        if src.exists() {
-            s3d_to_glb(&src, &common_out.join(out_name), *skinned)?;
-        } else {
-            tracing::warn!("skip missing archive {}", archive);
+        if !src.exists() {
+            tracing::warn!("skip missing archive {archive} (for {out_name})");
+            continue;
+        }
+        // Per-model conversion can panic on malformed archives; isolate each so one
+        // bad model doesn't abort the whole common build.
+        let out = common_out.join(out_name);
+        let result = std::panic::catch_unwind(|| s3d_to_glb_model(&src, &out, true, *model_code));
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!("skip model {out_name} from {archive}: {}", short_err(&e)),
+            Err(_) => tracing::warn!("skip model {out_name} from {archive}: conversion panicked"),
         }
     }
     let common = ingest_dir(cas, store, "common", &common_out)?;

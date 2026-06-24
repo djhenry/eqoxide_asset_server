@@ -43,8 +43,15 @@ pub(crate) struct NodeDef {
 }
 
 pub fn s3d_to_glb(input_s3d: &Path, output_glb: &Path, skinned: bool) -> Result<()> {
+    s3d_to_glb_model(input_s3d, output_glb, skinned, None)
+}
+
+/// Like `s3d_to_glb`, but `model_code` selects a single model (its 3-char EQ code,
+/// e.g. "SKE", "BEA") out of a multi-model character archive. `None` converts the
+/// whole archive (one model per archive, e.g. the per-race `global*_chr.s3d`).
+pub fn s3d_to_glb_model(input_s3d: &Path, output_glb: &Path, skinned: bool, model_code: Option<&str>) -> Result<()> {
     if skinned {
-        convert_s3d_to_glb_skinned(input_s3d, output_glb, None)?;
+        convert_s3d_to_glb_skinned(input_s3d, output_glb, model_code)?;
     } else {
         convert_s3d_to_glb(input_s3d, output_glb)?;
     }
