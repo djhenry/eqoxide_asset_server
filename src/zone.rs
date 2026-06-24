@@ -40,9 +40,35 @@ pub fn place_instance(model: &ZoneMesh, center: (f32, f32, f32), rot_z_deg: f32,
     }
 }
 
-/// Read object models from `obj_s3d` and place each instance from `main_s3d`'s ActorInstances.
-pub fn load_placed_objects(main_s3d: &Path, obj_s3d: &Path) -> anyhow::Result<Vec<ZoneMesh>> {
-    // 1. Object models from _obj.s3d, keyed by base name (vertices include mesh.center).
+/// Build the column-major 4x4 placement matrix that reproduces, for a
+/// model-local vertex `v`, the exact world position that [`place_instance`]
+/// computes by transforming vertices. With scaled vertex `(x,y,z) = scale*v`,
+/// `place_instance` gives world `[x·cos+z·sin+px, y+py, -x·sin+z·cos+pz]`.
+///
+/// glTF node `matrix` is column-major: each inner `[f32;4]` is a *column*.
+/// Columns are the images of the basis vectors:
+///   col0 = M·x̂ = [ s·cos,  0, -s·sin, 0]
+///   col1 = M·ŷ = [     0,  s,      0, 0]   (up = Y, libeq index 1)
+///   col2 = M·ẑ = [ s·sin,  0,  s·cos, 0]
+///   col3 = translation = [px, py, pz, 1]
+/// so `M * [v,1]` = `[s·cos·vx + s·sin·vz + px,  s·vy + py,  -s·sin·vx + s·cos·vz + pz]`,
+/// matching `place_instance` for x=s·vx, y=s·vy, z=s·vz.
+pub fn placement_matrix(center: (f32, f32, f32), rot_z_deg: f32, scale: f32) -> [[f32; 4]; 4] {
+    let (px, py, pz) = center;
+    let (sin, cos) = rot_z_deg.to_radians().sin_cos();
+    let s = scale;
+    [
+        [s * cos, 0.0, -s * sin, 0.0], // col0 (x basis)
+        [0.0, s, 0.0, 0.0],            // col1 (y basis / up)
+        [s * sin, 0.0, s * cos, 0.0],  // col2 (z basis)
+        [px, py, pz, 1.0],             // col3 (translation)
+    ]
+}
+
+/// Load object models from `obj_s3d` as welded, model-LOCAL meshes keyed by base
+/// name. Vertices include `mesh.center()` (so the model is self-contained) but
+/// carry no placement transform — placements are applied per-node via matrices.
+pub fn load_object_models(obj_s3d: &Path) -> anyhow::Result<HashMap<String, Vec<ZoneMesh>>> {
     let obj_file = std::fs::File::open(obj_s3d).with_context(|| format!("open {}", obj_s3d.display()))?;
     let mut obj_pfs = libeq_pfs::PfsReader::open(obj_file)?;
     let obj_names: Vec<String> = obj_pfs.filenames()?;
@@ -68,18 +94,25 @@ pub fn load_placed_objects(main_s3d: &Path, obj_s3d: &Path) -> anyhow::Result<Ve
                 let normals = idx.iter().map(|&i| all_nrm.get(i as usize).copied().unwrap_or([0.0,0.0,1.0])).collect();
                 let uvs = idx.iter().map(|&i| all_uv.get(i as usize).copied().unwrap_or([0.0,0.0])).collect();
                 let texture_name = prim.material().base_color_texture().and_then(|t| t.source());
-                models.entry(base.clone()).or_default().push(ZoneMesh {
+                let raw = ZoneMesh {
                     positions, normals, uvs, indices: (0..idx.len() as u32).collect(), texture_name,
-                });
+                };
+                models.entry(base.clone()).or_default().push(weld(&raw));
             }
         }
     }
+    Ok(models)
+}
 
-    // 2. Placements from main .wld objects()
+/// Read object placements from `main_s3d`'s WLD objects: `(base_name, matrix)`
+/// where `matrix` is the column-major 4x4 from [`placement_matrix`] (same
+/// scale/rotate-about-up/translate as [`place_instance`], built rather than
+/// baked into vertices).
+pub fn read_placements(main_s3d: &Path) -> anyhow::Result<Vec<(String, [[f32; 4]; 4])>> {
     let main_file = std::fs::File::open(main_s3d).with_context(|| format!("open {}", main_s3d.display()))?;
     let mut main_pfs = libeq_pfs::PfsReader::open(main_file)?;
     let main_names: Vec<String> = main_pfs.filenames()?;
-    let mut placed = Vec::new();
+    let mut placements = Vec::new();
     for wn in main_names.iter().filter(|f| f.to_lowercase().ends_with(".wld")) {
         let bytes = match main_pfs.get(wn) {
             Ok(Some(b)) => b,
@@ -89,15 +122,14 @@ pub fn load_placed_objects(main_s3d: &Path, obj_s3d: &Path) -> anyhow::Result<Ve
         let wld = match libeq_wld::load(&bytes) { Ok(w) => w, Err(_) => continue };
         for obj in wld.objects() {
             let base = match obj.model_name() { Some(n) => object_base_name(n), None => continue };
-            let Some(meshes) = models.get(&base) else { continue };
             let (px, py, pz) = obj.center();
             let (_rx, rz, _ry) = obj.rotation();
             let (s_xz, s_y) = obj.scale();
             let scale = if s_y > 0.01 { s_y } else if s_xz > 0.01 { s_xz } else { 1.0 };
-            for m in meshes { placed.push(place_instance(m, (px, py, pz), rz, scale)); }
+            placements.push((base, placement_matrix((px, py, pz), rz, scale)));
         }
     }
-    Ok(placed)
+    Ok(placements)
 }
 
 /// Deduplicates identical `(position, normal, uv)` vertices (keyed by `f32::to_bits`,
@@ -177,16 +209,10 @@ fn load_terrain(main_s3d: &Path) -> anyhow::Result<Vec<ZoneMesh>> {
 /// material+image, decoded from whichever archive contains it. Reuses
 /// `convert::write_glb` and `convert::load_texture_from_archive`.
 pub fn bake_zone(main_s3d: &Path, obj_s3d: Option<&Path>, output_glb: &Path) -> anyhow::Result<()> {
-    use crate::convert::{load_texture_from_archive, write_glb, MaterialData, MeshData, PrimitiveData, TextureData};
-
-    // Gather every mesh: terrain + placed objects, all in raw libeq coords.
-    let mut meshes = load_terrain(main_s3d)?;
-    if let Some(obj) = obj_s3d {
-        meshes.extend(load_placed_objects(main_s3d, obj)?);
-    }
-    if meshes.is_empty() {
-        anyhow::bail!("no zone meshes found in {}", main_s3d.display());
-    }
+    use crate::convert::{
+        load_texture_from_archive, write_glb_instanced, MaterialData, MeshData, NodeDef,
+        PrimitiveData, TextureData,
+    };
 
     // Open archives once for texture decode (textures may live in either).
     let mut pfs_list: Vec<libeq_pfs::PfsReader<std::fs::File>> = Vec::new();
@@ -199,75 +225,130 @@ pub fn bake_zone(main_s3d: &Path, obj_s3d: Option<&Path>, output_glb: &Path) -> 
         )?);
     }
 
-    // Merge all meshes into one glTF mesh with per-mesh primitives, one named
-    // material per distinct texture name.
-    let mut merged_positions: Vec<[f32; 3]> = Vec::new();
-    let mut merged_normals: Vec<[f32; 3]> = Vec::new();
-    let mut merged_uvs: Vec<[f32; 2]> = Vec::new();
-    let mut primitives: Vec<PrimitiveData> = Vec::new();
     let mut materials: Vec<MaterialData> = Vec::new();
     let mut textures: Vec<TextureData> = Vec::new();
     let mut tex_map: HashMap<String, usize> = HashMap::new(); // tex name -> texture idx
     let mut mat_map: HashMap<String, usize> = HashMap::new(); // tex name -> material idx
 
-    for m in &meshes {
-        if m.positions.is_empty() || m.indices.is_empty() { continue; }
-        let offset = merged_positions.len() as u32;
-        merged_positions.extend_from_slice(&m.positions);
-        merged_normals.extend_from_slice(&m.normals);
-        merged_uvs.extend_from_slice(&m.uvs);
-        let indices: Vec<u32> = m.indices.iter().map(|&i| i + offset).collect();
-
+    // Resolve a ZoneMesh's texture to a glTF material index (decoding+naming once).
+    let mut material_for = |m: &ZoneMesh,
+                            materials: &mut Vec<MaterialData>,
+                            textures: &mut Vec<TextureData>,
+                            tex_map: &mut HashMap<String, usize>,
+                            mat_map: &mut HashMap<String, usize>,
+                            pfs_list: &mut Vec<libeq_pfs::PfsReader<std::fs::File>>|
+     -> usize {
         let key = m.texture_name.clone().unwrap_or_else(|| "untextured".to_string());
-        let material_idx = match mat_map.get(&key) {
-            Some(&idx) => idx,
-            None => {
-                let texture_idx = if let Some(src) = &m.texture_name {
-                    match tex_map.get(src) {
-                        Some(&t) => Some(t),
-                        None => {
-                            let lower = src.to_lowercase();
-                            let png = pfs_list.iter_mut()
-                                .find_map(|pfs| load_texture_from_archive(pfs, &lower));
-                            match png {
-                                Some(png_bytes) => {
-                                    let t = textures.len();
-                                    textures.push(TextureData { name: lower, png_bytes });
-                                    tex_map.insert(src.clone(), t);
-                                    Some(t)
-                                }
-                                None => None,
-                            }
-                        }
-                    }
-                } else {
-                    None
-                };
-                let idx = materials.len();
-                materials.push(MaterialData {
-                    name: m.texture_name.clone().unwrap_or_else(|| "untextured".to_string()),
-                    texture_idx,
-                    base_color: [1.0, 1.0, 1.0, 1.0],
-                });
-                mat_map.insert(key.clone(), idx);
-                idx
+        if let Some(&idx) = mat_map.get(&key) {
+            return idx;
+        }
+        let texture_idx = if let Some(src) = &m.texture_name {
+            match tex_map.get(src) {
+                Some(&t) => Some(t),
+                None => {
+                    let lower = src.to_lowercase();
+                    let png = pfs_list.iter_mut().find_map(|pfs| load_texture_from_archive(pfs, &lower));
+                    png.map(|png_bytes| {
+                        let t = textures.len();
+                        textures.push(TextureData { name: lower, png_bytes });
+                        tex_map.insert(src.clone(), t);
+                        t
+                    })
+                }
             }
+        } else {
+            None
         };
-        primitives.push(PrimitiveData { indices, material_idx });
+        let idx = materials.len();
+        materials.push(MaterialData {
+            name: key.clone(),
+            texture_idx,
+            base_color: [1.0, 1.0, 1.0, 1.0],
+        });
+        mat_map.insert(key, idx);
+        idx
+    };
+
+    // Fold a group of ZoneMeshes (sharing a vertex pool) into one MeshData.
+    let build_mesh = |name: String,
+                      group: &[ZoneMesh],
+                      materials: &mut Vec<MaterialData>,
+                      textures: &mut Vec<TextureData>,
+                      tex_map: &mut HashMap<String, usize>,
+                      mat_map: &mut HashMap<String, usize>,
+                      pfs_list: &mut Vec<libeq_pfs::PfsReader<std::fs::File>>,
+                      material_for: &mut dyn FnMut(
+        &ZoneMesh,
+        &mut Vec<MaterialData>,
+        &mut Vec<TextureData>,
+        &mut HashMap<String, usize>,
+        &mut HashMap<String, usize>,
+        &mut Vec<libeq_pfs::PfsReader<std::fs::File>>,
+    ) -> usize|
+     -> Option<MeshData> {
+        let mut positions: Vec<[f32; 3]> = Vec::new();
+        let mut normals: Vec<[f32; 3]> = Vec::new();
+        let mut uvs: Vec<[f32; 2]> = Vec::new();
+        let mut primitives: Vec<PrimitiveData> = Vec::new();
+        for m in group {
+            if m.positions.is_empty() || m.indices.is_empty() { continue; }
+            let offset = positions.len() as u32;
+            positions.extend_from_slice(&m.positions);
+            normals.extend_from_slice(&m.normals);
+            uvs.extend_from_slice(&m.uvs);
+            let indices: Vec<u32> = m.indices.iter().map(|&i| i + offset).collect();
+            let material_idx = material_for(m, materials, textures, tex_map, mat_map, pfs_list);
+            primitives.push(PrimitiveData { indices, material_idx });
+        }
+        if primitives.is_empty() { return None; }
+        Some(MeshData { name, positions, normals, uvs, primitives })
+    };
+
+    let mut meshes: Vec<MeshData> = Vec::new();
+    let mut nodes: Vec<NodeDef> = Vec::new();
+
+    // 1. Terrain: weld each mesh, one mesh per group, identity node.
+    let terrain = load_terrain(main_s3d)?;
+    let welded_terrain: Vec<ZoneMesh> = terrain.iter().map(weld).collect();
+    if let Some(md) = build_mesh(
+        "terrain".to_string(), &welded_terrain,
+        &mut materials, &mut textures, &mut tex_map, &mut mat_map, &mut pfs_list, &mut material_for,
+    ) {
+        let mesh_idx = meshes.len();
+        meshes.push(md);
+        nodes.push(NodeDef { mesh_idx, matrix: None });
     }
 
-    if primitives.is_empty() {
-        anyhow::bail!("no renderable primitives for {}", main_s3d.display());
+    // 2. Object models: one welded mesh per unique base that has a placement,
+    //    plus one placement node per (base, matrix).
+    if let Some(obj) = obj_s3d {
+        let models = load_object_models(obj)?; // already welded, model-local
+        let placements = read_placements(main_s3d)?;
+        let mut base_mesh_idx: HashMap<String, usize> = HashMap::new();
+        for (base, matrix) in &placements {
+            let mesh_idx = match base_mesh_idx.get(base) {
+                Some(&i) => i,
+                None => {
+                    let Some(group) = models.get(base) else { continue };
+                    let Some(md) = build_mesh(
+                        base.clone(), group,
+                        &mut materials, &mut textures, &mut tex_map, &mut mat_map, &mut pfs_list, &mut material_for,
+                    ) else { continue };
+                    let i = meshes.len();
+                    meshes.push(md);
+                    base_mesh_idx.insert(base.clone(), i);
+                    i
+                }
+            };
+            nodes.push(NodeDef { mesh_idx, matrix: Some(*matrix) });
+        }
     }
 
-    let mesh = vec![MeshData {
-        name: "zone".to_string(),
-        positions: merged_positions,
-        normals: merged_normals,
-        uvs: merged_uvs,
-        primitives,
-    }];
-    write_glb(output_glb, &mesh, &materials, &textures)
+    if meshes.is_empty() {
+        anyhow::bail!("no zone meshes found in {}", main_s3d.display());
+    }
+
+    write_glb_instanced(output_glb, &meshes, &materials, &textures, &nodes)
 }
 
 #[cfg(test)]
@@ -317,17 +398,50 @@ mod tests {
     }
 
     #[test]
+    fn placement_matrix_matches_place_instance() {
+        // For arbitrary model-local vertices, M*[v,1] must equal the world
+        // position place_instance bakes into vertices.
+        let model = ZoneMesh {
+            positions: vec![[1.0, 2.0, 3.0], [-4.0, 0.5, 7.0], [0.0, 0.0, 0.0]],
+            normals: vec![[0.0, 1.0, 0.0]; 3],
+            uvs: vec![[0.0, 0.0]; 3],
+            indices: vec![0, 1, 2],
+            texture_name: None,
+        };
+        let center = (10.0, 5.0, -20.0);
+        let rot = 37.0;
+        let scale = 1.5;
+        let placed = place_instance(&model, center, rot, scale);
+        let m = placement_matrix(center, rot, scale);
+        for (v, expected) in model.positions.iter().zip(placed.positions.iter()) {
+            // column-major: world = sum over j of col[j] * [v.x,v.y,v.z,1][j]
+            let h = [v[0], v[1], v[2], 1.0];
+            let mut w = [0.0f32; 3];
+            for r in 0..3 {
+                for j in 0..4 {
+                    w[r] += m[j][r] * h[j];
+                }
+            }
+            for k in 0..3 {
+                assert!((w[k] - expected[k]).abs() < 1e-3, "axis {k}: {} vs {}", w[k], expected[k]);
+            }
+        }
+    }
+
+    #[test]
     #[ignore = "requires ~/eq_assets/EQ_Files/qcat.s3d + qcat_obj.s3d"]
-    fn load_placed_objects_places_off_origin() {
+    fn placements_are_off_origin() {
         let home = std::env::var("HOME").unwrap();
         let main = std::path::PathBuf::from(format!("{home}/eq_assets/EQ_Files/qcat.s3d"));
         let obj = std::path::PathBuf::from(format!("{home}/eq_assets/EQ_Files/qcat_obj.s3d"));
         if !main.exists() || !obj.exists() { eprintln!("skip: archives missing"); return; }
-        let placed = load_placed_objects(&main, &obj).unwrap();
-        assert!(!placed.is_empty(), "expected placed object meshes");
-        // Not all vertices clustered at the origin (the "piled at 0,0,0" regression).
-        let off_origin = placed.iter().flat_map(|m| &m.positions)
-            .any(|p| p[0].abs() > 1.0 || p[2].abs() > 1.0);
-        assert!(off_origin, "placed objects should not all be at the origin");
+        let models = load_object_models(&obj).unwrap();
+        assert!(!models.is_empty(), "expected object models");
+        let placements = read_placements(&main).unwrap();
+        assert!(!placements.is_empty(), "expected placements");
+        // Some placement translates off the origin (the "piled at 0,0,0" regression).
+        let off_origin = placements.iter()
+            .any(|(_, m)| m[3][0].abs() > 1.0 || m[3][2].abs() > 1.0);
+        assert!(off_origin, "placements should not all be at the origin");
     }
 }

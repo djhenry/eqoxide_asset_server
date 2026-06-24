@@ -34,6 +34,14 @@ pub(crate) struct MaterialData {
     pub(crate) base_color: [f32; 4],
 }
 
+/// A glTF node for the instanced writer: references a mesh by index, with an
+/// optional column-major 4x4 transform `matrix` (identity when `None`).
+pub(crate) struct NodeDef {
+    pub(crate) mesh_idx: usize,
+    /// Column-major 4x4 (glTF convention). `None` => identity (no `matrix` emitted).
+    pub(crate) matrix: Option<[[f32; 4]; 4]>,
+}
+
 pub fn s3d_to_glb(input_s3d: &Path, output_glb: &Path, skinned: bool) -> Result<()> {
     if skinned {
         convert_s3d_to_glb_skinned(input_s3d, output_glb, None)?;
@@ -1626,6 +1634,215 @@ pub(crate) fn write_glb(
     }
 
     // Binary chunk
+    out.write_all(&(bin_padded_len as u32).to_le_bytes())?;
+    out.write_all(&0x004E4942u32.to_le_bytes())?;
+    out.write_all(&buffer_data)?;
+
+    eprintln!("  wrote {} bytes to {}", total_len, output.display());
+    Ok(())
+}
+
+/// Like [`write_glb`], but decouples nodes from meshes so a single mesh can be
+/// instanced by many nodes. Emits `meshes[]` exactly as `write_glb` does, then
+/// `nodes[]` from the supplied [`NodeDef`] list (each node references a mesh by
+/// index and carries an optional column-major 4x4 `matrix`). Used by zone baking
+/// to share one welded mesh per object model across all placement nodes.
+pub(crate) fn write_glb_instanced(
+    output: &Path,
+    meshes: &[MeshData],
+    materials: &[MaterialData],
+    textures: &[TextureData],
+    nodes_in: &[NodeDef],
+) -> Result<()> {
+    let mut buffer_data: Vec<u8> = Vec::new();
+    let mut buffer_views: Vec<serde_json::Value> = Vec::new();
+    let mut accessors: Vec<serde_json::Value> = Vec::new();
+    let mut images: Vec<serde_json::Value> = Vec::new();
+    let mut gltf_textures: Vec<serde_json::Value> = Vec::new();
+    let mut gltf_materials: Vec<serde_json::Value> = Vec::new();
+    let mut gltf_meshes: Vec<serde_json::Value> = Vec::new();
+
+    // Textures -> images (lowercased EQ texture name preserved).
+    for tex in textures {
+        let view_idx = buffer_views.len();
+        let byte_offset = buffer_data.len() as u32;
+        buffer_data.extend_from_slice(&tex.png_bytes);
+        while buffer_data.len() % 4 != 0 {
+            buffer_data.push(0);
+        }
+        buffer_views.push(serde_json::json!({
+            "buffer": 0,
+            "byteOffset": byte_offset,
+            "byteLength": tex.png_bytes.len(),
+        }));
+        images.push(serde_json::json!({
+            "bufferView": view_idx,
+            "mimeType": "image/png",
+            "name": tex.name,
+        }));
+        gltf_textures.push(serde_json::json!({ "source": images.len() - 1 }));
+    }
+
+    // Materials.
+    for mat in materials {
+        let pbr = if let Some(tex_idx) = mat.texture_idx {
+            serde_json::json!({
+                "baseColorTexture": { "index": tex_idx },
+                "metallicFactor": 0.0,
+                "roughnessFactor": 1.0,
+            })
+        } else {
+            serde_json::json!({
+                "baseColorFactor": mat.base_color,
+                "metallicFactor": 0.0,
+                "roughnessFactor": 1.0,
+            })
+        };
+        gltf_materials.push(serde_json::json!({
+            "name": mat.name,
+            "pbrMetallicRoughness": pbr,
+            "doubleSided": true,
+        }));
+    }
+
+    // Meshes (no implicit per-mesh node here — nodes come from `nodes_in`).
+    for mesh in meshes {
+        let mut attributes = serde_json::Map::new();
+
+        let pos_offset = buffer_data.len() as u32;
+        for p in &mesh.positions {
+            buffer_data.extend_from_slice(&p[0].to_le_bytes());
+            buffer_data.extend_from_slice(&p[1].to_le_bytes());
+            buffer_data.extend_from_slice(&p[2].to_le_bytes());
+        }
+        let pos_byte_len = (mesh.positions.len() * 12) as u32;
+        let pos_view_idx = buffer_views.len();
+        buffer_views.push(serde_json::json!({
+            "buffer": 0, "byteOffset": pos_offset, "byteLength": pos_byte_len, "target": 34962,
+        }));
+        let (pos_min, pos_max) = compute_bounds_f32x3(&mesh.positions);
+        let pos_acc_idx = accessors.len();
+        accessors.push(serde_json::json!({
+            "bufferView": pos_view_idx, "componentType": 5126,
+            "count": mesh.positions.len(), "type": "VEC3", "min": pos_min, "max": pos_max,
+        }));
+        attributes.insert("POSITION".to_string(), serde_json::json!(pos_acc_idx));
+
+        let norm_offset = buffer_data.len() as u32;
+        for n in &mesh.normals {
+            buffer_data.extend_from_slice(&n[0].to_le_bytes());
+            buffer_data.extend_from_slice(&n[1].to_le_bytes());
+            buffer_data.extend_from_slice(&n[2].to_le_bytes());
+        }
+        let norm_byte_len = (mesh.normals.len() * 12) as u32;
+        let norm_view_idx = buffer_views.len();
+        buffer_views.push(serde_json::json!({
+            "buffer": 0, "byteOffset": norm_offset, "byteLength": norm_byte_len, "target": 34962,
+        }));
+        let norm_acc_idx = accessors.len();
+        accessors.push(serde_json::json!({
+            "bufferView": norm_view_idx, "componentType": 5126,
+            "count": mesh.normals.len(), "type": "VEC3",
+        }));
+        attributes.insert("NORMAL".to_string(), serde_json::json!(norm_acc_idx));
+
+        let uv_offset = buffer_data.len() as u32;
+        for u in &mesh.uvs {
+            buffer_data.extend_from_slice(&u[0].to_le_bytes());
+            buffer_data.extend_from_slice(&u[1].to_le_bytes());
+        }
+        let uv_byte_len = (mesh.uvs.len() * 8) as u32;
+        let uv_view_idx = buffer_views.len();
+        buffer_views.push(serde_json::json!({
+            "buffer": 0, "byteOffset": uv_offset, "byteLength": uv_byte_len, "target": 34962,
+        }));
+        let uv_acc_idx = accessors.len();
+        accessors.push(serde_json::json!({
+            "bufferView": uv_view_idx, "componentType": 5126,
+            "count": mesh.uvs.len(), "type": "VEC2",
+        }));
+        attributes.insert("TEXCOORD_0".to_string(), serde_json::json!(uv_acc_idx));
+
+        let mut gltf_primitives = Vec::new();
+        for prim in &mesh.primitives {
+            let idx_offset = buffer_data.len() as u32;
+            for &i in &prim.indices {
+                buffer_data.extend_from_slice(&(i as u16).to_le_bytes());
+            }
+            while buffer_data.len() % 4 != 0 {
+                buffer_data.push(0);
+            }
+            let idx_view_idx = buffer_views.len();
+            buffer_views.push(serde_json::json!({
+                "buffer": 0, "byteOffset": idx_offset,
+                "byteLength": prim.indices.len() * 2, "target": 34963,
+            }));
+            let idx_acc_idx = accessors.len();
+            accessors.push(serde_json::json!({
+                "bufferView": idx_view_idx, "componentType": 5123,
+                "count": prim.indices.len(), "type": "SCALAR",
+            }));
+            gltf_primitives.push(serde_json::json!({
+                "attributes": attributes,
+                "indices": idx_acc_idx,
+                "material": prim.material_idx,
+            }));
+        }
+
+        gltf_meshes.push(serde_json::json!({
+            "name": mesh.name,
+            "primitives": gltf_primitives,
+        }));
+    }
+
+    // Nodes: one per NodeDef, referencing a mesh + optional column-major matrix.
+    let mut nodes: Vec<serde_json::Value> = Vec::with_capacity(nodes_in.len());
+    for nd in nodes_in {
+        let mut node = serde_json::Map::new();
+        node.insert("mesh".to_string(), serde_json::json!(nd.mesh_idx));
+        if let Some(m) = nd.matrix {
+            // glTF `matrix` is a flat 16-element column-major array.
+            let flat: Vec<f32> = m.iter().flat_map(|col| col.iter().copied()).collect();
+            node.insert("matrix".to_string(), serde_json::json!(flat));
+        }
+        nodes.push(serde_json::Value::Object(node));
+    }
+
+    while buffer_data.len() % 4 != 0 {
+        buffer_data.push(0);
+    }
+
+    let gltf = serde_json::json!({
+        "asset": { "version": "2.0", "generator": "s3d_to_gltf" },
+        "scene": 0,
+        "scenes": [{ "name": "scene", "nodes": (0..nodes.len()).collect::<Vec<_>>() }],
+        "nodes": nodes,
+        "meshes": gltf_meshes,
+        "accessors": accessors,
+        "bufferViews": buffer_views,
+        "buffers": [{ "byteLength": buffer_data.len() }],
+        "materials": gltf_materials,
+        "images": images,
+        "textures": gltf_textures,
+    });
+
+    let json_str = serde_json::to_string(&gltf)?;
+    let json_bytes = json_str.as_bytes();
+    let json_padded_len = (json_bytes.len() + 3) & !3;
+    let bin_padded_len = buffer_data.len();
+    let total_len = 12 + 8 + json_padded_len + 8 + bin_padded_len;
+
+    let mut out = fs::File::create(output)
+        .with_context(|| format!("failed to create {}", output.display()))?;
+    out.write_all(&0x46546C67u32.to_le_bytes())?;
+    out.write_all(&2u32.to_le_bytes())?;
+    out.write_all(&(total_len as u32).to_le_bytes())?;
+    out.write_all(&(json_padded_len as u32).to_le_bytes())?;
+    out.write_all(&0x4E4F534Au32.to_le_bytes())?;
+    out.write_all(json_bytes)?;
+    for _ in json_bytes.len()..json_padded_len {
+        out.write_all(b" ")?;
+    }
     out.write_all(&(bin_padded_len as u32).to_le_bytes())?;
     out.write_all(&0x004E4942u32.to_le_bytes())?;
     out.write_all(&buffer_data)?;
