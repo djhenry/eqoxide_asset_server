@@ -26,6 +26,9 @@ enum Cmd {
         #[arg(long)] from: Option<PathBuf>,
         #[arg(long)] raw: Option<PathBuf>,
         #[arg(long)] out: PathBuf,
+        /// With --raw: bake only zones, skip the `common` model set (leaves an
+        /// existing common untouched; avoids re-converting character archives).
+        #[arg(long)] zones_only: bool,
     },
     /// Run the HTTP asset server.
     Serve {
@@ -48,15 +51,17 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     match Cli::parse().cmd {
-        Cmd::Build { set, from, raw, out } => {
+        Cmd::Build { set, from, raw, out, zones_only } => {
             let cas = Cas::new(&out);
             let store = ManifestStore::new(&out);
             if let Some(raw_dir) = raw {
                 let work = out.join("work");
-                let ms = eqoxide_asset_server::build::build_from_raw(&cas, &store, &raw_dir, &work)?;
-                println!("built {} set(s) from raw archives", ms.len());
+                if !zones_only {
+                    let ms = eqoxide_asset_server::build::build_from_raw(&cas, &store, &raw_dir, &work)?;
+                    println!("built {} set(s) from raw archives", ms.len());
+                }
                 let zones = eqoxide_asset_server::build::build_zones_from_raw(&cas, &store, &raw_dir, &work)?;
-                println!("baked {} zone(s)", zones.len());
+                println!("baked {} zone(s): {}", zones.len(), zones.join(", "));
             } else {
                 let set = set.expect("--set required without --raw");
                 let from = from.expect("--from required without --raw");
