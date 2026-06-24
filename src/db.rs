@@ -20,11 +20,33 @@ fn hex_digest<D: Digest>(input: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// For one hex digest family (MD5/SHA1/SHA512), try every EQEmu hashing variant
+/// that produces that digest and report whether any reproduces `stored`. EQEmu's
+/// `eqcrypt_hash` (loginserver/encryption.cpp) defines, per family:
+///   plain    = D(password)
+///   PassUser = D(password ":" username)
+///   UserPass = D(username ":" password)
+///   Triple   = D( hex(D(username)) + hex(D(password)) )
+/// A bare hex digest is ambiguous about which variant produced it, so we try all
+/// four (the loginserver itself only uses one configured mode, but accounts across
+/// the DB were created under different modes).
+fn hex_variants_match<D: Digest>(stored: &str, password: &str, username: &str) -> bool {
+    let candidates = [
+        hex_digest::<D>(password),
+        hex_digest::<D>(&format!("{password}:{username}")),
+        hex_digest::<D>(&format!("{username}:{password}")),
+        hex_digest::<D>(&format!("{}{}", hex_digest::<D>(username), hex_digest::<D>(password))),
+    ];
+    candidates.iter().any(|c| c.eq_ignore_ascii_case(stored))
+}
+
 /// Verify a provided password against an EQEmu `login_accounts.account_password`
 /// digest. EQEmu hashes by its loginserver EncryptionMode; we detect the stored
 /// format per-account: `$7$` = libsodium scrypt (mode 14), `$argon2` = libsodium
-/// argon2 (mode 13), else a hex digest by length (128→SHA512, 40→SHA1, 32→MD5).
-pub fn verify_password(stored: &str, provided: &str) -> bool {
+/// argon2 (mode 13), else a hex digest by length (128→SHA512, 40→SHA1, 32→MD5),
+/// trying the plain/PassUser/UserPass/Triple variant for that family (`username`
+/// is needed for the salted/triple forms).
+pub fn verify_password(stored: &str, provided: &str, username: &str) -> bool {
     let stored = stored.trim();
     if stored.starts_with("$7$") {
         return scrypt_verify(stored, provided);
@@ -36,13 +58,12 @@ pub fn verify_password(stored: &str, provided: &str) -> bool {
         tracing::warn!("unsupported password hash format (prefix '$')");
         return false;
     }
-    let computed = match stored.len() {
-        128 => hex_digest::<Sha512>(provided),
-        40 => hex_digest::<Sha1>(provided),
-        32 => hex_digest::<Md5>(provided),
-        _ => return false,
-    };
-    computed.eq_ignore_ascii_case(stored)
+    match stored.len() {
+        128 => hex_variants_match::<Sha512>(stored, provided, username),
+        40 => hex_variants_match::<Sha1>(stored, provided, username),
+        32 => hex_variants_match::<Md5>(stored, provided, username),
+        _ => false,
+    }
 }
 
 fn scrypt_verify(stored: &str, provided: &str) -> bool {
@@ -121,7 +142,7 @@ impl AccountStore for MariaAccountStore {
     fn verify(&self, username: &str, password: &str) -> bool {
         // Cheap cache hit path.
         if let Some(stored) = self.creds.read().unwrap().get(username) {
-            return verify_password(stored, password);
+            return verify_password(stored, password, username);
         }
         // Miss: block on a DB fetch. `verify` is sync (called from an async
         // handler); use a current-thread block to query, then cache.
@@ -132,7 +153,7 @@ impl AccountStore for MariaAccountStore {
         match stored {
             Ok(Some(pw)) => {
                 self.creds.write().unwrap().insert(username.to_string(), pw.clone());
-                verify_password(&pw, password)
+                verify_password(&pw, password, username)
             }
             Ok(None) => false, // unknown account
             Err(e) => {
