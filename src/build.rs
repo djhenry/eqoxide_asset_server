@@ -66,7 +66,14 @@ pub fn build_zones_from_raw(cas: &Cas, store: &ManifestStore, raw_dir: &Path, wo
                 baked.push(short);
             }
             Ok(Err(e)) => tracing::warn!("skip zone {short}: {e}"),
-            Err(_) => tracing::warn!("skip zone {short}: bake_zone panicked"),
+            Err(payload) => {
+                let msg = payload
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .or_else(|| payload.downcast_ref::<String>().map(|s| s.as_str()))
+                    .unwrap_or("<non-string panic>");
+                tracing::warn!("skip zone {short}: bake_zone panicked: {msg}");
+            }
         }
     }
     Ok(baked)
