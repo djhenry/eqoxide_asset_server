@@ -153,44 +153,67 @@ pub fn build_zonedoors_from_raw(cas: &Cas, store: &ManifestStore, raw_dir: &Path
     Ok(Some(store.build_and_write(cas, &format!("zonedoors/{short}"), &files)?))
 }
 
-pub fn build_zones_from_raw(cas: &Cas, store: &ManifestStore, raw_dir: &Path, work_dir: &Path)
-    -> anyhow::Result<Vec<String>>
-{
+pub fn build_zones_from_raw(
+    cas: &Cas,
+    store: &ManifestStore,
+    raw_dir: &Path,
+    work_dir: &Path,
+    pool: &rayon::ThreadPool,
+) -> anyhow::Result<Vec<String>> {
     // libeq panics (not Errs) on some malformed WLDs; we catch_unwind each zone and
-    // log a clean WARN, so silence the default hook's verbose backtrace dump.
+    // log a clean WARN, so silence the default hook's verbose backtrace dump. Set once
+    // before the parallel region (the hook is process-global).
     std::panic::set_hook(Box::new(|_| {}));
-    let mut baked = Vec::new();
+
+    // Collect zone archive paths first, then fan out the per-zone conversion.
+    let mut zone_paths = Vec::new();
     for entry in std::fs::read_dir(raw_dir)? {
         let path = entry?.path();
-        let fname = match path.file_name().and_then(|s| s.to_str()) { Some(f) => f, None => continue };
-        if !is_zone_archive(fname) { continue; }
-        let short = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
-        let obj = raw_dir.join(format!("{short}_obj.s3d"));
-        let zdir = work_dir.join("zone").join(&short);
-        std::fs::create_dir_all(&zdir)?;
-        let glb = zdir.join(format!("{short}.glb"));
-        let result = std::panic::catch_unwind(|| {
-            bake_zone(&path, obj.exists().then_some(obj.as_path()), &glb)
-        });
-        match result {
-            Ok(Ok(())) => {
-                ingest_dir(cas, store, &format!("zone/{short}"), &zdir)?;
-                if let Err(e) = build_zonedoors_from_raw(cas, store, raw_dir, &short) {
-                    tracing::warn!("zonedoors {short}: {}", short_err(&e));
-                }
-                baked.push(short);
-            }
-            Ok(Err(e)) => tracing::warn!("skip zone {short}: {}", short_err(&e)),
-            Err(payload) => {
-                let msg = payload
-                    .downcast_ref::<&str>()
-                    .copied()
-                    .or_else(|| payload.downcast_ref::<String>().map(|s| s.as_str()))
-                    .unwrap_or("<non-string panic>");
-                tracing::warn!("skip zone {short}: bake_zone panicked: {}", short_err(&msg));
-            }
-        }
+        let fname = match path.file_name().and_then(|s| s.to_str()) { Some(f) => f.to_string(), None => continue };
+        if !is_zone_archive(&fname) { continue; }
+        zone_paths.push(path);
     }
+
+    let baked: anyhow::Result<Vec<Option<String>>> = pool.install(|| {
+        zone_paths
+            .par_iter()
+            .map(|path| -> anyhow::Result<Option<String>> {
+                let short = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                let obj = raw_dir.join(format!("{short}_obj.s3d"));
+                let zdir = work_dir.join("zone").join(&short);
+                std::fs::create_dir_all(&zdir)?;
+                let glb = zdir.join(format!("{short}.glb"));
+                let result = std::panic::catch_unwind(|| {
+                    bake_zone(path, obj.exists().then_some(obj.as_path()), &glb)
+                });
+                match result {
+                    Ok(Ok(())) => {
+                        ingest_dir(cas, store, &format!("zone/{short}"), &zdir)?;
+                        if let Err(e) = build_zonedoors_from_raw(cas, store, raw_dir, &short) {
+                            tracing::warn!("zonedoors {short}: {}", short_err(&e));
+                        }
+                        Ok(Some(short))
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!("skip zone {short}: {}", short_err(&e));
+                        Ok(None)
+                    }
+                    Err(payload) => {
+                        let msg = payload
+                            .downcast_ref::<&str>()
+                            .copied()
+                            .or_else(|| payload.downcast_ref::<String>().map(|s| s.as_str()))
+                            .unwrap_or("<non-string panic>");
+                        tracing::warn!("skip zone {short}: bake_zone panicked: {}", short_err(&msg));
+                        Ok(None)
+                    }
+                }
+            })
+            .collect()
+    });
+
+    let mut baked: Vec<String> = baked?.into_iter().flatten().collect();
+    baked.sort();
     Ok(baked)
 }
 

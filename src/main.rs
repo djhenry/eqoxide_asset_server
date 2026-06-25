@@ -80,11 +80,13 @@ async fn main() -> anyhow::Result<()> {
             let store = ManifestStore::new(&out);
             if let Some(raw_dir) = raw {
                 let work = out.join("work");
+                let jobs = eqoxide_asset_server::build::resolve_jobs(None);
+                let pool = rayon::ThreadPoolBuilder::new().num_threads(jobs).build()?;
                 if !zones_only {
-                    let ms = eqoxide_asset_server::build::build_from_raw(&cas, &store, &raw_dir, &work)?;
+                    let ms = eqoxide_asset_server::build::build_from_raw(&cas, &store, &raw_dir, &work, &pool)?;
                     println!("built {} set(s) from raw archives", ms.len());
                 }
-                let zones = eqoxide_asset_server::build::build_zones_from_raw(&cas, &store, &raw_dir, &work)?;
+                let zones = eqoxide_asset_server::build::build_zones_from_raw(&cas, &store, &raw_dir, &work, &pool)?;
                 println!("baked {} zone(s): {}", zones.len(), zones.join(", "));
                 let gd = eqoxide_asset_server::build::build_gamedata_from_raw(&cas, &store, &raw_dir)?;
                 println!("built 'gamedata' set version {} ({} files)", gd.version, gd.files.len());
