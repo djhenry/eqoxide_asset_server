@@ -1,4 +1,7 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub struct Cas {
     root: PathBuf,
@@ -24,8 +27,12 @@ impl Cas {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            // write to a temp file then rename for atomicity
-            let tmp = path.with_extension("tmp");
+            // Unique temp name per write: two threads writing byte-identical
+            // content resolve to the same final hash path, so a shared
+            // `<hash>.tmp` would race. Atomic rename onto the final path is
+            // harmless if another thread won (content is identical).
+            let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let tmp = path.with_extension(format!("tmp.{}.{}", std::process::id(), n));
             std::fs::write(&tmp, bytes)?;
             std::fs::rename(&tmp, &path)?;
         }
@@ -76,5 +83,22 @@ mod tests {
         let cas = Cas::new(dir.path());
         assert!(!cas.has("deadbeef"));
         assert!(cas.get("deadbeef").is_err());
+    }
+
+    #[test]
+    fn concurrent_put_identical_content_is_safe() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas = Cas::new(dir.path());
+        let expected = Cas::hash(b"shared-bytes");
+        std::thread::scope(|s| {
+            let handles: Vec<_> = (0..16)
+                .map(|_| s.spawn(|| cas.put(b"shared-bytes").unwrap()))
+                .collect();
+            for h in handles {
+                assert_eq!(h.join().unwrap(), expected);
+            }
+        });
+        assert!(cas.has(&expected));
+        assert_eq!(cas.get(&expected).unwrap(), b"shared-bytes");
     }
 }

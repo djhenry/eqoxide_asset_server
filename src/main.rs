@@ -29,6 +29,9 @@ enum Cmd {
         /// With --raw: bake only zones, skip the `common` model set (leaves an
         /// existing common untouched; avoids re-converting character archives).
         #[arg(long)] zones_only: bool,
+        /// Number of worker threads for conversion (default: all-but-one core).
+        #[arg(long, short = 'j', value_parser = clap::value_parser!(u32).range(1..))]
+        jobs: Option<u32>,
     },
     /// Convert a single `.s3d` archive to a `.glb` model (skinned by default).
     /// Useful for producing one race/character model without re-baking the whole set.
@@ -75,16 +78,19 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     match Cli::parse().cmd {
-        Cmd::Build { set, from, raw, out, zones_only } => {
+        Cmd::Build { set, from, raw, out, zones_only, jobs } => {
             let cas = Cas::new(&out);
             let store = ManifestStore::new(&out);
             if let Some(raw_dir) = raw {
+                let n = eqoxide_asset_server::build::resolve_jobs(jobs.map(|j| j as usize));
+                let pool = rayon::ThreadPoolBuilder::new().num_threads(n).build()?;
+                println!("building with {n} worker thread(s)");
                 let work = out.join("work");
                 if !zones_only {
-                    let ms = eqoxide_asset_server::build::build_from_raw(&cas, &store, &raw_dir, &work)?;
+                    let ms = eqoxide_asset_server::build::build_from_raw(&cas, &store, &raw_dir, &work, &pool)?;
                     println!("built {} set(s) from raw archives", ms.len());
                 }
-                let zones = eqoxide_asset_server::build::build_zones_from_raw(&cas, &store, &raw_dir, &work)?;
+                let zones = eqoxide_asset_server::build::build_zones_from_raw(&cas, &store, &raw_dir, &work, &pool)?;
                 println!("baked {} zone(s): {}", zones.len(), zones.join(", "));
                 let gd = eqoxide_asset_server::build::build_gamedata_from_raw(&cas, &store, &raw_dir)?;
                 println!("built 'gamedata' set version {} ({} files)", gd.version, gd.files.len());

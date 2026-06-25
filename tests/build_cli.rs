@@ -3,6 +3,18 @@ use eqoxide_asset_server::cas::Cas;
 use eqoxide_asset_server::manifest::ManifestStore;
 
 #[test]
+fn jobs_flag_rejects_zero() {
+    let exe = env!("CARGO_BIN_EXE_eqoxide-assets");
+    let out = std::process::Command::new(exe)
+        .args(["build", "--out", "/tmp/unused-eqoxide", "--jobs", "0", "--zones-only"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "expected --jobs 0 to be rejected");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("jobs") || stderr.contains("0"), "stderr was: {stderr}");
+}
+
+#[test]
 fn ingest_dir_chunks_all_files_with_relative_paths() {
     let src = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(src.path().join("textures")).unwrap();

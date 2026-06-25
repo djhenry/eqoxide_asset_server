@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use rayon::prelude::*;
+
 use crate::cas::Cas;
 use crate::convert::s3d_to_glb_model;
 use crate::manifest::{Manifest, ManifestStore};
@@ -59,30 +61,46 @@ const COMMON_MODELS: &[(&str, Option<&str>, &str)] = &[
     ("globalpcfroglok_chr.s3d", None, "race_pcfroglok.glb"),
 ];
 
+/// Resolve the worker-thread count for a build. An explicit `--jobs N` (already
+/// validated `>= 1` by clap) is used as-is; otherwise default to all-but-one core,
+/// floored at 1, falling back to 1 if the core count can't be determined.
+pub fn resolve_jobs(requested: Option<usize>) -> usize {
+    match requested {
+        Some(n) => n,
+        None => std::thread::available_parallelism()
+            .map(|n| n.get().saturating_sub(1))
+            .unwrap_or(1)
+            .max(1),
+    }
+}
+
 pub fn build_from_raw(
     cas: &Cas,
     store: &ManifestStore,
     raw_dir: &Path,
     work_dir: &Path,
+    pool: &rayon::ThreadPool,
 ) -> anyhow::Result<Vec<Manifest>> {
     let common_out = work_dir.join("common");
     std::fs::create_dir_all(&common_out)?;
-    for (archive, model_code, out_name) in COMMON_MODELS {
-        let src = raw_dir.join(archive);
-        if !src.exists() {
-            tracing::warn!("skip missing archive {archive} (for {out_name})");
-            continue;
-        }
-        // Per-model conversion can panic on malformed archives; isolate each so one
-        // bad model doesn't abort the whole common build.
-        let out = common_out.join(out_name);
-        let result = std::panic::catch_unwind(|| s3d_to_glb_model(&src, &out, true, *model_code));
-        match result {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => tracing::warn!("skip model {out_name} from {archive}: {}", short_err(&e)),
-            Err(_) => tracing::warn!("skip model {out_name} from {archive}: conversion panicked"),
-        }
-    }
+    pool.install(|| {
+        COMMON_MODELS.par_iter().for_each(|(archive, model_code, out_name)| {
+            let src = raw_dir.join(archive);
+            if !src.exists() {
+                tracing::warn!("skip missing archive {archive} (for {out_name})");
+                return;
+            }
+            // Per-model conversion can panic on malformed archives; isolate each so one
+            // bad model doesn't abort the whole common build.
+            let out = common_out.join(out_name);
+            let result = std::panic::catch_unwind(|| s3d_to_glb_model(&src, &out, true, *model_code));
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::warn!("skip model {out_name} from {archive}: {}", short_err(&e)),
+                Err(_) => tracing::warn!("skip model {out_name} from {archive}: conversion panicked"),
+            }
+        });
+    });
     let common = ingest_dir(cas, store, "common", &common_out)?;
     Ok(vec![common])
 }
@@ -135,44 +153,67 @@ pub fn build_zonedoors_from_raw(cas: &Cas, store: &ManifestStore, raw_dir: &Path
     Ok(Some(store.build_and_write(cas, &format!("zonedoors/{short}"), &files)?))
 }
 
-pub fn build_zones_from_raw(cas: &Cas, store: &ManifestStore, raw_dir: &Path, work_dir: &Path)
-    -> anyhow::Result<Vec<String>>
-{
+pub fn build_zones_from_raw(
+    cas: &Cas,
+    store: &ManifestStore,
+    raw_dir: &Path,
+    work_dir: &Path,
+    pool: &rayon::ThreadPool,
+) -> anyhow::Result<Vec<String>> {
     // libeq panics (not Errs) on some malformed WLDs; we catch_unwind each zone and
-    // log a clean WARN, so silence the default hook's verbose backtrace dump.
+    // log a clean WARN, so silence the default hook's verbose backtrace dump. Set once
+    // before the parallel region (the hook is process-global).
     std::panic::set_hook(Box::new(|_| {}));
-    let mut baked = Vec::new();
+
+    // Collect zone archive paths first, then fan out the per-zone conversion.
+    let mut zone_paths = Vec::new();
     for entry in std::fs::read_dir(raw_dir)? {
         let path = entry?.path();
-        let fname = match path.file_name().and_then(|s| s.to_str()) { Some(f) => f, None => continue };
-        if !is_zone_archive(fname) { continue; }
-        let short = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
-        let obj = raw_dir.join(format!("{short}_obj.s3d"));
-        let zdir = work_dir.join("zone").join(&short);
-        std::fs::create_dir_all(&zdir)?;
-        let glb = zdir.join(format!("{short}.glb"));
-        let result = std::panic::catch_unwind(|| {
-            bake_zone(&path, obj.exists().then_some(obj.as_path()), &glb)
-        });
-        match result {
-            Ok(Ok(())) => {
-                ingest_dir(cas, store, &format!("zone/{short}"), &zdir)?;
-                if let Err(e) = build_zonedoors_from_raw(cas, store, raw_dir, &short) {
-                    tracing::warn!("zonedoors {short}: {}", short_err(&e));
-                }
-                baked.push(short);
-            }
-            Ok(Err(e)) => tracing::warn!("skip zone {short}: {}", short_err(&e)),
-            Err(payload) => {
-                let msg = payload
-                    .downcast_ref::<&str>()
-                    .copied()
-                    .or_else(|| payload.downcast_ref::<String>().map(|s| s.as_str()))
-                    .unwrap_or("<non-string panic>");
-                tracing::warn!("skip zone {short}: bake_zone panicked: {}", short_err(&msg));
-            }
-        }
+        let fname = match path.file_name().and_then(|s| s.to_str()) { Some(f) => f.to_string(), None => continue };
+        if !is_zone_archive(&fname) { continue; }
+        zone_paths.push(path);
     }
+
+    let baked: anyhow::Result<Vec<Option<String>>> = pool.install(|| {
+        zone_paths
+            .par_iter()
+            .map(|path| -> anyhow::Result<Option<String>> {
+                let short = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                let obj = raw_dir.join(format!("{short}_obj.s3d"));
+                let zdir = work_dir.join("zone").join(&short);
+                std::fs::create_dir_all(&zdir)?;
+                let glb = zdir.join(format!("{short}.glb"));
+                let result = std::panic::catch_unwind(|| {
+                    bake_zone(path, obj.exists().then_some(obj.as_path()), &glb)
+                });
+                match result {
+                    Ok(Ok(())) => {
+                        ingest_dir(cas, store, &format!("zone/{short}"), &zdir)?;
+                        if let Err(e) = build_zonedoors_from_raw(cas, store, raw_dir, &short) {
+                            tracing::warn!("zonedoors {short}: {}", short_err(&e));
+                        }
+                        Ok(Some(short))
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!("skip zone {short}: {}", short_err(&e));
+                        Ok(None)
+                    }
+                    Err(payload) => {
+                        let msg = payload
+                            .downcast_ref::<&str>()
+                            .copied()
+                            .or_else(|| payload.downcast_ref::<String>().map(|s| s.as_str()))
+                            .unwrap_or("<non-string panic>");
+                        tracing::warn!("skip zone {short}: bake_zone panicked: {}", short_err(&msg));
+                        Ok(None)
+                    }
+                }
+            })
+            .collect()
+    });
+
+    let mut baked: Vec<String> = baked?.into_iter().flatten().collect();
+    baked.sort();
     Ok(baked)
 }
 
@@ -288,6 +329,7 @@ pub fn ingest_dir(
 #[cfg(test)]
 mod tests {
     use super::is_zone_archive;
+    use super::resolve_jobs;
     #[test]
     fn zone_vs_companion_archives() {
         // real zones
@@ -302,5 +344,16 @@ mod tests {
         ] {
             assert!(!is_zone_archive(c), "{c} should NOT be a zone");
         }
+    }
+
+    #[test]
+    fn resolve_jobs_honors_explicit_request() {
+        assert_eq!(resolve_jobs(Some(3)), 3);
+        assert_eq!(resolve_jobs(Some(1)), 1);
+    }
+
+    #[test]
+    fn resolve_jobs_default_is_at_least_one() {
+        assert!(resolve_jobs(None) >= 1);
     }
 }

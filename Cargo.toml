@@ -38,6 +38,7 @@ libeq_wld = { git = "https://github.com/cjab/libeq", package = "libeq_wld" }
 image = { version = "0.25", default-features = false, features = ["bmp", "png", "dds"] }
 gltf = { version = "1", features = ["import", "extras"] }
 glam = "0.29"
+rayon = "1"
 
 [dev-dependencies]
 tempfile = "3"
