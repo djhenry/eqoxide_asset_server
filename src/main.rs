@@ -52,8 +52,14 @@ enum Cmd {
     Serve {
         #[arg(long)] data: PathBuf,
         #[arg(long, default_value = "0.0.0.0:8088")] addr: SocketAddr,
-        #[arg(long, env = "EQEMU_DB_URL")] db: String,
+        /// EQEmu DB URL for account validation. Not required (and not connected)
+        /// when --no-auth-required is set.
+        #[arg(long, env = "EQEMU_DB_URL")] db: Option<String>,
         #[arg(long)] secret_file: PathBuf,
+        /// DEV ONLY: serve assets without any credential/token check, and skip the
+        /// MariaDB connection entirely. Lets tools pull models without the EQEmu
+        /// login flow. Do NOT enable on a public/production server.
+        #[arg(long)] no_auth_required: bool,
     },
 }
 
@@ -102,13 +108,20 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Analyze { archive } => {
             eqoxide_asset_server::convert::analyze_anims(&archive)
         }
-        Cmd::Serve { data, addr, db, secret_file } => {
-            let accounts = MariaAccountStore::connect(&db).await?;
+        Cmd::Serve { data, addr, db, secret_file, no_auth_required } => {
+            let accounts: Arc<dyn eqoxide_asset_server::auth::AccountStore> = if no_auth_required {
+                tracing::warn!("--no-auth-required: serving assets WITHOUT auth (dev mode); skipping MariaDB");
+                Arc::new(eqoxide_asset_server::auth::FakeAccountStore { creds: Default::default() })
+            } else {
+                let url = db.expect("--db (or EQEMU_DB_URL) required unless --no-auth-required");
+                Arc::new(MariaAccountStore::connect(&url).await?)
+            };
             let state = AppState {
                 cas: Arc::new(Cas::new(&data)),
                 manifests: Arc::new(ManifestStore::new(&data)),
-                accounts: Arc::new(accounts),
+                accounts,
                 tokens: Arc::new(TokenIssuer::new(load_secret(&secret_file), Duration::from_secs(3600))),
+                no_auth: no_auth_required,
             };
             serve(state, addr).await
         }

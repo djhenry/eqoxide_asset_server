@@ -21,6 +21,9 @@ pub struct AppState {
     pub manifests: Arc<ManifestStore>,
     pub accounts: Arc<dyn AccountStore>,
     pub tokens: Arc<TokenIssuer>,
+    /// Dev escape hatch: when true, skip all credential/token checks so tools can
+    /// pull assets without the EQEmu login flow. NEVER enable in production.
+    pub no_auth: bool,
 }
 
 #[derive(Deserialize)]
@@ -41,7 +44,7 @@ fn bearer(headers: &HeaderMap, tokens: &TokenIssuer) -> Option<String> {
 }
 
 async fn post_auth(State(st): State<AppState>, Json(req): Json<AuthReq>) -> Response {
-    if st.accounts.verify(&req.username, &req.password) {
+    if st.no_auth || st.accounts.verify(&req.username, &req.password) {
         let token = st.tokens.issue(&req.username);
         Json(serde_json::json!({ "token": token })).into_response()
     } else {
@@ -55,7 +58,7 @@ async fn get_manifest(
     Path(set): Path<String>,
     Query(q): Query<VersionQuery>,
 ) -> Response {
-    if bearer(&headers, &st.tokens).is_none() {
+    if !st.no_auth && bearer(&headers, &st.tokens).is_none() {
         return (StatusCode::UNAUTHORIZED, "missing/invalid token").into_response();
     }
     let result = match q.version {
@@ -73,7 +76,7 @@ async fn get_chunk(
     headers: HeaderMap,
     Path(hash): Path<String>,
 ) -> Response {
-    if bearer(&headers, &st.tokens).is_none() {
+    if !st.no_auth && bearer(&headers, &st.tokens).is_none() {
         return (StatusCode::UNAUTHORIZED, "missing/invalid token").into_response();
     }
     match st.cas.get(&hash) {
