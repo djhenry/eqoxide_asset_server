@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use rayon::prelude::*;
+
 use crate::cas::Cas;
 use crate::convert::s3d_to_glb_model;
 use crate::manifest::{Manifest, ManifestStore};
@@ -59,30 +61,46 @@ const COMMON_MODELS: &[(&str, Option<&str>, &str)] = &[
     ("globalpcfroglok_chr.s3d", None, "race_pcfroglok.glb"),
 ];
 
+/// Resolve the worker-thread count for a build. An explicit `--jobs N` (already
+/// validated `>= 1` by clap) is used as-is; otherwise default to all-but-one core,
+/// floored at 1, falling back to 1 if the core count can't be determined.
+pub fn resolve_jobs(requested: Option<usize>) -> usize {
+    match requested {
+        Some(n) => n,
+        None => std::thread::available_parallelism()
+            .map(|n| n.get().saturating_sub(1))
+            .unwrap_or(1)
+            .max(1),
+    }
+}
+
 pub fn build_from_raw(
     cas: &Cas,
     store: &ManifestStore,
     raw_dir: &Path,
     work_dir: &Path,
+    pool: &rayon::ThreadPool,
 ) -> anyhow::Result<Vec<Manifest>> {
     let common_out = work_dir.join("common");
     std::fs::create_dir_all(&common_out)?;
-    for (archive, model_code, out_name) in COMMON_MODELS {
-        let src = raw_dir.join(archive);
-        if !src.exists() {
-            tracing::warn!("skip missing archive {archive} (for {out_name})");
-            continue;
-        }
-        // Per-model conversion can panic on malformed archives; isolate each so one
-        // bad model doesn't abort the whole common build.
-        let out = common_out.join(out_name);
-        let result = std::panic::catch_unwind(|| s3d_to_glb_model(&src, &out, true, *model_code));
-        match result {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => tracing::warn!("skip model {out_name} from {archive}: {}", short_err(&e)),
-            Err(_) => tracing::warn!("skip model {out_name} from {archive}: conversion panicked"),
-        }
-    }
+    pool.install(|| {
+        COMMON_MODELS.par_iter().for_each(|(archive, model_code, out_name)| {
+            let src = raw_dir.join(archive);
+            if !src.exists() {
+                tracing::warn!("skip missing archive {archive} (for {out_name})");
+                return;
+            }
+            // Per-model conversion can panic on malformed archives; isolate each so one
+            // bad model doesn't abort the whole common build.
+            let out = common_out.join(out_name);
+            let result = std::panic::catch_unwind(|| s3d_to_glb_model(&src, &out, true, *model_code));
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::warn!("skip model {out_name} from {archive}: {}", short_err(&e)),
+                Err(_) => tracing::warn!("skip model {out_name} from {archive}: conversion panicked"),
+            }
+        });
+    });
     let common = ingest_dir(cas, store, "common", &common_out)?;
     Ok(vec![common])
 }
@@ -288,6 +306,7 @@ pub fn ingest_dir(
 #[cfg(test)]
 mod tests {
     use super::is_zone_archive;
+    use super::resolve_jobs;
     #[test]
     fn zone_vs_companion_archives() {
         // real zones
@@ -302,5 +321,16 @@ mod tests {
         ] {
             assert!(!is_zone_archive(c), "{c} should NOT be a zone");
         }
+    }
+
+    #[test]
+    fn resolve_jobs_honors_explicit_request() {
+        assert_eq!(resolve_jobs(Some(3)), 3);
+        assert_eq!(resolve_jobs(Some(1)), 1);
+    }
+
+    #[test]
+    fn resolve_jobs_default_is_at_least_one() {
+        assert!(resolve_jobs(None) >= 1);
     }
 }
