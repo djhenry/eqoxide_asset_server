@@ -25,6 +25,7 @@ async fn spawn() -> (SocketAddr, tempfile::TempDir) {
         manifests: Arc::new(ManifestStore::new(dir.path())),
         accounts: Arc::new(FakeAccountStore { creds }),
         tokens: Arc::new(TokenIssuer::new([5u8; 32], Duration::from_secs(3600))),
+        no_auth: false,
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
