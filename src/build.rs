@@ -160,6 +160,39 @@ pub fn build_zones_from_raw(cas: &Cas, store: &ManifestStore, raw_dir: &Path, wo
     Ok(baked)
 }
 
+/// Build the "gamedata" set: the runtime TEXT game data the client needs but shouldn't read from
+/// ~/eq_assets at runtime — the string table (eqstr_us.txt), spell DB (spells_us.txt), and the zone
+/// maps tree (maps/, including the water-region maps/water/*.wtr). Files keep their relative paths
+/// ("eqstr_us.txt", "maps/qcat.txt", "maps/water/qcat.wtr") so the client finds them in its cache.
+pub fn build_gamedata_from_raw(
+    cas: &Cas,
+    store: &ManifestStore,
+    raw_dir: &Path,
+) -> anyhow::Result<Manifest> {
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    for name in ["eqstr_us.txt", "spells_us.txt"] {
+        let p = raw_dir.join(name);
+        if p.exists() {
+            files.push((name.to_string(), std::fs::read(&p)?));
+        } else {
+            tracing::warn!("gamedata: missing {name} in {}", raw_dir.display());
+        }
+    }
+    let maps = raw_dir.join("maps");
+    if maps.is_dir() {
+        let mut paths = Vec::new();
+        collect_files(&maps, &mut paths)?;
+        paths.sort();
+        for p in paths {
+            let rel = format!("maps/{}", p.strip_prefix(&maps)?.to_string_lossy().replace('\\', "/"));
+            files.push((rel, std::fs::read(&p)?));
+        }
+    } else {
+        tracing::warn!("gamedata: no maps/ dir in {}", raw_dir.display());
+    }
+    store.build_and_write(cas, "gamedata", &files)
+}
+
 fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
