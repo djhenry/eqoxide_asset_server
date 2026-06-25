@@ -88,6 +88,8 @@ async fn main() -> anyhow::Result<()> {
                 println!("baked {} zone(s): {}", zones.len(), zones.join(", "));
                 let gd = eqoxide_asset_server::build::build_gamedata_from_raw(&cas, &store, &raw_dir)?;
                 println!("built 'gamedata' set version {} ({} files)", gd.version, gd.files.len());
+                let ge = eqoxide_asset_server::build::build_gameequip_from_raw(&cas, &store, &raw_dir)?;
+                println!("built 'gameequip' set version {} ({} files)", ge.version, ge.files.len());
             } else {
                 let set = set.expect("--set required without --raw");
                 let from = from.expect("--from required without --raw");

@@ -122,6 +122,19 @@ fn short_err(e: &impl std::fmt::Display) -> String {
     s
 }
 
+/// Build the "zonedoors/<short>" set: the zone's object archive (`<short>_obj.s3d`) so the client
+/// renders clickable-door 3D models from the asset-server cache instead of ~/eq_assets. Door object
+/// models live in `_obj.s3d`; the client's load_object_models skips the main `.s3d` if it's absent,
+/// so we don't ship the (large, GLB-redundant) terrain archive. Returns None if the zone has no obj.
+pub fn build_zonedoors_from_raw(cas: &Cas, store: &ManifestStore, raw_dir: &Path, short: &str)
+    -> anyhow::Result<Option<Manifest>>
+{
+    let obj = raw_dir.join(format!("{short}_obj.s3d"));
+    if !obj.exists() { return Ok(None); }
+    let files = vec![(format!("{short}_obj.s3d"), std::fs::read(&obj)?)];
+    Ok(Some(store.build_and_write(cas, &format!("zonedoors/{short}"), &files)?))
+}
+
 pub fn build_zones_from_raw(cas: &Cas, store: &ManifestStore, raw_dir: &Path, work_dir: &Path)
     -> anyhow::Result<Vec<String>>
 {
@@ -144,6 +157,9 @@ pub fn build_zones_from_raw(cas: &Cas, store: &ManifestStore, raw_dir: &Path, wo
         match result {
             Ok(Ok(())) => {
                 ingest_dir(cas, store, &format!("zone/{short}"), &zdir)?;
+                if let Err(e) = build_zonedoors_from_raw(cas, store, raw_dir, &short) {
+                    tracing::warn!("zonedoors {short}: {}", short_err(&e));
+                }
                 baked.push(short);
             }
             Ok(Err(e)) => tracing::warn!("skip zone {short}: {}", short_err(&e)),
@@ -158,6 +174,47 @@ pub fn build_zones_from_raw(cas: &Cas, store: &ManifestStore, raw_dir: &Path, wo
         }
     }
     Ok(baked)
+}
+
+/// The equipment/weapon S3D archives the client needs to texture worn armor and render held
+/// weapons. Kept in sync with eq_client_lite renderer.rs (index_s3d_textures globals + ARCHETYPES /
+/// archetype_to_chr_s3d) and assets.rs load_weapon_model (gequip*). Served raw (the client parses
+/// S3D); this removes the client's direct dependency on the ~/eq_assets folder.
+const GAMEEQUIP_ARCHIVES: &[&str] = &[
+    // armor texture sets (global17_amr.s3d .. global23_amr.s3d)
+    "global17_amr.s3d", "global18_amr.s3d", "global19_amr.s3d", "global20_amr.s3d",
+    "global21_amr.s3d", "global22_amr.s3d", "global23_amr.s3d",
+    // combined all-races base body textures
+    "global_chr.s3d",
+    // per-archetype character archives (body textures for the mapped player races)
+    "globalhum_chr.s3d", "globalhum_chr2.s3d",
+    "globalelf_chr.s3d", "globalelf_chr2.s3d",
+    "globaldwf_chr.s3d", "globaldwf_chr2.s3d",
+    "globalgnm_chr.s3d", "globalgnm_chr2.s3d",
+    "globalfroglok_chr.s3d",
+    // held weapon models
+    "gequip.s3d", "gequip2.s3d", "gequip3.s3d", "gequip4.s3d",
+    "gequip5.s3d", "gequip6.s3d", "gequip7.s3d", "gequip8.s3d",
+];
+
+/// Build the "gameequip" set: the equipment/weapon S3D archives (served raw, see
+/// GAMEEQUIP_ARCHIVES) so the client loads worn-armor textures + held-weapon models from the asset
+/// server cache instead of reading ~/eq_assets at runtime.
+pub fn build_gameequip_from_raw(
+    cas: &Cas,
+    store: &ManifestStore,
+    raw_dir: &Path,
+) -> anyhow::Result<Manifest> {
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    for name in GAMEEQUIP_ARCHIVES {
+        let p = raw_dir.join(name);
+        if p.exists() {
+            files.push((name.to_string(), std::fs::read(&p)?));
+        } else {
+            tracing::warn!("gameequip: missing {name} in {}", raw_dir.display());
+        }
+    }
+    store.build_and_write(cas, "gameequip", &files)
 }
 
 /// Build the "gamedata" set: the runtime TEXT game data the client needs but shouldn't read from
