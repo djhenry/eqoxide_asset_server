@@ -10,6 +10,27 @@ pub struct ZoneMesh {
     pub uvs: Vec<[f32; 2]>,
     pub indices: Vec<u32>,
     pub texture_name: Option<String>,
+    /// Transparency mode from the EQ material's render method (foliage = Masked).
+    pub alpha_mode: crate::convert::AlphaMode,
+    /// EQ animated texture frames `(interval_ms, frame image names incl. frame 0)`;
+    /// `None` for static textures. Captured from the libeq SimpleSpriteDef at load.
+    pub anim: Option<(u32, Vec<String>)>,
+}
+
+/// EQ animated-texture frames for a material's base-color texture, if it is animated
+/// (more than one frame). Returns `(interval_ms, lowercased frame image names)`.
+/// libeq exposes the frame list via `iter_sources()` and the animated flag via `flags()`;
+/// the per-frame interval (`SimpleSpriteDef.sleep`) isn't surfaced by the high-level API,
+/// so we use EQ's classic ~100 ms/frame (≈10 fps) which matches fire/torch flicker.
+fn texture_anim(tex: &libeq_wld::Texture<'_>) -> Option<(u32, Vec<String>)> {
+    if !tex.flags().is_animated() {
+        return None;
+    }
+    let frames: Vec<String> = tex.iter_sources().map(|s| s.to_lowercase()).collect();
+    if frames.len() < 2 {
+        return None;
+    }
+    Some((100, frames))
 }
 
 /// Strip `_DMSPRITEDEF`/`_ACTORDEF`/`_DMSPRITE`/`_DEF` suffixes and uppercase the result.
@@ -37,6 +58,8 @@ pub fn place_instance(model: &ZoneMesh, center: (f32, f32, f32), rot_z_deg: f32,
         uvs: model.uvs.clone(),
         indices: model.indices.clone(),
         texture_name: model.texture_name.clone(),
+        alpha_mode: model.alpha_mode,
+        anim: model.anim.clone(),
     }
 }
 
@@ -95,10 +118,20 @@ pub fn load_object_models(obj_s3d: &Path) -> anyhow::Result<HashMap<String, Vec<
                 if idx.iter().any(|&i| i as usize >= all_pos.len()) { continue; }
                 let positions = idx.iter().map(|&i| { let p = all_pos[i as usize]; [p[0]+cx, p[1]+cy, p[2]+cz] }).collect();
                 let normals = idx.iter().map(|&i| all_nrm.get(i as usize).copied().unwrap_or([0.0,0.0,1.0])).collect();
-                let uvs = idx.iter().map(|&i| all_uv.get(i as usize).copied().unwrap_or([0.0,0.0])).collect();
-                let texture_name = prim.material().base_color_texture().and_then(|t| t.source());
+                let mat = prim.material();
+                let tex = mat.base_color_texture();
+                let texture_name = tex.as_ref().and_then(|t| t.source());
+                let anim = tex.as_ref().and_then(texture_anim);
+                let alpha_mode = crate::convert::alpha_mode_from_render(mat.render_method());
+                // EQ animated sprite cards (fire/torch) author their UVs V-inverted vs
+                // the (upright) texture, so they render upside-down as plain quads. Flip V.
+                let flip_v = anim.is_some();
+                let uvs = idx.iter().map(|&i| {
+                    let uv = all_uv.get(i as usize).copied().unwrap_or([0.0, 0.0]);
+                    if flip_v { [uv[0], 1.0 - uv[1]] } else { uv }
+                }).collect();
                 let raw = ZoneMesh {
-                    positions, normals, uvs, indices: (0..idx.len() as u32).collect(), texture_name,
+                    positions, normals, uvs, indices: (0..idx.len() as u32).collect(), texture_name, alpha_mode, anim,
                 };
                 models.entry(base.clone()).or_default().push(weld(&raw));
             }
@@ -161,7 +194,7 @@ pub fn weld(mesh: &ZoneMesh) -> ZoneMesh {
         });
         indices.push(idx);
     }
-    ZoneMesh { positions, normals, uvs, indices, texture_name: mesh.texture_name.clone() }
+    ZoneMesh { positions, normals, uvs, indices, texture_name: mesh.texture_name.clone(), alpha_mode: mesh.alpha_mode, anim: mesh.anim.clone() }
 }
 
 /// Extract terrain meshes from a zone's main `.s3d`, keeping texture names, in
@@ -200,12 +233,23 @@ fn load_terrain(main_s3d: &Path) -> anyhow::Result<Vec<ZoneMesh>> {
                 if idx.iter().any(|&i| i as usize >= all_pos.len()) { continue; }
                 let positions = idx.iter().map(|&i| { let p = all_pos[i as usize]; [p[0] + cx, p[1] + cy, p[2] + cz] }).collect();
                 let normals = idx.iter().map(|&i| all_nrm.get(i as usize).copied().unwrap_or([0.0, 0.0, 1.0])).collect();
-                let uvs = idx.iter().map(|&i| all_uv.get(i as usize).copied().unwrap_or([0.0, 0.0])).collect();
-                let texture_name = prim.material().base_color_texture().and_then(|t| t.source());
+                let mat = prim.material();
+                let tex = mat.base_color_texture();
+                let texture_name = tex.as_ref().and_then(|t| t.source());
+                let anim = tex.as_ref().and_then(texture_anim);
+                let alpha_mode = crate::convert::alpha_mode_from_render(mat.render_method());
+                // Flip V for animated sprite cards (see load_object_models).
+                let flip_v = anim.is_some();
+                let uvs = idx.iter().map(|&i| {
+                    let uv = all_uv.get(i as usize).copied().unwrap_or([0.0, 0.0]);
+                    if flip_v { [uv[0], 1.0 - uv[1]] } else { uv }
+                }).collect();
                 out.push(ZoneMesh {
                     positions, normals, uvs,
                     indices: (0..idx.len() as u32).collect(),
                     texture_name,
+                    alpha_mode,
+                    anim,
                 });
             }
         }
@@ -222,14 +266,19 @@ fn load_terrain(main_s3d: &Path) -> anyhow::Result<Vec<ZoneMesh>> {
 /// Reduces a zone's terrain from thousands of tiny primitives to one-per-texture.
 fn merge_by_texture(meshes: Vec<ZoneMesh>) -> Vec<ZoneMesh> {
     use std::collections::HashMap;
-    let mut groups: HashMap<Option<String>, ZoneMesh> = HashMap::new();
+    // Group by (texture, alpha_mode): meshes sharing a texture but rendered with
+    // different transparency must stay separate so each gets the right glTF material.
+    let mut groups: HashMap<(Option<String>, crate::convert::AlphaMode), ZoneMesh> = HashMap::new();
     for m in meshes {
-        let entry = groups.entry(m.texture_name.clone()).or_insert_with(|| ZoneMesh {
+        let key = (m.texture_name.clone(), m.alpha_mode);
+        let entry = groups.entry(key).or_insert_with(|| ZoneMesh {
             positions: Vec::new(),
             normals: Vec::new(),
             uvs: Vec::new(),
             indices: Vec::new(),
             texture_name: m.texture_name.clone(),
+            alpha_mode: m.alpha_mode,
+            anim: m.anim.clone(),
         });
         let base = entry.positions.len() as u32;
         entry.positions.extend(m.positions);
@@ -237,7 +286,14 @@ fn merge_by_texture(meshes: Vec<ZoneMesh>) -> Vec<ZoneMesh> {
         entry.uvs.extend(m.uvs);
         entry.indices.extend(m.indices.iter().map(|&i| i + base));
     }
-    groups.into_values().collect()
+    let mut result: Vec<ZoneMesh> = groups.into_values().collect();
+    // Deterministic order: by texture name, then alpha mode.
+    result.sort_by(|a, b| {
+        a.texture_name
+            .cmp(&b.texture_name)
+            .then_with(|| format!("{:?}", a.alpha_mode).cmp(&format!("{:?}", b.alpha_mode)))
+    });
+    result
 }
 
 /// Bake a zone into a single glb: terrain from `main_s3d` plus placed objects
@@ -275,32 +331,54 @@ pub fn bake_zone(main_s3d: &Path, obj_s3d: Option<&Path>, output_glb: &Path) -> 
                             mat_map: &mut HashMap<String, usize>,
                             pfs_list: &mut Vec<libeq_pfs::PfsReader<std::fs::File>>|
      -> usize {
-        let key = m.texture_name.clone().unwrap_or_else(|| "untextured".to_string());
+        let tex_key = m.texture_name.clone().unwrap_or_else(|| "untextured".to_string());
+        // Material + texture caches key on (texture, alpha_mode): same texture under
+        // different transparency needs its own material (and its own decode: masked
+        // keys out index 0, blend bakes opacity into alpha).
+        let key = format!("{}\0{:?}", tex_key, m.alpha_mode);
         if let Some(&idx) = mat_map.get(&key) {
             return idx;
         }
-        let texture_idx = if let Some(src) = &m.texture_name {
-            match tex_map.get(src) {
-                Some(&t) => Some(t),
-                None => {
-                    let lower = src.to_lowercase();
-                    let png = pfs_list.iter_mut().find_map(|pfs| load_texture_from_archive(pfs, &lower));
-                    png.map(|png_bytes| {
-                        let t = textures.len();
-                        textures.push(TextureData { name: lower, png_bytes });
-                        tex_map.insert(src.clone(), t);
-                        t
-                    })
-                }
+        // Decode + cache one texture by name (keyed by alpha_mode so masked/blend
+        // decodes don't collide with opaque). Returns its index in `textures`.
+        let alpha_mode = m.alpha_mode;
+        let decode = |name: &str,
+                          textures: &mut Vec<TextureData>,
+                          tex_map: &mut HashMap<String, usize>,
+                          pfs_list: &mut Vec<libeq_pfs::PfsReader<std::fs::File>>| -> Option<usize> {
+            let lower = name.to_lowercase();
+            let cache_key = format!("{}\0{:?}", lower, alpha_mode);
+            if let Some(&t) = tex_map.get(&cache_key) {
+                return Some(t);
             }
-        } else {
-            None
+            let png = pfs_list.iter_mut().find_map(|pfs| load_texture_from_archive(pfs, &lower, alpha_mode));
+            png.map(|png_bytes| {
+                let t = textures.len();
+                textures.push(TextureData { name: lower, png_bytes });
+                tex_map.insert(cache_key, t);
+                t
+            })
         };
+
+        let texture_idx = m.texture_name.as_ref()
+            .and_then(|src| decode(src, textures, tex_map, pfs_list));
+
+        // Animated texture: decode every frame so all are present as glTF images, and
+        // record the (interval, frame names) so the client can cycle them.
+        let anim = m.anim.as_ref().map(|(ms, frames)| {
+            for f in frames {
+                decode(f, textures, tex_map, pfs_list);
+            }
+            (*ms, frames.clone())
+        });
+
         let idx = materials.len();
         materials.push(MaterialData {
-            name: key.clone(),
+            name: tex_key,
             texture_idx,
             base_color: [1.0, 1.0, 1.0, 1.0],
+            alpha_mode: m.alpha_mode,
+            anim,
         });
         mat_map.insert(key, idx);
         idx
@@ -401,6 +479,7 @@ mod weld_tests {
             uvs:       vec![[0.,0.]; 6],
             indices:   vec![0,1,2,3,4,5],
             texture_name: Some("floor.bmp".into()),
+            ..Default::default()
         };
         let w = weld(&m);
         assert_eq!(w.positions.len(), 4, "4 distinct corners");
@@ -424,6 +503,7 @@ mod tests {
             uvs: vec![[0.0, 0.0]],
             indices: vec![0],
             texture_name: Some("wall.bmp".into()),
+            ..Default::default()
         };
         // 90° about up at origin offset (10, 5, 20): x=1 → [cos90*1 + 0, 0+5, -sin90*1 + 20]
         let out = place_instance(&model, (10.0, 5.0, 20.0), 90.0, 1.0);
@@ -444,6 +524,7 @@ mod tests {
             uvs: vec![[0.0, 0.0]; 3],
             indices: vec![0, 1, 2],
             texture_name: None,
+            ..Default::default()
         };
         let center = (10.0, 5.0, -20.0);
         let rot = 37.0;

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use glam::{Mat4, Quat, Vec3};
 use libeq_wld::parser::{
-    Dag, DmSpriteDef2, HierarchicalSpriteDef, Track, TrackDef, WldDoc,
+    Dag, DmSpriteDef2, HierarchicalSpriteDef, MaterialType, RenderMethod, Track, TrackDef, WldDoc,
 };
 
 pub(crate) struct PrimitiveData {
@@ -28,10 +28,87 @@ pub(crate) struct TextureData {
     pub(crate) png_bytes: Vec<u8>,
 }
 
+/// Transparency mode derived from the EQ material's `RenderMethod` / `MaterialType`.
+/// Drives both how the source texture is decoded (masked keys out palette index 0)
+/// and which glTF `alphaMode` is emitted.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub enum AlphaMode {
+    #[default]
+    Opaque,
+    /// Cutout: palette index 0 becomes transparent; glTF `alphaMode: MASK`.
+    Masked,
+    /// Semi-transparent blend; opacity in permille (1000 = opaque). glTF `alphaMode: BLEND`.
+    Blend(u16),
+    /// Additive blend (EQ glow/fire). glTF `alphaMode: BLEND` + `extras.eqAdditive`.
+    Additive,
+}
+
 pub(crate) struct MaterialData {
     pub(crate) name: String,
     pub(crate) texture_idx: Option<usize>,
     pub(crate) base_color: [f32; 4],
+    pub(crate) alpha_mode: AlphaMode,
+    /// For EQ animated textures (fire/water/lava): `(frame_interval_ms, frame image
+    /// names incl. frame 0)`. The client cycles these frames at the interval. `None`
+    /// for static textures.
+    pub(crate) anim: Option<(u32, Vec<String>)>,
+}
+
+/// Build the glTF material JSON object for a [`MaterialData`], including the
+/// `alphaMode`/`alphaCutoff` (and additive `extras`) derived from its EQ render
+/// method. Shared by all three GLB writers so transparency is emitted uniformly.
+fn material_to_gltf(mat: &MaterialData) -> serde_json::Value {
+    // Blended materials carry opacity in the baseColorFactor alpha (which glTF
+    // multiplies into the texture); masked/opaque keep full alpha.
+    let base_alpha = match mat.alpha_mode {
+        AlphaMode::Blend(permille) => permille as f32 / 1000.0,
+        _ => mat.base_color[3],
+    };
+    let pbr = if let Some(ti) = mat.texture_idx {
+        serde_json::json!({
+            "baseColorTexture": { "index": ti },
+            "baseColorFactor": [1.0, 1.0, 1.0, base_alpha],
+            "metallicFactor": 0.0,
+            "roughnessFactor": 1.0,
+        })
+    } else {
+        let mut bc = mat.base_color;
+        bc[3] = base_alpha;
+        serde_json::json!({ "baseColorFactor": bc, "metallicFactor": 0.0, "roughnessFactor": 1.0 })
+    };
+    let mut m = serde_json::json!({
+        "name": mat.name,
+        "pbrMetallicRoughness": pbr,
+        "doubleSided": true,
+    });
+    let mut extras = serde_json::Map::new();
+    match mat.alpha_mode {
+        AlphaMode::Opaque => {}
+        AlphaMode::Masked => {
+            m["alphaMode"] = serde_json::json!("MASK");
+            m["alphaCutoff"] = serde_json::json!(0.5);
+        }
+        AlphaMode::Blend(_) => {
+            m["alphaMode"] = serde_json::json!("BLEND");
+        }
+        AlphaMode::Additive => {
+            // glTF has no additive mode; flag it for the client via extras.
+            m["alphaMode"] = serde_json::json!("BLEND");
+            extras.insert("eqAdditive".into(), serde_json::json!(true));
+        }
+    }
+    // Animated texture (fire/water/lava): emit frame interval + frame image names so
+    // the client can cycle them. glTF has no native texture-frame animation.
+    if let Some((ms, frames)) = &mat.anim {
+        extras.insert(
+            "eqAnim".into(),
+            serde_json::json!({ "ms": ms, "frames": frames }),
+        );
+    }
+    if !extras.is_empty() {
+        m["extras"] = serde_json::Value::Object(extras);
+    }
+    m
 }
 
 /// A glTF node for the instanced writer: references a mesh by index, with an
@@ -263,20 +340,25 @@ fn get_or_create_material(
     pfs: &mut libeq_pfs::PfsReader<fs::File>,
 ) -> usize {
     let mat_name = material.name().unwrap_or("unnamed").to_string();
+    let alpha_mode = alpha_mode_from_render(material.render_method());
 
     let texture_idx = if let Some(src) = texture_source {
-        if let Some(&idx) = texture_map.get(src) {
+        // Key by (source, alpha_mode): masked keys out index 0 and blend bakes
+        // opacity into alpha, so the decoded bytes differ per mode — never dedup
+        // the same texture across modes.
+        let cache_key = format!("{}\0{:?}", src, alpha_mode);
+        if let Some(&idx) = texture_map.get(&cache_key) {
             Some(idx)
         } else {
             let tex_name = src.to_lowercase();
-            match load_texture_from_archive(pfs, &tex_name) {
+            match load_texture_from_archive(pfs, &tex_name, alpha_mode) {
                 Some(png_bytes) => {
                     let idx = textures.len();
                     textures.push(TextureData {
                         name: tex_name,
                         png_bytes,
                     });
-                    texture_map.insert(src.to_string(), idx);
+                    texture_map.insert(cache_key, idx);
                     Some(idx)
                 }
                 None => None,
@@ -291,15 +373,43 @@ fn get_or_create_material(
         name: mat_name,
         texture_idx,
         base_color: [1.0, 1.0, 1.0, 1.0],
+        alpha_mode,
+        anim: None, // character/weapon model textures: keep first frame only
     });
     idx
 }
 
-pub(crate) fn load_texture_from_archive(pfs: &mut libeq_pfs::PfsReader<fs::File>, name: &str) -> Option<Vec<u8>> {
+/// Map an EQ material's `RenderMethod` to our [`AlphaMode`]. Foliage and other
+/// cutout surfaces are `TransparentMasked`/`TransparentMaskedPassable`; the
+/// `Transparent25/50/75` types are semi-transparent blends; the additive types
+/// are EQ glow/fire surfaces. Everything else renders opaque.
+pub(crate) fn alpha_mode_from_render(rm: &RenderMethod) -> AlphaMode {
+    match rm {
+        RenderMethod::UserDefined { material_type } => match material_type {
+            MaterialType::TransparentMasked | MaterialType::TransparentMaskedPassable => {
+                AlphaMode::Masked
+            }
+            MaterialType::Transparent25 => AlphaMode::Blend(250),
+            MaterialType::Transparent50 => AlphaMode::Blend(500),
+            MaterialType::Transparent75 => AlphaMode::Blend(750),
+            MaterialType::TransparentAdditive | MaterialType::TransparentAdditiveUnlit => {
+                AlphaMode::Additive
+            }
+            _ => AlphaMode::Opaque,
+        },
+        RenderMethod::Standard { .. } => AlphaMode::Opaque,
+    }
+}
+
+pub(crate) fn load_texture_from_archive(
+    pfs: &mut libeq_pfs::PfsReader<fs::File>,
+    name: &str,
+    alpha_mode: AlphaMode,
+) -> Option<Vec<u8>> {
     let lower = name.to_lowercase();
 
     // Try the name as-is first
-    if let Some(data) = try_load_image(pfs, &lower) {
+    if let Some(data) = try_load_image(pfs, &lower, alpha_mode) {
         return Some(data);
     }
 
@@ -312,21 +422,101 @@ pub(crate) fn load_texture_from_archive(pfs: &mut libeq_pfs::PfsReader<fs::File>
 
     for ext in &[".dds", ".bmp", ".png"] {
         let filename = format!("{}{}", stem, ext);
-        if let Some(data) = try_load_image(pfs, &filename) {
+        if let Some(data) = try_load_image(pfs, &filename, alpha_mode) {
             return Some(data);
         }
     }
     None
 }
 
-fn try_load_image(pfs: &mut libeq_pfs::PfsReader<fs::File>, filename: &str) -> Option<Vec<u8>> {
+fn try_load_image(pfs: &mut libeq_pfs::PfsReader<fs::File>, filename: &str, alpha_mode: AlphaMode) -> Option<Vec<u8>> {
     let data = pfs.get(filename).ok()??;
-    image::load_from_memory(&data).ok().and_then(|img| {
-        let rgba = img.to_rgba8();
-        let mut png_buf = Cursor::new(Vec::new());
-        rgba.write_to(&mut png_buf, image::ImageFormat::Png).ok()?;
-        Some(png_buf.into_inner())
-    })
+    // For masked materials, recover EQ's keyed transparency: in 8-bit paletted BMPs
+    // palette index 0 is the transparent key. The `image` crate's to_rgba8() would
+    // make it opaque, so decode the palette ourselves when we can.
+    let mut rgba = if alpha_mode == AlphaMode::Masked {
+        decode_bmp_keyed(&data).unwrap_or_else(|| image::load_from_memory(&data).ok().map(|i| i.to_rgba8()).unwrap_or_default())
+    } else {
+        image::load_from_memory(&data).ok()?.to_rgba8()
+    };
+    if rgba.is_empty() {
+        return None;
+    }
+    // Bake per-material opacity into the alpha channel for blended materials so the
+    // client can blend straight from the texture (no per-draw opacity uniform).
+    if let AlphaMode::Blend(permille) = alpha_mode {
+        let scale = permille as f32 / 1000.0;
+        for px in rgba.pixels_mut() {
+            px[3] = (px[3] as f32 * scale).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    let mut png_buf = Cursor::new(Vec::new());
+    rgba.write_to(&mut png_buf, image::ImageFormat::Png).ok()?;
+    Some(png_buf.into_inner())
+}
+
+/// Decode an 8-bit paletted BMP, treating palette index 0 as fully transparent
+/// (EQ's masked-texture convention). Returns `None` for any BMP that isn't the
+/// uncompressed 8bpp BITMAPINFOHEADER form, so callers fall back to opaque decode.
+fn decode_bmp_keyed(data: &[u8]) -> Option<image::RgbaImage> {
+    if data.len() < 54 || &data[0..2] != b"BM" {
+        return None;
+    }
+    let rd_u32 = |o: usize| u32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
+    let rd_i32 = |o: usize| i32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
+    let rd_u16 = |o: usize| u16::from_le_bytes([data[o], data[o + 1]]);
+
+    let pixel_offset = rd_u32(10) as usize;
+    let dib_size = rd_u32(14) as usize;
+    if dib_size < 40 {
+        return None; // only BITMAPINFOHEADER (40) or larger
+    }
+    let width = rd_i32(18);
+    let height_raw = rd_i32(22);
+    let bpp = rd_u16(28);
+    let compression = rd_u32(30);
+    if bpp != 8 || compression != 0 || width <= 0 || height_raw == 0 {
+        return None;
+    }
+    let width = width as usize;
+    let top_down = height_raw < 0;
+    let height = height_raw.unsigned_abs() as usize;
+
+    // Palette: 4 bytes each (B,G,R,reserved), right after the DIB header.
+    let palette_start = 14 + dib_size;
+    let mut colors_used = rd_u32(46) as usize;
+    if colors_used == 0 {
+        colors_used = 256;
+    }
+    if palette_start + colors_used * 4 > data.len() || palette_start + colors_used * 4 > pixel_offset {
+        return None;
+    }
+    let palette: Vec<[u8; 3]> = (0..colors_used)
+        .map(|i| {
+            let p = palette_start + i * 4;
+            [data[p + 2], data[p + 1], data[p]] // R,G,B
+        })
+        .collect();
+
+    // Rows are padded to a multiple of 4 bytes.
+    let row_stride = (width + 3) & !3;
+    if pixel_offset + row_stride * height > data.len() {
+        return None;
+    }
+
+    let mut img = image::RgbaImage::new(width as u32, height as u32);
+    for y in 0..height {
+        // BMP is bottom-up unless height is negative.
+        let src_row = if top_down { y } else { height - 1 - y };
+        let row = pixel_offset + src_row * row_stride;
+        for x in 0..width {
+            let idx = data[row + x] as usize;
+            let [r, g, b] = palette.get(idx).copied().unwrap_or([0, 0, 0]);
+            let a = if idx == 0 { 0 } else { 255 };
+            img.put_pixel(x as u32, y as u32, image::Rgba([r, g, b, a]));
+        }
+    }
+    Some(img)
 }
 
 /// A skeletal bind pose: world-space matrix per bone (indexed by dag index), in
@@ -1128,12 +1318,7 @@ fn write_glb_skinned(
         gltf_textures.push(serde_json::json!({ "source": images.len() - 1 }));
     }
     for mat in materials {
-        let pbr = if let Some(ti) = mat.texture_idx {
-            serde_json::json!({ "baseColorTexture": { "index": ti }, "metallicFactor": 0.0, "roughnessFactor": 1.0 })
-        } else {
-            serde_json::json!({ "baseColorFactor": mat.base_color, "metallicFactor": 0.0, "roughnessFactor": 1.0 })
-        };
-        gltf_materials.push(serde_json::json!({ "name": mat.name, "pbrMetallicRoughness": pbr, "doubleSided": true }));
+        gltf_materials.push(material_to_gltf(mat));
     }
 
     // Everything is authored in EQ-native space (Z-up). To present a Y-up glTF we
@@ -1214,14 +1399,24 @@ fn write_glb_skinned(
     let w_acc = add_accessor(&mut accessors, w_view, 5126, joints.len(), "VEC4", None);
 
     // Primitives (per material), each with its own index accessor.
+    // Use u32 indices (componentType 5125) when the mesh has >65535 vertices;
+    // u16 (5123) silently wraps for large meshes and corrupts geometry.
+    let use_u32_indices = positions.len() > 65535;
     let mut gltf_prims = Vec::new();
     for prim in prims {
-        let mut ib = Vec::with_capacity(prim.indices.len() * 2);
-        for &i in &prim.indices {
-            ib.extend_from_slice(&(i as u16).to_le_bytes());
+        let mut ib = Vec::with_capacity(prim.indices.len() * if use_u32_indices { 4 } else { 2 });
+        if use_u32_indices {
+            for &i in &prim.indices {
+                ib.extend_from_slice(&i.to_le_bytes());
+            }
+        } else {
+            for &i in &prim.indices {
+                ib.extend_from_slice(&(i as u16).to_le_bytes());
+            }
         }
         let iv = add_view(&mut buf, &mut views, &ib, Some(34963));
-        let ia = add_accessor(&mut accessors, iv, 5123, prim.indices.len(), "SCALAR", None);
+        let idx_component_type = if use_u32_indices { 5125u32 } else { 5123u32 };
+        let ia = add_accessor(&mut accessors, iv, idx_component_type, prim.indices.len(), "SCALAR", None);
         gltf_prims.push(serde_json::json!({
             "attributes": {
                 "POSITION": pos_acc, "NORMAL": nrm_acc, "TEXCOORD_0": uv_acc,
@@ -1549,24 +1744,7 @@ pub(crate) fn write_glb(
 
     // Add materials
     for mat in materials {
-        let pbr = if let Some(tex_idx) = mat.texture_idx {
-            serde_json::json!({
-                "baseColorTexture": { "index": tex_idx },
-                "metallicFactor": 0.0,
-                "roughnessFactor": 1.0,
-            })
-        } else {
-            serde_json::json!({
-                "baseColorFactor": mat.base_color,
-                "metallicFactor": 0.0,
-                "roughnessFactor": 1.0,
-            })
-        };
-        gltf_materials.push(serde_json::json!({
-            "name": mat.name,
-            "pbrMetallicRoughness": pbr,
-            "doubleSided": true,
-        }));
+        gltf_materials.push(material_to_gltf(mat));
     }
 
     // Add meshes — each MeshData becomes one glTF mesh with shared vertices
@@ -1649,26 +1827,37 @@ pub(crate) fn write_glb(
         attributes.insert("TEXCOORD_0".to_string(), serde_json::json!(uv_acc_idx));
 
         // One glTF primitive per material group, each with its own index buffer.
+        // Use u32 indices (componentType 5125) when the mesh has >65535 vertices;
+        // u16 (5123) silently wraps for large meshes and corrupts geometry.
+        let use_u32_indices = mesh.positions.len() > 65535;
         let mut gltf_primitives = Vec::new();
         for prim in &mesh.primitives {
             let idx_offset = buffer_data.len() as u32;
-            for &i in &prim.indices {
-                buffer_data.extend_from_slice(&(i as u16).to_le_bytes());
+            if use_u32_indices {
+                for &i in &prim.indices {
+                    buffer_data.extend_from_slice(&i.to_le_bytes());
+                }
+            } else {
+                for &i in &prim.indices {
+                    buffer_data.extend_from_slice(&(i as u16).to_le_bytes());
+                }
             }
             while buffer_data.len() % 4 != 0 {
                 buffer_data.push(0);
             }
+            let idx_byte_len = prim.indices.len() * if use_u32_indices { 4 } else { 2 };
+            let idx_component_type = if use_u32_indices { 5125u32 } else { 5123u32 };
             let idx_view_idx = buffer_views.len();
             buffer_views.push(serde_json::json!({
                 "buffer": 0,
                 "byteOffset": idx_offset,
-                "byteLength": prim.indices.len() * 2,
+                "byteLength": idx_byte_len,
                 "target": 34963,
             }));
             let idx_acc_idx = accessors.len();
             accessors.push(serde_json::json!({
                 "bufferView": idx_view_idx,
-                "componentType": 5123,
+                "componentType": idx_component_type,
                 "count": prim.indices.len(),
                 "type": "SCALAR",
             }));
@@ -1793,24 +1982,7 @@ pub(crate) fn write_glb_instanced(
 
     // Materials.
     for mat in materials {
-        let pbr = if let Some(tex_idx) = mat.texture_idx {
-            serde_json::json!({
-                "baseColorTexture": { "index": tex_idx },
-                "metallicFactor": 0.0,
-                "roughnessFactor": 1.0,
-            })
-        } else {
-            serde_json::json!({
-                "baseColorFactor": mat.base_color,
-                "metallicFactor": 0.0,
-                "roughnessFactor": 1.0,
-            })
-        };
-        gltf_materials.push(serde_json::json!({
-            "name": mat.name,
-            "pbrMetallicRoughness": pbr,
-            "doubleSided": true,
-        }));
+        gltf_materials.push(material_to_gltf(mat));
     }
 
     // Meshes (no implicit per-mesh node here — nodes come from `nodes_in`).
@@ -1871,23 +2043,34 @@ pub(crate) fn write_glb_instanced(
         }));
         attributes.insert("TEXCOORD_0".to_string(), serde_json::json!(uv_acc_idx));
 
+        // Use u32 indices (componentType 5125) when the mesh has >65535 vertices;
+        // u16 (5123) silently wraps for large merged terrain meshes and corrupts geometry.
+        let use_u32_indices = mesh.positions.len() > 65535;
         let mut gltf_primitives = Vec::new();
         for prim in &mesh.primitives {
             let idx_offset = buffer_data.len() as u32;
-            for &i in &prim.indices {
-                buffer_data.extend_from_slice(&(i as u16).to_le_bytes());
+            if use_u32_indices {
+                for &i in &prim.indices {
+                    buffer_data.extend_from_slice(&i.to_le_bytes());
+                }
+            } else {
+                for &i in &prim.indices {
+                    buffer_data.extend_from_slice(&(i as u16).to_le_bytes());
+                }
             }
             while buffer_data.len() % 4 != 0 {
                 buffer_data.push(0);
             }
+            let idx_byte_len = prim.indices.len() * if use_u32_indices { 4 } else { 2 };
+            let idx_component_type = if use_u32_indices { 5125u32 } else { 5123u32 };
             let idx_view_idx = buffer_views.len();
             buffer_views.push(serde_json::json!({
                 "buffer": 0, "byteOffset": idx_offset,
-                "byteLength": prim.indices.len() * 2, "target": 34963,
+                "byteLength": idx_byte_len, "target": 34963,
             }));
             let idx_acc_idx = accessors.len();
             accessors.push(serde_json::json!({
-                "bufferView": idx_view_idx, "componentType": 5123,
+                "bufferView": idx_view_idx, "componentType": idx_component_type,
                 "count": prim.indices.len(), "type": "SCALAR",
             }));
             gltf_primitives.push(serde_json::json!({
@@ -1974,6 +2157,74 @@ fn compute_bounds_f32x3(positions: &[[f32; 3]]) -> ([f32; 3], [f32; 3]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a minimal uncompressed 8bpp BMP (BITMAPINFOHEADER) with the given
+    /// palette and one row of pixel indices. Used to test keyed-alpha decoding.
+    fn make_bmp_8bpp(width: usize, palette: &[[u8; 3]], indices: &[u8]) -> Vec<u8> {
+        assert_eq!(indices.len(), width); // single row for the test
+        let colors = 256usize;
+        let palette_bytes = colors * 4;
+        let row_stride = (width + 3) & !3;
+        let pixel_offset = 14 + 40 + palette_bytes;
+        let file_size = pixel_offset + row_stride;
+        let mut b = vec![0u8; file_size];
+        b[0..2].copy_from_slice(b"BM");
+        b[2..6].copy_from_slice(&(file_size as u32).to_le_bytes());
+        b[10..14].copy_from_slice(&(pixel_offset as u32).to_le_bytes());
+        b[14..18].copy_from_slice(&40u32.to_le_bytes()); // DIB header size
+        b[18..22].copy_from_slice(&(width as i32).to_le_bytes());
+        b[22..26].copy_from_slice(&1i32.to_le_bytes()); // height = 1 (bottom-up)
+        b[26..28].copy_from_slice(&1u16.to_le_bytes()); // planes
+        b[28..30].copy_from_slice(&8u16.to_le_bytes()); // bpp
+        b[30..34].copy_from_slice(&0u32.to_le_bytes()); // BI_RGB
+        b[46..50].copy_from_slice(&(colors as u32).to_le_bytes()); // colors used
+        let pal = 14 + 40;
+        for (i, c) in palette.iter().enumerate() {
+            let p = pal + i * 4;
+            b[p] = c[2]; // B
+            b[p + 1] = c[1]; // G
+            b[p + 2] = c[0]; // R
+        }
+        b[pixel_offset..pixel_offset + width].copy_from_slice(indices);
+        b
+    }
+
+    #[test]
+    fn masked_bmp_keys_out_palette_index_zero() {
+        // palette[0] = transparent key color (magenta), palette[1] = opaque green.
+        let palette = [[255u8, 0, 255], [0, 200, 0]];
+        // row: index 0,1,0 -> transparent, opaque, transparent
+        let bmp = make_bmp_8bpp(3, &palette, &[0, 1, 0]);
+        let img = decode_bmp_keyed(&bmp).expect("decoded");
+        assert_eq!(img.get_pixel(0, 0)[3], 0, "index 0 -> alpha 0");
+        assert_eq!(img.get_pixel(1, 0)[3], 255, "index 1 -> opaque");
+        assert_eq!(img.get_pixel(2, 0)[3], 0, "index 0 -> alpha 0");
+        // opaque pixel keeps its palette color
+        assert_eq!(&img.get_pixel(1, 0).0[..3], &[0, 200, 0]);
+    }
+
+    #[test]
+    fn alpha_mode_maps_material_types() {
+        let masked = RenderMethod::UserDefined { material_type: MaterialType::TransparentMasked };
+        assert_eq!(alpha_mode_from_render(&masked), AlphaMode::Masked);
+        let blend = RenderMethod::UserDefined { material_type: MaterialType::Transparent50 };
+        assert_eq!(alpha_mode_from_render(&blend), AlphaMode::Blend(500));
+        let add = RenderMethod::UserDefined { material_type: MaterialType::TransparentAdditive };
+        assert_eq!(alpha_mode_from_render(&add), AlphaMode::Additive);
+        let diffuse = RenderMethod::UserDefined { material_type: MaterialType::Diffuse };
+        assert_eq!(alpha_mode_from_render(&diffuse), AlphaMode::Opaque);
+    }
+
+    #[test]
+    fn masked_material_emits_mask_alphamode() {
+        let mat = MaterialData {
+            name: "leaf".into(), texture_idx: Some(0),
+            base_color: [1.0, 1.0, 1.0, 1.0], alpha_mode: AlphaMode::Masked, anim: None,
+        };
+        let j = material_to_gltf(&mat);
+        assert_eq!(j["alphaMode"], "MASK");
+        assert_eq!(j["alphaCutoff"], 0.5);
+    }
 
     #[test]
     fn anim_donor_maps_reskin_races_to_human() {
