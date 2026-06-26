@@ -1146,6 +1146,40 @@ fn convert_s3d_to_glb_skinned(input: &Path, output: &Path, model_code: Option<&s
             None => true,
         };
 
+        // ── WHY HAIR/BEARD MESHES ARE ABSENT (investigation: task-4-report.md) ───────────────
+        // Luclin character WLDs (e.g. globalelf_chr.wld, 30,460 fragments) contain exactly 3
+        // DmSpriteDef2 (0x36) mesh fragments: the body mesh (ELF_DMSPRITEDEF, 52 skin groups,
+        // 25 face_material_groups), left eye, and right eye.  The body mesh's 25 face_material_groups
+        // cover body parts + 8 face texture variants (HE0001–HE0008) — ZERO hair groups.
+        //
+        // Hair-related WLD content that IS present:
+        //   • ELFHEHAIR1–9_DAG / ELFHAIR_POINT_DAG bones in the HierarchicalSpriteDef skeleton,
+        //     all with mesh_or_sprite_reference = 0 (animation-only, no mesh attached)
+        //   • 210+ orphaned MaterialDef (0x30) fragments for hair material variants
+        //     (ELFHE0011_MDF, ELFHE0911_MDF … pieces 11/14/15, colors 0–9, styles 1–7) that
+        //     are NOT referenced by the single MaterialPalette "ELF_MP" (27 materials, body+eyes)
+        //   • elfhesk11.dds – elfhesk75.dds hair skin textures in the PFS archive
+        //
+        // Hair-related WLD content that is ABSENT:
+        //   • No DmSpriteDef2 fragments with HAIR/BEARD names (confirmed via fragment_iter +
+        //     raw type_id scan of all 30,460 fragments)
+        //   • No face_material_groups in ELF_DMSPRITEDEF referencing any hair material
+        //   • No dag mesh references (all dag.mesh_or_sprite_reference == 0)
+        //
+        // The EQ client selects hair at runtime via vtable 0xec("ELF_HS%2d_HEAD_HAIR", style)
+        // which attaches a named sub-model to slot 8 (ELFHAIR_POINT_DAG).  The geometry for
+        // those sub-models is NOT stored in the main WLD; the client loads them via a separate
+        // mechanism (possibly per-style sub-actor archives or DAG-attached DmSpriteDef2 fragments
+        // that libeq_wld currently fails to decode).
+        //
+        // TASK 5 FIX: Before emitting primitives here, gather the HierarchicalSpriteDef's full
+        // dag list; for each hair-bone dag (name contains "HEHAIR"), follow its
+        // mesh_or_sprite_reference (0x2D DmSprite → 0x36 DmSpriteDef2) when non-zero.  This
+        // emits each hair style as a separate named glTF mesh node tagged with its style index
+        // in glTF extras {"hair_style": N}, mirroring the face-variant approach.  If dag
+        // mesh_ref remains 0 for all hair dags (as seen for elf), a deeper investigation into
+        // the sub-model loading path is required before geometry can be emitted.
+        // ─────────────────────────────────────────────────────────────────────────────────────
         let mut geo_map: HashMap<String, SkinnedGeo> = HashMap::new();
         for frag in doc.fragment_iter::<DmSpriteDef2>() {
             let name = doc.get_string(frag.name_reference).unwrap_or("").to_string();
