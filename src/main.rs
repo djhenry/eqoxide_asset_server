@@ -29,6 +29,11 @@ enum Cmd {
         /// With --raw: bake only zones, skip the `common` model set (leaves an
         /// existing common untouched; avoids re-converting character archives).
         #[arg(long)] zones_only: bool,
+        /// With --raw: skip zone baking; run common + gamedata + gameequip only.
+        /// Lets you re-convert character/equipment archives without touching the
+        /// existing zone GLBs (useful when switching game-file sources for chars
+        /// while keeping Titanium-derived zone geometry intact).
+        #[arg(long)] no_zones: bool,
         /// Number of worker threads for conversion (default: all-but-one core).
         #[arg(long, short = 'j', value_parser = clap::value_parser!(u32).range(1..))]
         jobs: Option<u32>,
@@ -78,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     match Cli::parse().cmd {
-        Cmd::Build { set, from, raw, out, zones_only, jobs } => {
+        Cmd::Build { set, from, raw, out, zones_only, no_zones, jobs } => {
             let cas = Cas::new(&out);
             let store = ManifestStore::new(&out);
             if let Some(raw_dir) = raw {
@@ -90,8 +95,12 @@ async fn main() -> anyhow::Result<()> {
                     let ms = eqoxide_asset_server::build::build_from_raw(&cas, &store, &raw_dir, &work, &pool)?;
                     println!("built {} set(s) from raw archives", ms.len());
                 }
-                let zones = eqoxide_asset_server::build::build_zones_from_raw(&cas, &store, &raw_dir, &work, &pool)?;
-                println!("baked {} zone(s): {}", zones.len(), zones.join(", "));
+                if !no_zones {
+                    let zones = eqoxide_asset_server::build::build_zones_from_raw(&cas, &store, &raw_dir, &work, &pool)?;
+                    println!("baked {} zone(s): {}", zones.len(), zones.join(", "));
+                } else {
+                    println!("--no-zones: skipping zone baking (existing zone GLBs preserved)");
+                }
                 let gd = eqoxide_asset_server::build::build_gamedata_from_raw(&cas, &store, &raw_dir)?;
                 println!("built 'gamedata' set version {} ({} files)", gd.version, gd.files.len());
                 let ge = eqoxide_asset_server::build::build_gameequip_from_raw(&cas, &store, &raw_dir)?;
