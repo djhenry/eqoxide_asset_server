@@ -413,7 +413,7 @@ pub fn bake_zone(main_s3d: &Path, obj_s3d: Option<&Path>, output_glb: &Path) -> 
             uvs.extend_from_slice(&m.uvs);
             let indices: Vec<u32> = m.indices.iter().map(|&i| i + offset).collect();
             let material_idx = material_for(m, materials, textures, tex_map, mat_map, pfs_list);
-            primitives.push(PrimitiveData { indices, material_idx });
+            primitives.push(PrimitiveData { indices, material_idx, extras: None });
         }
         if primitives.is_empty() { return None; }
         Some(MeshData { name, positions, normals, uvs, primitives })

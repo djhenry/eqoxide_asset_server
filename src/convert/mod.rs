@@ -13,6 +13,10 @@ use libeq_wld::parser::{
 pub(crate) struct PrimitiveData {
     pub(crate) indices: Vec<u32>,
     pub(crate) material_idx: usize,
+    /// Optional per-primitive glTF `extras` object. Used to tag face and hair
+    /// variant primitives on Luclin humanoid character models so the client can
+    /// select the correct variant from Spawn_Struct face/hairstyle fields.
+    pub(crate) extras: Option<serde_json::Value>,
 }
 
 pub(crate) struct MeshData {
@@ -294,6 +298,7 @@ fn convert_s3d_to_glb(input: &Path, output: &Path) -> Result<()> {
                 merged_primitives.push(PrimitiveData {
                     indices: prim_indices,
                     material_idx,
+                    extras: None,
                 });
                 prim_count += 1;
             }
@@ -398,6 +403,65 @@ pub(crate) fn alpha_mode_from_render(rm: &RenderMethod) -> AlphaMode {
             _ => AlphaMode::Opaque,
         },
         RenderMethod::Standard { .. } => AlphaMode::Opaque,
+    }
+}
+
+/// Detect if a WLD material name refers to an EQ face-variant material.
+/// Material names follow the pattern `{RACE}HE000{N}_MDF` (e.g. `ELFHE0001_MDF`,
+/// `HUMHE0002_MDF`) where N ∈ 1..=8 corresponds to the 8 face choices in character
+/// creation. Returns N when matched, None otherwise.
+///
+/// Note: the texture source name from libeq_wld's high-level API is not used for
+/// detection because the face materials' texture chains are not always resolved by
+/// the library; the material name is reliably available.
+fn face_variant_from_material_name(name: &str) -> Option<u8> {
+    let u = name.to_uppercase();
+    let stem = u.trim_end_matches("_MDF");
+    // The suffix "HE000{N}" is 6 characters; the 3-char race prefix precedes it.
+    if stem.len() >= 6 {
+        let tail = &stem[stem.len() - 6..];
+        if tail.starts_with("HE000") {
+            let n = tail.as_bytes()[5];
+            if n >= b'1' && n <= b'8' {
+                return Some(n - b'0');
+            }
+        }
+    }
+    None
+}
+
+/// Detect if a texture source name refers to an EQ face-variant material.
+/// Accepts texture stem names like `elfhe0001`, `humhe0002` (with or without
+/// extension). Used as a fallback in addition to material-name detection.
+fn face_variant_from_texture(src: &str) -> Option<u8> {
+    let s = src.to_lowercase();
+    let stem = s
+        .trim_end_matches(".dds")
+        .trim_end_matches(".bmp")
+        .trim_end_matches(".png");
+    // The suffix "he000{N}" is 6 characters; the 3-char race prefix precedes it.
+    if stem.len() >= 6 {
+        let tail = &stem[stem.len() - 6..];
+        if tail.starts_with("he000") {
+            let n = tail.as_bytes()[5];
+            if n >= b'1' && n <= b'8' {
+                return Some(n - b'0');
+            }
+        }
+    }
+    None
+}
+
+/// Extract the 3-char EQ race/sex code from a Luclin character archive path.
+/// `globalelf_chr.s3d` → `"elf"`, `globalhum_chr.s3d` → `"hum"`, etc.
+fn race_code_from_archive(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_str()?.to_lowercase();
+    let tail = stem.strip_prefix("global")?;
+    let code = tail.split('_').next()?;
+    if !code.is_empty() {
+        Some(code.to_string())
+    } else {
+        None
     }
 }
 
@@ -1201,6 +1265,11 @@ fn convert_s3d_to_glb_skinned(input: &Path, output: &Path, model_code: Option<&s
         let mut materials: Vec<MaterialData> = Vec::new();
         let mut textures: Vec<TextureData> = Vec::new();
 
+        // For face/hair variant tagging: race code from archive path, and the
+        // index buffer for face-1 (head polygon group) so hair variants can reuse it.
+        let race_code = race_code_from_archive(input).unwrap_or_default();
+        let mut face1_indices: Option<Vec<u32>> = None;
+
         for mesh in wld.meshes() {
             let name = mesh.name().unwrap_or("").to_string();
             let geo = match geo_map.get(&name) {
@@ -1242,10 +1311,78 @@ fn convert_s3d_to_glb_skinned(input: &Path, output: &Path, model_code: Option<&s
                     tex.as_deref(),
                     &mut pfs,
                 );
+
+                // Detect face-variant primitives by WLD material name (pattern:
+                // `{RACE}HE000{N}_MDF`) or texture source as fallback.
+                // Tag each with eq_head_part + eq_part_index extras so the client can
+                // show exactly one face. Face 1 is the default visible variant; faces
+                // 2–8 carry eq_default_hidden:true (client hides them until selected).
+                let mat_name_str = material.name().unwrap_or("");
+                let face_n = face_variant_from_material_name(mat_name_str)
+                    .or_else(|| tex.as_deref().and_then(face_variant_from_texture));
+                let prim_extras = face_n.map(|n| {
+                    if n == 1 {
+                        serde_json::json!({
+                            "eq_head_part": "face",
+                            "eq_part_index": n,
+                        })
+                    } else {
+                        serde_json::json!({
+                            "eq_head_part": "face",
+                            "eq_part_index": n,
+                            "eq_default_hidden": true,
+                        })
+                    }
+                });
+                // Cache face-1 indices for hair variant generation below.
+                if face_n == Some(1) && face1_indices.is_none() {
+                    face1_indices = Some(idxs.clone());
+                }
+
                 prims.push(PrimitiveData {
                     indices: idxs,
                     material_idx: midx,
+                    extras: prim_extras,
                 });
+            }
+        }
+
+        // ── Hair-style variant primitives ─────────────────────────────────────
+        // Hair is not a separate mesh in Luclin WLDs — it is a material swap on
+        // the same head polygon group. Emit 7 additional primitives (one per
+        // hairstyle N=1..7) reusing face-1's indices with the `{race}hesk{N}1.dds`
+        // diffuse texture. All are default-hidden; client enables the one matching
+        // Spawn_Struct.hairstyle (0-indexed, 0 = no hair = no hair primitive shown).
+        if let (Some(face1_idxs), false) = (&face1_indices, race_code.is_empty()) {
+            for hair_n in 1u8..=7 {
+                let tex_name = format!("{}hesk{}1", race_code, hair_n);
+                match load_texture_from_archive(&mut pfs, &tex_name, AlphaMode::Opaque) {
+                    Some(png_bytes) => {
+                        let tex_idx = textures.len();
+                        textures.push(TextureData { name: tex_name.clone(), png_bytes });
+                        let mat_idx = materials.len();
+                        materials.push(MaterialData {
+                            name: format!("hair_style_{}", hair_n),
+                            texture_idx: Some(tex_idx),
+                            base_color: [1.0, 1.0, 1.0, 1.0],
+                            alpha_mode: AlphaMode::Opaque,
+                            anim: None,
+                        });
+                        prims.push(PrimitiveData {
+                            indices: face1_idxs.clone(),
+                            material_idx: mat_idx,
+                            extras: Some(serde_json::json!({
+                                "eq_head_part": "hair",
+                                "eq_part_index": hair_n,
+                                "eq_default_hidden": true,
+                            })),
+                        });
+                        eprintln!("  hair style {} → '{}'", hair_n, tex_name);
+                    }
+                    None => {
+                        eprintln!("  hair style {} texture '{}' not found in archive", hair_n, tex_name);
+                    }
+                }
             }
         }
 
@@ -1456,14 +1593,18 @@ fn write_glb_skinned(
         let iv = add_view(&mut buf, &mut views, &ib, Some(34963));
         let idx_component_type = if use_u32_indices { 5125u32 } else { 5123u32 };
         let ia = add_accessor(&mut accessors, iv, idx_component_type, prim.indices.len(), "SCALAR", None);
-        gltf_prims.push(serde_json::json!({
+        let mut prim_json = serde_json::json!({
             "attributes": {
                 "POSITION": pos_acc, "NORMAL": nrm_acc, "TEXCOORD_0": uv_acc,
                 "JOINTS_0": j_acc, "WEIGHTS_0": w_acc,
             },
             "indices": ia,
             "material": prim.material_idx,
-        }));
+        });
+        if let Some(extras) = &prim.extras {
+            prim_json["extras"] = extras.clone();
+        }
+        gltf_prims.push(prim_json);
     }
 
     // Inverse bind matrices in the rotated (Y-up) space, column-major.
@@ -1901,11 +2042,15 @@ pub(crate) fn write_glb(
                 "type": "SCALAR",
             }));
 
-            gltf_primitives.push(serde_json::json!({
+            let mut prim_json = serde_json::json!({
                 "attributes": attributes,
                 "indices": idx_acc_idx,
                 "material": prim.material_idx,
-            }));
+            });
+            if let Some(extras) = &prim.extras {
+                prim_json["extras"] = extras.clone();
+            }
+            gltf_primitives.push(prim_json);
         }
 
         gltf_meshes.push(serde_json::json!({
@@ -2112,11 +2257,15 @@ pub(crate) fn write_glb_instanced(
                 "bufferView": idx_view_idx, "componentType": idx_component_type,
                 "count": prim.indices.len(), "type": "SCALAR",
             }));
-            gltf_primitives.push(serde_json::json!({
+            let mut prim_json = serde_json::json!({
                 "attributes": attributes,
                 "indices": idx_acc_idx,
                 "material": prim.material_idx,
-            }));
+            });
+            if let Some(extras) = &prim.extras {
+                prim_json["extras"] = extras.clone();
+            }
+            gltf_primitives.push(prim_json);
         }
 
         gltf_meshes.push(serde_json::json!({
@@ -2298,5 +2447,122 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(extras.get()).unwrap();
         let eq_height = v["eq_height"].as_f64().expect("eq_height field present");
         assert!(eq_height > 0.0, "eq_height should be > 0, got {eq_height}");
+    }
+
+    // ── face variant detection unit tests ────────────────────────────────────
+
+    #[test]
+    fn face_variant_detects_he000n_pattern() {
+        // Material name detection (primary path — libeq_wld may not expose texture source).
+        for (name, expected) in [
+            ("ELFHE0001_MDF", Some(1u8)),
+            ("ELFHE0002_MDF", Some(2)),
+            ("ELFHE0008_MDF", Some(8)),
+            ("HUMHE0003_MDF", Some(3)),
+            ("HUFHE0007_MDF", Some(7)),
+            ("elfhe0001_mdf", Some(1)), // case-insensitive
+            // Non-face materials must NOT match.
+            ("ELFCH0001_MDF", None),        // chest
+            ("ELFHE0000_MDF", None),        // variant 0 doesn't exist
+            ("ELFHE0009_MDF", None),        // variant 9 doesn't exist
+            ("ELFHE0011_MDF", None),        // hair color variant, NOT a face
+        ] {
+            assert_eq!(
+                face_variant_from_material_name(name),
+                expected,
+                "face_variant_from_material_name({name:?})"
+            );
+        }
+
+        // Texture-source detection (fallback path).
+        for (src, expected) in [
+            ("elfhe0001", Some(1u8)),
+            ("elfhe0002", Some(2)),
+            ("elfhe0008", Some(8)),
+            ("ELFHE0001.DDS", Some(1)),
+            ("humhe0003.dds", Some(3)),
+            ("hufhe0007.bmp", Some(7)),
+            // Non-face textures must NOT match.
+            ("elfch0101", None),
+            ("elfhe00", None),
+            ("elfhesk11", None),
+            ("elfhe0000", None),
+            ("elfhe0009", None),
+        ] {
+            assert_eq!(
+                face_variant_from_texture(src),
+                expected,
+                "face_variant_from_texture({src:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn race_code_extraction_from_path() {
+        use std::path::PathBuf;
+        assert_eq!(race_code_from_archive(&PathBuf::from("globalelf_chr.s3d")), Some("elf".into()));
+        assert_eq!(race_code_from_archive(&PathBuf::from("globalhum_chr.s3d")), Some("hum".into()));
+        assert_eq!(race_code_from_archive(&PathBuf::from("globalhuf_chr.s3d")), Some("huf".into()));
+        assert_eq!(race_code_from_archive(&PathBuf::from("globalelm_chr.s3d")), Some("elm".into()));
+        assert_eq!(race_code_from_archive(&PathBuf::from("/path/to/globaldaf_chr.s3d")), Some("daf".into()));
+        // Non-character archives return None or an arbitrary code (don't crash).
+        assert_eq!(race_code_from_archive(&PathBuf::from("qeynos.s3d")), None);
+    }
+
+    /// Full integration test: convert globalelf_chr.s3d and verify that the
+    /// resulting GLB has exactly 8 face primitives (eq_part_index 1..=8) and 7
+    /// hair primitives (eq_part_index 1..=7) with the correct extras tags, and
+    /// that face 1 is NOT marked eq_default_hidden while all others are.
+    #[test]
+    #[ignore = "requires ~/eq_assets/EQ_Files/globalelf_chr.s3d"]
+    fn elf_glb_has_face_and_hair_variant_extras() {
+        let home = std::env::var("HOME").unwrap();
+        let inp = std::path::PathBuf::from(
+            format!("{home}/eq_assets/EQ_Files/globalelf_chr.s3d")
+        );
+        let out = std::path::PathBuf::from("/tmp/test_elf_face_hair.glb");
+        convert_s3d_to_glb_skinned(&inp, &out, None).unwrap();
+
+        let (doc, _buffers, _images) = gltf::import(&out).unwrap();
+        let mesh = doc.meshes().next().expect("at least one mesh");
+
+        let mut face_indices_found: std::collections::BTreeSet<u64> = Default::default();
+        let mut hair_indices_found: std::collections::BTreeSet<u64> = Default::default();
+        let mut face1_hidden = false;
+
+        for prim in mesh.primitives() {
+            if let Some(raw) = prim.extras().as_ref() {
+                let v: serde_json::Value = serde_json::from_str(raw.get()).unwrap();
+                match v["eq_head_part"].as_str() {
+                    Some("face") => {
+                        let n = v["eq_part_index"].as_u64().expect("eq_part_index present");
+                        face_indices_found.insert(n);
+                        if n == 1 {
+                            face1_hidden = v["eq_default_hidden"].as_bool().unwrap_or(false);
+                        } else {
+                            assert!(
+                                v["eq_default_hidden"].as_bool().unwrap_or(false),
+                                "face {} must have eq_default_hidden:true", n
+                            );
+                        }
+                    }
+                    Some("hair") => {
+                        let n = v["eq_part_index"].as_u64().expect("eq_part_index present");
+                        hair_indices_found.insert(n);
+                        assert!(
+                            v["eq_default_hidden"].as_bool().unwrap_or(false),
+                            "hair {} must have eq_default_hidden:true", n
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let expected_faces: std::collections::BTreeSet<u64> = (1..=8).collect();
+        let expected_hair: std::collections::BTreeSet<u64> = (1..=7).collect();
+        assert_eq!(face_indices_found, expected_faces, "face variants 1..8 must all be present");
+        assert_eq!(hair_indices_found, expected_hair, "hair variants 1..7 must all be present");
+        assert!(!face1_hidden, "face 1 must NOT have eq_default_hidden:true (it is the default)");
     }
 }
