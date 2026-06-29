@@ -1,5 +1,7 @@
 # eqoxide_asset_server
 
+[![Client: eqoxide](https://img.shields.io/badge/client-eqoxide-blue?logo=github)](https://github.com/djhenry/eqoxide)
+
 Derived-asset delivery addon for EQEmu. Converts raw `.s3d` to glTF, chunks them
 into a blake3 content-addressed store, and serves incremental updates to the
 eq_client_lite client over HTTP, authenticated against EQEmu's MariaDB.
