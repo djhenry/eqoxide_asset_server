@@ -67,10 +67,14 @@ async fn get_manifest(
     // Conditional GET: identical content the client already has → 304, no body.
     let inm = headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok());
     if etag_matches(inm, &digest) {
+        tracing::info!("manifest {set}: 304 not-modified (client has digest {})", &digest[..12]);
         return StatusCode::NOT_MODIFIED.into_response();
     }
     match st.manifests.load_latest(&set) {
-        Ok(m) => ([(header::ETAG, format!("\"{digest}\""))], Json(m)).into_response(),
+        Ok(m) => {
+            tracing::info!("manifest {set}: 200 digest={}", &digest[..12]);
+            ([(header::ETAG, format!("\"{digest}\""))], Json(m)).into_response()
+        }
         Err(_) => (StatusCode::NOT_FOUND, "no such manifest").into_response(),
     }
 }
