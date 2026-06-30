@@ -102,14 +102,14 @@ async fn main() -> anyhow::Result<()> {
                     println!("--no-zones: skipping zone baking (existing zone GLBs preserved)");
                 }
                 let gd = eqoxide_asset_server::build::build_gamedata_from_raw(&cas, &store, &raw_dir)?;
-                println!("built 'gamedata' set version {} ({} files)", gd.version, gd.files.len());
+                println!("built 'gamedata' set {} ({} files)", gd.digest, gd.files.len());
                 let ge = eqoxide_asset_server::build::build_gameequip_from_raw(&cas, &store, &raw_dir)?;
-                println!("built 'gameequip' set version {} ({} files)", ge.version, ge.files.len());
+                println!("built 'gameequip' set {} ({} files)", ge.digest, ge.files.len());
             } else {
                 let set = set.expect("--set required without --raw");
                 let from = from.expect("--from required without --raw");
                 let m = ingest_dir(&cas, &store, &set, &from)?;
-                println!("built set '{}' version {} ({} files)", m.set, m.version, m.files.len());
+                println!("built set '{}' {} ({} files)", m.set, m.digest, m.files.len());
             }
             Ok(())
         }
