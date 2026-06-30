@@ -69,6 +69,12 @@ enum Cmd {
         /// login flow. Do NOT enable on a public/production server.
         #[arg(long)] no_auth_required: bool,
     },
+    /// Migrate an existing store from the legacy version-keyed manifests to the content-digest
+    /// store (idempotent). Reuses existing chunks — no re-derivation. Run once when cutting a
+    /// deployment over to the digest protocol.
+    Migrate {
+        #[arg(long)] data: PathBuf,
+    },
 }
 
 fn load_secret(path: &PathBuf) -> [u8; 32] {
@@ -143,6 +149,18 @@ async fn main() -> anyhow::Result<()> {
                 no_auth: no_auth_required,
             };
             serve(state, addr).await
+        }
+        Cmd::Migrate { data } => {
+            let store = ManifestStore::new(&data);
+            let (mut migrated, mut skipped) = (0u32, 0u32);
+            for set in store.all_sets() {
+                match store.migrate_to_digest(&set)? {
+                    Some(d) => { println!("migrated {set} -> {}", &d[..12]); migrated += 1; }
+                    None => skipped += 1,
+                }
+            }
+            println!("migrate: {migrated} migrated, {skipped} already digest-keyed");
+            Ok(())
         }
     }
 }
