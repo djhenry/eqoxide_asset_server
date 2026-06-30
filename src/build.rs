@@ -149,7 +149,12 @@ pub fn build_zonedoors_from_raw(cas: &Cas, store: &ManifestStore, raw_dir: &Path
 {
     let obj = raw_dir.join(format!("{short}_obj.s3d"));
     if !obj.exists() { return Ok(None); }
-    let files = vec![(format!("{short}_obj.s3d"), std::fs::read(&obj)?)];
+    let tmp = std::env::temp_dir().join(format!("{short}_doors.glb"));
+    let wrote = crate::zone::bake_object_models_glb(&obj, &tmp)?;
+    if !wrote { return Ok(None); }
+    let bytes = std::fs::read(&tmp)?;
+    let _ = std::fs::remove_file(&tmp);
+    let files = vec![(format!("{short}_doors.glb"), bytes)];
     Ok(Some(store.build_and_write(cas, &format!("zonedoors/{short}"), &files)?))
 }
 
