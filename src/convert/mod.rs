@@ -2351,6 +2351,52 @@ fn compute_bounds_f32x3(positions: &[[f32; 3]]) -> ([f32; 3], [f32; 3]) {
     (min, max)
 }
 
+/// Bake held-weapon models from the gequip archives into a single `weapons.glb`.
+/// Iterates every archive in `archives` (relative to `raw_dir`), parses each WLD, and
+/// collects every mesh whose name (uppercased) starts with `"IT"` as a model-local
+/// [`crate::zone::ZoneMesh`] via [`crate::zone::zone_meshes_from_mesh`]. Each unique
+/// uppercased mesh name becomes one identity-node mesh in the output GLB, with
+/// textures embedded.  Returns `Ok(false)` without writing anything when no `IT`
+/// meshes are found (e.g. all archives missing).
+pub(crate) fn bake_weapons_glb(
+    raw_dir: &Path,
+    archives: &[&str],
+    out_glb: &Path,
+) -> anyhow::Result<bool> {
+    use std::collections::HashMap;
+    let mut models: HashMap<String, Vec<crate::zone::ZoneMesh>> = HashMap::new();
+    let mut pfs_for_tex: Vec<libeq_pfs::PfsReader<std::fs::File>> = Vec::new();
+    for arch in archives {
+        let p = raw_dir.join(arch);
+        let Ok(file) = std::fs::File::open(&p) else { continue };
+        let Ok(mut pfs) = libeq_pfs::PfsReader::open(file) else { continue };
+        let Ok(names) = pfs.filenames() else { continue };
+        for wn in names.iter().filter(|f| f.to_lowercase().ends_with(".wld")) {
+            let Ok(Some(bytes)) = pfs.get(wn) else { continue };
+            let Ok(wld) = libeq_wld::load(&bytes) else { continue };
+            for mesh in wld.meshes() {
+                let Some(name) = mesh.name() else { continue };
+                let up = name.to_uppercase();
+                if !up.starts_with("IT") { continue; }
+                let zms = crate::zone::zone_meshes_from_mesh(&mesh);
+                if !zms.is_empty() {
+                    models.entry(up).or_default().extend(zms);
+                }
+            }
+        }
+        // Reopen the archive for the texture-decode pass.
+        if let Ok(f) = std::fs::File::open(&p) {
+            if let Ok(r) = libeq_pfs::PfsReader::open(f) {
+                pfs_for_tex.push(r);
+            }
+        }
+    }
+    if models.is_empty() {
+        return Ok(false);
+    }
+    crate::zone::write_object_models_glb(models, &mut pfs_for_tex, out_glb)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2558,5 +2604,22 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod weapons_glb_tests {
+    use super::*;
+    #[test]
+    #[ignore = "requires ~/eq_assets/EQ_Files/gequip*.s3d"]
+    fn bakes_named_weapon_meshes() {
+        let home = std::env::var("HOME").unwrap();
+        let raw = std::path::PathBuf::from(format!("{home}/eq_assets/EQ_Files"));
+        if !raw.join("gequip.s3d").exists() { eprintln!("skip"); return; }
+        let out = std::env::temp_dir().join("weapons_test.glb");
+        let archives = ["gequip.s3d","gequip2.s3d","gequip3.s3d","gequip4.s3d","gequip5.s3d","gequip6.s3d","gequip7.s3d","gequip8.s3d"];
+        assert!(bake_weapons_glb(&raw, &archives, &out).unwrap());
+        let (doc, _b, _i) = gltf::import(&out).unwrap();
+        assert!(doc.meshes().any(|m| m.name().map_or(false, |n| n.starts_with("IT"))), "weapon meshes named IT####");
     }
 }

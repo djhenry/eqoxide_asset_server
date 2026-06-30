@@ -260,6 +260,11 @@ pub fn build_gameequip_from_raw(
             tracing::warn!("gameequip: missing {name} in {}", raw_dir.display());
         }
     }
+    let wtmp = std::env::temp_dir().join("weapons.glb");
+    if crate::convert::bake_weapons_glb(raw_dir, &["gequip.s3d","gequip2.s3d","gequip3.s3d","gequip4.s3d","gequip5.s3d","gequip6.s3d","gequip7.s3d","gequip8.s3d"], &wtmp).unwrap_or(false) {
+        files.push(("weapons.glb".to_string(), std::fs::read(&wtmp)?));
+        let _ = std::fs::remove_file(&wtmp);
+    }
     store.build_and_write(cas, "gameequip", &files)
 }
 
