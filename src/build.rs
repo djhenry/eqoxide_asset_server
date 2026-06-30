@@ -243,23 +243,37 @@ const GAMEEQUIP_ARCHIVES: &[&str] = &[
     "gequip5.s3d", "gequip6.s3d", "gequip7.s3d", "gequip8.s3d",
 ];
 
-/// Build the "gameequip" set: the equipment/weapon S3D archives (served raw, see
-/// GAMEEQUIP_ARCHIVES) so the client loads worn-armor textures + held-weapon models from the asset
-/// server cache instead of reading ~/eq_assets at runtime.
+/// Build the "gameequip" set: decoded armor/body textures as `equiptex/<name>.png`
+/// plus the baked `weapons.glb` for held-weapon models.
+///
+/// Raw S3D archives are no longer served directly: armor textures (previously the
+/// `_amr`/`_chr` archives in `GAMEEQUIP_ARCHIVES`) are now pre-decoded here, and
+/// weapon geometry (previously `gequip*.s3d`) is now bundled into `weapons.glb` by
+/// `bake_weapons_glb` (added in Task 5). This removes the client's dependency on
+/// the raw S3D format for both worn-armor textures and held-weapon models.
 pub fn build_gameequip_from_raw(
     cas: &Cas,
     store: &ManifestStore,
     raw_dir: &Path,
 ) -> anyhow::Result<Manifest> {
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();
-    for name in GAMEEQUIP_ARCHIVES {
-        let p = raw_dir.join(name);
-        if p.exists() {
-            files.push((name.to_string(), std::fs::read(&p)?));
-        } else {
-            tracing::warn!("gameequip: missing {name} in {}", raw_dir.display());
-        }
+
+    // Extract decoded PNGs from the armor and body-texture archives.
+    let equip_archives = [
+        "global17_amr.s3d", "global18_amr.s3d", "global19_amr.s3d", "global20_amr.s3d",
+        "global21_amr.s3d", "global22_amr.s3d", "global23_amr.s3d",
+        "global_chr.s3d",
+        "globalhum_chr.s3d", "globalhum_chr2.s3d",
+        "globalelf_chr.s3d", "globalelf_chr2.s3d",
+        "globaldwf_chr.s3d", "globaldwf_chr2.s3d",
+        "globalgnm_chr.s3d", "globalgnm_chr2.s3d",
+        "globalfroglok_chr.s3d",
+    ];
+    for (name, png) in crate::convert::extract_equip_textures(raw_dir, &equip_archives)? {
+        files.push((format!("equiptex/{name}"), png));
     }
+
+    // Bake all held-weapon models into a single GLB.
     let wtmp = std::env::temp_dir().join("weapons.glb");
     if crate::convert::bake_weapons_glb(raw_dir, &["gequip.s3d","gequip2.s3d","gequip3.s3d","gequip4.s3d","gequip5.s3d","gequip6.s3d","gequip7.s3d","gequip8.s3d"], &wtmp).unwrap_or(false) {
         files.push(("weapons.glb".to_string(), std::fs::read(&wtmp)?));

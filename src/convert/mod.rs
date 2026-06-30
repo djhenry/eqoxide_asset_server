@@ -2623,3 +2623,56 @@ mod weapons_glb_tests {
         assert!(doc.meshes().any(|m| m.name().map_or(false, |n| n.starts_with("IT"))), "weapon meshes named IT####");
     }
 }
+
+/// Extract every BMP/DDS texture from the given S3D archives, decode to RGBA,
+/// filter out ≤8×8 all-alpha "stub" placeholder textures, and re-encode to PNG.
+/// Returns `(name_lower_without_ext + ".png", png_bytes)` pairs, deduped by name
+/// (first-wins insertion order, matching `index_s3d_textures` semantics).
+pub(crate) fn extract_equip_textures(raw_dir: &Path, archives: &[&str]) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
+    use std::collections::HashSet;
+    let mut out: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for arch in archives {
+        let p = raw_dir.join(arch);
+        let Ok(file) = std::fs::File::open(&p) else { continue };
+        let Ok(mut pfs) = libeq_pfs::PfsReader::open(file) else { continue };
+        let Ok(names) = pfs.filenames() else { continue };
+        for name in names {
+            let lower = name.to_lowercase();
+            let fmt = if lower.ends_with(".bmp") { image::ImageFormat::Bmp }
+                      else if lower.ends_with(".dds") { image::ImageFormat::Dds } else { continue };
+            let stem = format!("{}.png", &lower[..lower.len()-4]);
+            if seen.contains(&stem) { continue; }
+            let Ok(Some(bytes)) = pfs.get(&name) else { continue };
+            let Ok(img) = image::load_from_memory_with_format(&bytes, fmt) else { continue };
+            let rgba = img.to_rgba8();
+            let (w, h) = rgba.dimensions();
+            if (w <= 8 && h <= 8) || rgba.pixels().all(|px| px.0[3] == 0) { continue; }
+            let mut png = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(rgba).write_to(&mut png, image::ImageFormat::Png)?;
+            seen.insert(stem.clone());
+            out.push((stem, png.into_inner()));
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod equip_tex_tests {
+    use super::*;
+    #[test]
+    #[ignore = "requires ~/eq_assets/EQ_Files/global_chr.s3d"]
+    fn extracts_named_pngs_skipping_stubs() {
+        let home = std::env::var("HOME").unwrap();
+        let raw = std::path::PathBuf::from(format!("{home}/eq_assets/EQ_Files"));
+        if !raw.join("global_chr.s3d").exists() { eprintln!("skip"); return; }
+        let out = extract_equip_textures(&raw, &["global_chr.s3d"]).unwrap();
+        assert!(!out.is_empty());
+        assert!(out.iter().all(|(n,_)| n.ends_with(".png") && n == &n.to_lowercase()));
+        // every emitted PNG decodes and is > 8x8 (stubs filtered)
+        for (n, bytes) in out.iter().take(20) {
+            let img = image::load_from_memory(bytes).unwrap_or_else(|_| panic!("decode {n}"));
+            assert!(img.width() > 8 || img.height() > 8, "{n} should not be an 8x8 stub");
+        }
+    }
+}
