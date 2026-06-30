@@ -222,27 +222,6 @@ pub fn build_zones_from_raw(
     Ok(baked)
 }
 
-/// The equipment/weapon S3D archives the client needs to texture worn armor and render held
-/// weapons. Kept in sync with eq_client_lite renderer.rs (index_s3d_textures globals + ARCHETYPES /
-/// archetype_to_chr_s3d) and assets.rs load_weapon_model (gequip*). Served raw (the client parses
-/// S3D); this removes the client's direct dependency on the ~/eq_assets folder.
-const GAMEEQUIP_ARCHIVES: &[&str] = &[
-    // armor texture sets (global17_amr.s3d .. global23_amr.s3d)
-    "global17_amr.s3d", "global18_amr.s3d", "global19_amr.s3d", "global20_amr.s3d",
-    "global21_amr.s3d", "global22_amr.s3d", "global23_amr.s3d",
-    // combined all-races base body textures
-    "global_chr.s3d",
-    // per-archetype character archives (body textures for the mapped player races)
-    "globalhum_chr.s3d", "globalhum_chr2.s3d",
-    "globalelf_chr.s3d", "globalelf_chr2.s3d",
-    "globaldwf_chr.s3d", "globaldwf_chr2.s3d",
-    "globalgnm_chr.s3d", "globalgnm_chr2.s3d",
-    "globalfroglok_chr.s3d",
-    // held weapon models
-    "gequip.s3d", "gequip2.s3d", "gequip3.s3d", "gequip4.s3d",
-    "gequip5.s3d", "gequip6.s3d", "gequip7.s3d", "gequip8.s3d",
-];
-
 /// Build the "gameequip" set: decoded armor/body textures as `equiptex/<name>.png`
 /// plus the baked `weapons.glb` for held-weapon models.
 ///
