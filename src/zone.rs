@@ -105,35 +105,8 @@ pub fn load_object_models(obj_s3d: &Path) -> anyhow::Result<HashMap<String, Vec<
         let wld = match libeq_wld::load(&bytes) { Ok(w) => w, Err(_) => continue };
         for mesh in wld.meshes() {
             let base = match mesh.name() { Some(n) => object_base_name(n), None => continue };
-            let all_pos = mesh.positions();
-            if all_pos.is_empty() { continue; }
-            let (cx, cy, cz) = mesh.center();
-            let all_nrm = mesh.normals();
-            let all_uv = mesh.texture_coordinates();
-            for prim in mesh.primitives() {
-                let idx: Vec<u32> = prim.indices();
-                if idx.is_empty() { continue; }
-                // Some WLDs reference vertex indices past the mesh's position array; skip
-                // such malformed primitives rather than panicking on the whole zone.
-                if idx.iter().any(|&i| i as usize >= all_pos.len()) { continue; }
-                let positions = idx.iter().map(|&i| { let p = all_pos[i as usize]; [p[0]+cx, p[1]+cy, p[2]+cz] }).collect();
-                let normals = idx.iter().map(|&i| all_nrm.get(i as usize).copied().unwrap_or([0.0,0.0,1.0])).collect();
-                let mat = prim.material();
-                let tex = mat.base_color_texture();
-                let texture_name = tex.as_ref().and_then(|t| t.source());
-                let anim = tex.as_ref().and_then(texture_anim);
-                let alpha_mode = crate::convert::alpha_mode_from_render(mat.render_method());
-                // EQ animated sprite cards (fire/torch) author their UVs V-inverted vs
-                // the (upright) texture, so they render upside-down as plain quads. Flip V.
-                let flip_v = anim.is_some();
-                let uvs = idx.iter().map(|&i| {
-                    let uv = all_uv.get(i as usize).copied().unwrap_or([0.0, 0.0]);
-                    if flip_v { [uv[0], 1.0 - uv[1]] } else { uv }
-                }).collect();
-                let raw = ZoneMesh {
-                    positions, normals, uvs, indices: (0..idx.len() as u32).collect(), texture_name, alpha_mode, anim,
-                };
-                models.entry(base.clone()).or_default().push(weld(&raw));
+            for zm in zone_meshes_from_mesh(&mesh) {
+                models.entry(base.clone()).or_default().push(weld(&zm));
             }
         }
     }
@@ -197,6 +170,50 @@ pub fn weld(mesh: &ZoneMesh) -> ZoneMesh {
     ZoneMesh { positions, normals, uvs, indices, texture_name: mesh.texture_name.clone(), alpha_mode: mesh.alpha_mode, anim: mesh.anim.clone() }
 }
 
+/// Extract one [`ZoneMesh`] per primitive from a WLD mesh, folding the mesh center
+/// into positions. Both [`load_terrain`] and [`load_object_models`] use this helper
+/// so the per-primitive extraction logic (center fold, bounds guard, UV V-flip for
+/// animated sprites) lives in one place.
+pub(crate) fn zone_meshes_from_mesh(mesh: &libeq_wld::Mesh<'_>) -> Vec<ZoneMesh> {
+    let all_pos = mesh.positions();
+    if all_pos.is_empty() { return Vec::new(); }
+    let (cx, cy, cz) = mesh.center();
+    let all_nrm = mesh.normals();
+    let all_uv = mesh.texture_coordinates();
+    let mut out = Vec::new();
+    for prim in mesh.primitives() {
+        let idx: Vec<u32> = prim.indices();
+        if idx.is_empty() { continue; }
+        // Skip primitives whose indices exceed the position array (malformed WLD)
+        // instead of panicking on the whole zone.
+        if idx.iter().any(|&i| i as usize >= all_pos.len()) { continue; }
+        let positions = idx.iter()
+            .map(|&i| { let p = all_pos[i as usize]; [p[0] + cx, p[1] + cy, p[2] + cz] })
+            .collect();
+        let normals = idx.iter()
+            .map(|&i| all_nrm.get(i as usize).copied().unwrap_or([0.0, 0.0, 1.0]))
+            .collect();
+        let mat = prim.material();
+        let tex = mat.base_color_texture();
+        let texture_name = tex.as_ref().and_then(|t| t.source());
+        let anim = tex.as_ref().and_then(texture_anim);
+        let alpha_mode = crate::convert::alpha_mode_from_render(mat.render_method());
+        // EQ animated sprite cards author their UVs V-inverted vs the upright texture;
+        // flip V so they render correctly.
+        let flip_v = anim.is_some();
+        let uvs = idx.iter().map(|&i| {
+            let uv = all_uv.get(i as usize).copied().unwrap_or([0.0, 0.0]);
+            if flip_v { [uv[0], 1.0 - uv[1]] } else { uv }
+        }).collect();
+        out.push(ZoneMesh {
+            positions, normals, uvs,
+            indices: (0..idx.len() as u32).collect(),
+            texture_name, alpha_mode, anim,
+        });
+    }
+    out
+}
+
 /// Extract terrain meshes from a zone's main `.s3d`, keeping texture names, in
 /// raw libeq coordinates. Mirrors the non-skinned mesh loop in
 /// `convert::convert_s3d_to_glb` (src/convert/mod.rs ~lines 126-207): walk
@@ -217,41 +234,7 @@ fn load_terrain(main_s3d: &Path) -> anyhow::Result<Vec<ZoneMesh>> {
         };
         let wld = match libeq_wld::load(&bytes) { Ok(w) => w, Err(_) => continue };
         for mesh in wld.meshes() {
-            let all_pos = mesh.positions();
-            if all_pos.is_empty() { continue; }
-            // Terrain mesh vertices are local to the mesh's center; fold the center
-            // into world-space positions (glb has no per-mesh center field), exactly
-            // as load_object_models does — otherwise every terrain mesh piles at 0,0,0.
-            let (cx, cy, cz) = mesh.center();
-            let all_nrm = mesh.normals();
-            let all_uv = mesh.texture_coordinates();
-            for prim in mesh.primitives() {
-                let idx: Vec<u32> = prim.indices();
-                if idx.is_empty() { continue; }
-                // Skip primitives whose indices exceed the position array (malformed WLD)
-                // instead of panicking on the whole zone.
-                if idx.iter().any(|&i| i as usize >= all_pos.len()) { continue; }
-                let positions = idx.iter().map(|&i| { let p = all_pos[i as usize]; [p[0] + cx, p[1] + cy, p[2] + cz] }).collect();
-                let normals = idx.iter().map(|&i| all_nrm.get(i as usize).copied().unwrap_or([0.0, 0.0, 1.0])).collect();
-                let mat = prim.material();
-                let tex = mat.base_color_texture();
-                let texture_name = tex.as_ref().and_then(|t| t.source());
-                let anim = tex.as_ref().and_then(texture_anim);
-                let alpha_mode = crate::convert::alpha_mode_from_render(mat.render_method());
-                // Flip V for animated sprite cards (see load_object_models).
-                let flip_v = anim.is_some();
-                let uvs = idx.iter().map(|&i| {
-                    let uv = all_uv.get(i as usize).copied().unwrap_or([0.0, 0.0]);
-                    if flip_v { [uv[0], 1.0 - uv[1]] } else { uv }
-                }).collect();
-                out.push(ZoneMesh {
-                    positions, normals, uvs,
-                    indices: (0..idx.len() as u32).collect(),
-                    texture_name,
-                    alpha_mode,
-                    anim,
-                });
-            }
+            out.extend(zone_meshes_from_mesh(&mesh));
         }
     }
     // EQ zone WLDs split terrain into thousands of tiny primitives (qeynos: ~8500).
@@ -464,6 +447,127 @@ pub fn bake_zone(main_s3d: &Path, obj_s3d: Option<&Path>, output_glb: &Path) -> 
     }
 
     write_glb_instanced(output_glb, &meshes, &materials, &textures, &nodes)
+}
+
+/// Build material/texture/mesh/node data from a `HashMap<base, Vec<ZoneMesh>>` and
+/// write a GLB with one identity-node mesh per object base name (UPPERCASE mesh name),
+/// textures embedded. Returns `Ok(false)` without writing anything when there are no
+/// non-empty meshes. Shared by [`bake_object_models_glb`] (doors) and future callers
+/// (weapons, armor).
+pub(crate) fn write_object_models_glb(
+    models: HashMap<String, Vec<ZoneMesh>>,
+    pfs: &mut Vec<libeq_pfs::PfsReader<std::fs::File>>,
+    out_glb: &Path,
+) -> anyhow::Result<bool> {
+    use crate::convert::{
+        load_texture_from_archive, write_glb_instanced, MaterialData, MeshData, NodeDef,
+        PrimitiveData, TextureData,
+    };
+
+    let mut materials: Vec<MaterialData> = Vec::new();
+    let mut textures: Vec<TextureData> = Vec::new();
+    let mut tex_map: HashMap<String, usize> = HashMap::new();
+    let mut mat_map: HashMap<String, usize> = HashMap::new();
+    let mut meshes: Vec<MeshData> = Vec::new();
+    let mut nodes: Vec<NodeDef> = Vec::new();
+
+    // Resolve a ZoneMesh to a glTF material index, decoding+caching textures once.
+    let material_for = |m: &ZoneMesh,
+                        materials: &mut Vec<MaterialData>,
+                        textures: &mut Vec<TextureData>,
+                        tex_map: &mut HashMap<String, usize>,
+                        mat_map: &mut HashMap<String, usize>,
+                        pfs: &mut Vec<libeq_pfs::PfsReader<std::fs::File>>|
+     -> usize {
+        let tex_key = m.texture_name.clone().unwrap_or_else(|| "untextured".to_string());
+        let key = format!("{}\0{:?}", tex_key, m.alpha_mode);
+        if let Some(&i) = mat_map.get(&key) { return i; }
+        let texture_idx = m.texture_name.as_ref().and_then(|name| {
+            let lower = name.to_lowercase();
+            let ck = format!("{}\0{:?}", lower, m.alpha_mode);
+            if let Some(&t) = tex_map.get(&ck) { return Some(t); }
+            let png = pfs.iter_mut().find_map(|p| load_texture_from_archive(p, &lower, m.alpha_mode));
+            png.map(|b| {
+                let t = textures.len();
+                textures.push(TextureData { name: lower, png_bytes: b });
+                tex_map.insert(ck, t);
+                t
+            })
+        });
+        let idx = materials.len();
+        materials.push(MaterialData {
+            name: tex_key,
+            texture_idx,
+            base_color: [1.0, 1.0, 1.0, 1.0],
+            alpha_mode: m.alpha_mode,
+            anim: m.anim.clone(),
+        });
+        mat_map.insert(key, idx);
+        idx
+    };
+
+    // Deterministic order for reproducible GLBs.
+    let mut bases: Vec<&String> = models.keys().collect();
+    bases.sort();
+    for base in bases {
+        let group = &models[base];
+        let mut positions: Vec<[f32; 3]> = Vec::new();
+        let mut normals: Vec<[f32; 3]> = Vec::new();
+        let mut uvs: Vec<[f32; 2]> = Vec::new();
+        let mut primitives: Vec<PrimitiveData> = Vec::new();
+        for zm in group {
+            if zm.positions.is_empty() || zm.indices.is_empty() { continue; }
+            let offset = positions.len() as u32;
+            positions.extend_from_slice(&zm.positions);
+            normals.extend_from_slice(&zm.normals);
+            uvs.extend_from_slice(&zm.uvs);
+            let indices: Vec<u32> = zm.indices.iter().map(|&i| i + offset).collect();
+            let material_idx = material_for(zm, &mut materials, &mut textures, &mut tex_map, &mut mat_map, pfs);
+            primitives.push(PrimitiveData { indices, material_idx, extras: None });
+        }
+        if primitives.is_empty() { continue; }
+        let mesh_idx = meshes.len();
+        meshes.push(MeshData { name: base.to_uppercase(), positions, normals, uvs, primitives });
+        nodes.push(NodeDef { mesh_idx, matrix: None });
+    }
+    if meshes.is_empty() { return Ok(false); }
+    write_glb_instanced(out_glb, &meshes, &materials, &textures, &nodes)?;
+    Ok(true)
+}
+
+/// Bake a zone's object archive (`<zone>_obj.s3d`) into a GLB with one identity-node
+/// mesh per object base name (UPPERCASE), textures embedded. Door placement/animation
+/// is applied client-side from live door state, so no instance transforms are emitted.
+/// Returns `Ok(false)` (writing nothing) when the archive has no object models.
+pub fn bake_object_models_glb(obj_s3d: &Path, output_glb: &Path) -> anyhow::Result<bool> {
+    let models = load_object_models(obj_s3d)?;
+    if models.is_empty() { return Ok(false); }
+    let mut pfs = vec![libeq_pfs::PfsReader::open(
+        std::fs::File::open(obj_s3d).with_context(|| format!("open {}", obj_s3d.display()))?,
+    )?];
+    write_object_models_glb(models, &mut pfs, output_glb)
+}
+
+#[cfg(test)]
+mod doors_glb_tests {
+    use super::*;
+    #[test]
+    #[ignore = "requires ~/eq_assets/EQ_Files/qcat_obj.s3d"]
+    fn bakes_named_object_meshes_with_textures() {
+        let home = std::env::var("HOME").unwrap();
+        let obj = std::path::PathBuf::from(format!("{home}/eq_assets/EQ_Files/qcat_obj.s3d"));
+        if !obj.exists() { eprintln!("skip: archive missing"); return; }
+        let out = std::env::temp_dir().join("qcat_doors_test.glb");
+        let wrote = bake_object_models_glb(&obj, &out).unwrap();
+        assert!(wrote, "qcat_obj has object models");
+        // Re-import: meshes are named (UPPERCASE base) and at least one links a texture.
+        let (doc, _b, _i) = gltf::import(&out).unwrap();
+        let named = doc.meshes().filter(|m| m.name().is_some()).count();
+        assert!(named > 0, "every door mesh must be named by base");
+        assert!(doc.images().count() > 0, "door textures must be embedded");
+        assert!(doc.meshes().all(|m| m.name().map_or(false, |n| n == n.to_uppercase())),
+            "mesh names must be uppercase base names");
+    }
 }
 
 #[cfg(test)]
