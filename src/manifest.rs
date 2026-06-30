@@ -1,7 +1,7 @@
 use crate::cas::Cas;
 use crate::chunker::chunk_into;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 pub struct FileEntry {
@@ -96,6 +96,59 @@ impl ManifestStore {
             .ok_or_else(|| anyhow::anyhow!("no manifest for set {set}"))?;
         self.load(set, &d)
     }
+
+    /// Every set in the store (a directory under `manifests/` that has a `latest` pointer).
+    /// Nested set names like `zone/qeynos` are returned with `/` separators.
+    pub fn all_sets(&self) -> Vec<String> {
+        fn walk(dir: &Path, base: &Path, out: &mut Vec<String>) {
+            if dir.join("latest").is_file() {
+                if let Ok(rel) = dir.strip_prefix(base) {
+                    out.push(rel.to_string_lossy().replace('\\', "/"));
+                }
+            }
+            if let Ok(rd) = std::fs::read_dir(dir) {
+                for e in rd.flatten() {
+                    if e.path().is_dir() {
+                        walk(&e.path(), base, out);
+                    }
+                }
+            }
+        }
+        let base = self.root.join("manifests");
+        let mut sets = Vec::new();
+        if base.is_dir() {
+            walk(&base, &base, &mut sets);
+        }
+        sets.sort();
+        sets
+    }
+
+    /// Migrate a set's `latest` manifest from the legacy version-keyed format (`<version>.json`,
+    /// `latest`=version) to the content-digest store (`<digest>.json`, `latest`=digest). Idempotent:
+    /// returns `Ok(None)` when `latest` is already a digest. Reuses the existing chunks (the file
+    /// list is unchanged) — no re-derivation, so clients with the content cached re-download nothing.
+    pub fn migrate_to_digest(&self, set: &str) -> anyhow::Result<Option<String>> {
+        let dir = self.set_dir(set);
+        let latest = std::fs::read_to_string(dir.join("latest"))?.trim().to_string();
+        if latest.len() == 64 && latest.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Ok(None); // already content-addressed
+        }
+        // Legacy manifest: read it ignoring its `version` field (serde skips unknown fields).
+        #[derive(Deserialize)]
+        struct Legacy {
+            #[serde(default)]
+            set: String,
+            files: Vec<FileEntry>,
+        }
+        let bytes = std::fs::read(dir.join(format!("{latest}.json")))?;
+        let legacy: Legacy = serde_json::from_slice(&bytes)?;
+        let set_name = if legacy.set.is_empty() { set.to_string() } else { legacy.set };
+        let digest = Self::set_digest(&legacy.files);
+        let manifest = Manifest { set: set_name, digest: digest.clone(), files: legacy.files };
+        std::fs::write(dir.join(format!("{digest}.json")), serde_json::to_vec_pretty(&manifest)?)?;
+        std::fs::write(dir.join("latest"), &digest)?;
+        Ok(Some(digest))
+    }
 }
 
 #[cfg(test)]
@@ -157,6 +210,30 @@ mod tests {
         let count2 = std::fs::read_dir(store.set_dir("common")).unwrap().count();
         assert_eq!(m1.digest, m2.digest);
         assert_eq!(count1, count2); // <digest>.json + latest, no churn
+    }
+
+    #[test]
+    fn migrate_legacy_to_digest_idempotent_and_loadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ManifestStore::new(dir.path());
+        let entries = vec![fe("b.bin", "22"), fe("a.bin", "11")];
+        // hand-write a legacy version-keyed manifest
+        let sd = store.set_dir("common");
+        std::fs::create_dir_all(&sd).unwrap();
+        let legacy = serde_json::json!({ "set": "common", "version": 7, "files": entries });
+        std::fs::write(sd.join("7.json"), serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+        std::fs::write(sd.join("latest"), "7").unwrap();
+
+        let d = store.migrate_to_digest("common").unwrap().unwrap();
+        assert_eq!(d, ManifestStore::set_digest(&entries));
+        assert_eq!(store.latest_digest("common").as_deref(), Some(d.as_str()));
+        // the new loader can now read it
+        let m = store.load_latest("common").unwrap();
+        assert_eq!(m.digest, d);
+        assert_eq!(m.files.len(), 2);
+        // idempotent + discoverable
+        assert!(store.migrate_to_digest("common").unwrap().is_none());
+        assert!(store.all_sets().contains(&"common".to_string()));
     }
 
     #[test]
