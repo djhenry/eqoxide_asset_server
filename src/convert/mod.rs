@@ -2376,11 +2376,11 @@ pub(crate) fn bake_weapons_glb(
             let Ok(wld) = libeq_wld::load(&bytes) else { continue };
             for mesh in wld.meshes() {
                 let Some(name) = mesh.name() else { continue };
-                let up = name.to_uppercase();
-                if !up.starts_with("IT") { continue; }
+                let base = crate::zone::object_base_name(name);
+                if !base.starts_with("IT") { continue; }
                 let zms = crate::zone::zone_meshes_from_mesh(&mesh);
                 if !zms.is_empty() {
-                    models.entry(up).or_default().extend(zms);
+                    models.entry(base).or_default().extend(zms);
                 }
             }
         }
@@ -2620,7 +2620,11 @@ mod weapons_glb_tests {
         let archives = ["gequip.s3d","gequip2.s3d","gequip3.s3d","gequip4.s3d","gequip5.s3d","gequip6.s3d","gequip7.s3d","gequip8.s3d"];
         assert!(bake_weapons_glb(&raw, &archives, &out).unwrap());
         let (doc, _b, _i) = gltf::import(&out).unwrap();
-        assert!(doc.meshes().any(|m| m.name().map_or(false, |n| n.starts_with("IT"))), "weapon meshes named IT####");
+        // Meshes must be keyed by bare IT#### (suffix stripped), not IT####_DMSPRITEDEF.
+        assert!(
+            doc.meshes().any(|m| m.name().map_or(false, |n| n.starts_with("IT") && !n.contains('_'))),
+            "weapon meshes must be bare IT#### (no _DMSPRITEDEF suffix)"
+        );
     }
 }
 
