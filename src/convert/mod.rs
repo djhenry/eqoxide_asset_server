@@ -2351,6 +2351,52 @@ fn compute_bounds_f32x3(positions: &[[f32; 3]]) -> ([f32; 3], [f32; 3]) {
     (min, max)
 }
 
+/// Bake held-weapon models from the gequip archives into a single `weapons.glb`.
+/// Iterates every archive in `archives` (relative to `raw_dir`), parses each WLD, and
+/// collects every mesh whose name (uppercased) starts with `"IT"` as a model-local
+/// [`crate::zone::ZoneMesh`] via [`crate::zone::zone_meshes_from_mesh`]. Each unique
+/// uppercased mesh name becomes one identity-node mesh in the output GLB, with
+/// textures embedded.  Returns `Ok(false)` without writing anything when no `IT`
+/// meshes are found (e.g. all archives missing).
+pub(crate) fn bake_weapons_glb(
+    raw_dir: &Path,
+    archives: &[&str],
+    out_glb: &Path,
+) -> anyhow::Result<bool> {
+    use std::collections::HashMap;
+    let mut models: HashMap<String, Vec<crate::zone::ZoneMesh>> = HashMap::new();
+    let mut pfs_for_tex: Vec<libeq_pfs::PfsReader<std::fs::File>> = Vec::new();
+    for arch in archives {
+        let p = raw_dir.join(arch);
+        let Ok(file) = std::fs::File::open(&p) else { continue };
+        let Ok(mut pfs) = libeq_pfs::PfsReader::open(file) else { continue };
+        let Ok(names) = pfs.filenames() else { continue };
+        for wn in names.iter().filter(|f| f.to_lowercase().ends_with(".wld")) {
+            let Ok(Some(bytes)) = pfs.get(wn) else { continue };
+            let Ok(wld) = libeq_wld::load(&bytes) else { continue };
+            for mesh in wld.meshes() {
+                let Some(name) = mesh.name() else { continue };
+                let base = crate::zone::object_base_name(name);
+                if !base.starts_with("IT") { continue; }
+                let zms = crate::zone::zone_meshes_from_mesh(&mesh);
+                if !zms.is_empty() {
+                    models.entry(base).or_default().extend(zms);
+                }
+            }
+        }
+        // Reopen the archive for the texture-decode pass.
+        if let Ok(f) = std::fs::File::open(&p) {
+            if let Ok(r) = libeq_pfs::PfsReader::open(f) {
+                pfs_for_tex.push(r);
+            }
+        }
+    }
+    if models.is_empty() {
+        return Ok(false);
+    }
+    crate::zone::write_object_models_glb(models, &mut pfs_for_tex, out_glb)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2557,6 +2603,80 @@ mod tests {
                         "ear group '{}' must not have eq_hairstyle", ear_mat);
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod weapons_glb_tests {
+    use super::*;
+    #[test]
+    #[ignore = "requires ~/eq_assets/EQ_Files/gequip*.s3d"]
+    fn bakes_named_weapon_meshes() {
+        let home = std::env::var("HOME").unwrap();
+        let raw = std::path::PathBuf::from(format!("{home}/eq_assets/EQ_Files"));
+        if !raw.join("gequip.s3d").exists() { eprintln!("skip"); return; }
+        let out = std::env::temp_dir().join("weapons_test.glb");
+        let archives = ["gequip.s3d","gequip2.s3d","gequip3.s3d","gequip4.s3d","gequip5.s3d","gequip6.s3d","gequip7.s3d","gequip8.s3d"];
+        assert!(bake_weapons_glb(&raw, &archives, &out).unwrap());
+        let (doc, _b, _i) = gltf::import(&out).unwrap();
+        // Meshes must be keyed by bare IT#### (suffix stripped), not IT####_DMSPRITEDEF.
+        assert!(
+            doc.meshes().any(|m| m.name().map_or(false, |n| n.starts_with("IT") && !n.contains('_'))),
+            "weapon meshes must be bare IT#### (no _DMSPRITEDEF suffix)"
+        );
+    }
+}
+
+/// Extract every BMP/DDS texture from the given S3D archives, decode to RGBA,
+/// filter out ≤8×8 all-alpha "stub" placeholder textures, and re-encode to PNG.
+/// Returns `(name_lower_without_ext + ".png", png_bytes)` pairs, deduped by name
+/// (first-wins insertion order, matching `index_s3d_textures` semantics).
+pub(crate) fn extract_equip_textures(raw_dir: &Path, archives: &[&str]) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
+    use std::collections::HashSet;
+    let mut out: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for arch in archives {
+        let p = raw_dir.join(arch);
+        let Ok(file) = std::fs::File::open(&p) else { continue };
+        let Ok(mut pfs) = libeq_pfs::PfsReader::open(file) else { continue };
+        let Ok(names) = pfs.filenames() else { continue };
+        for name in names {
+            let lower = name.to_lowercase();
+            let fmt = if lower.ends_with(".bmp") { image::ImageFormat::Bmp }
+                      else if lower.ends_with(".dds") { image::ImageFormat::Dds } else { continue };
+            let stem = format!("{}.png", &lower[..lower.len()-4]);
+            if seen.contains(&stem) { continue; }
+            let Ok(Some(bytes)) = pfs.get(&name) else { continue };
+            let Ok(img) = image::load_from_memory_with_format(&bytes, fmt) else { continue };
+            let rgba = img.to_rgba8();
+            let (w, h) = rgba.dimensions();
+            if (w <= 8 && h <= 8) || rgba.pixels().all(|px| px.0[3] == 0) { continue; }
+            let mut png = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(rgba).write_to(&mut png, image::ImageFormat::Png)?;
+            seen.insert(stem.clone());
+            out.push((stem, png.into_inner()));
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod equip_tex_tests {
+    use super::*;
+    #[test]
+    #[ignore = "requires ~/eq_assets/EQ_Files/global_chr.s3d"]
+    fn extracts_named_pngs_skipping_stubs() {
+        let home = std::env::var("HOME").unwrap();
+        let raw = std::path::PathBuf::from(format!("{home}/eq_assets/EQ_Files"));
+        if !raw.join("global_chr.s3d").exists() { eprintln!("skip"); return; }
+        let out = extract_equip_textures(&raw, &["global_chr.s3d"]).unwrap();
+        assert!(!out.is_empty());
+        assert!(out.iter().all(|(n,_)| n.ends_with(".png") && n == &n.to_lowercase()));
+        // every emitted PNG decodes and is > 8x8 (stubs filtered)
+        for (n, bytes) in out.iter().take(20) {
+            let img = image::load_from_memory(bytes).unwrap_or_else(|_| panic!("decode {n}"));
+            assert!(img.width() > 8 || img.height() > 8, "{n} should not be an 8x8 stub");
         }
     }
 }

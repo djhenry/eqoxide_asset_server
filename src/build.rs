@@ -149,7 +149,12 @@ pub fn build_zonedoors_from_raw(cas: &Cas, store: &ManifestStore, raw_dir: &Path
 {
     let obj = raw_dir.join(format!("{short}_obj.s3d"));
     if !obj.exists() { return Ok(None); }
-    let files = vec![(format!("{short}_obj.s3d"), std::fs::read(&obj)?)];
+    let tmp = std::env::temp_dir().join(format!("{short}_doors.glb"));
+    let wrote = crate::zone::bake_object_models_glb(&obj, &tmp)?;
+    if !wrote { return Ok(None); }
+    let bytes = std::fs::read(&tmp)?;
+    let _ = std::fs::remove_file(&tmp);
+    let files = vec![(format!("{short}_doors.glb"), bytes)];
     Ok(Some(store.build_and_write(cas, &format!("zonedoors/{short}"), &files)?))
 }
 
@@ -217,43 +222,41 @@ pub fn build_zones_from_raw(
     Ok(baked)
 }
 
-/// The equipment/weapon S3D archives the client needs to texture worn armor and render held
-/// weapons. Kept in sync with eq_client_lite renderer.rs (index_s3d_textures globals + ARCHETYPES /
-/// archetype_to_chr_s3d) and assets.rs load_weapon_model (gequip*). Served raw (the client parses
-/// S3D); this removes the client's direct dependency on the ~/eq_assets folder.
-const GAMEEQUIP_ARCHIVES: &[&str] = &[
-    // armor texture sets (global17_amr.s3d .. global23_amr.s3d)
-    "global17_amr.s3d", "global18_amr.s3d", "global19_amr.s3d", "global20_amr.s3d",
-    "global21_amr.s3d", "global22_amr.s3d", "global23_amr.s3d",
-    // combined all-races base body textures
-    "global_chr.s3d",
-    // per-archetype character archives (body textures for the mapped player races)
-    "globalhum_chr.s3d", "globalhum_chr2.s3d",
-    "globalelf_chr.s3d", "globalelf_chr2.s3d",
-    "globaldwf_chr.s3d", "globaldwf_chr2.s3d",
-    "globalgnm_chr.s3d", "globalgnm_chr2.s3d",
-    "globalfroglok_chr.s3d",
-    // held weapon models
-    "gequip.s3d", "gequip2.s3d", "gequip3.s3d", "gequip4.s3d",
-    "gequip5.s3d", "gequip6.s3d", "gequip7.s3d", "gequip8.s3d",
-];
-
-/// Build the "gameequip" set: the equipment/weapon S3D archives (served raw, see
-/// GAMEEQUIP_ARCHIVES) so the client loads worn-armor textures + held-weapon models from the asset
-/// server cache instead of reading ~/eq_assets at runtime.
+/// Build the "gameequip" set: decoded armor/body textures as `equiptex/<name>.png`
+/// plus the baked `weapons.glb` for held-weapon models.
+///
+/// Raw S3D archives are no longer served directly: armor textures (previously the
+/// `_amr`/`_chr` archives in `GAMEEQUIP_ARCHIVES`) are now pre-decoded here, and
+/// weapon geometry (previously `gequip*.s3d`) is now bundled into `weapons.glb` by
+/// `bake_weapons_glb` (added in Task 5). This removes the client's dependency on
+/// the raw S3D format for both worn-armor textures and held-weapon models.
 pub fn build_gameequip_from_raw(
     cas: &Cas,
     store: &ManifestStore,
     raw_dir: &Path,
 ) -> anyhow::Result<Manifest> {
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();
-    for name in GAMEEQUIP_ARCHIVES {
-        let p = raw_dir.join(name);
-        if p.exists() {
-            files.push((name.to_string(), std::fs::read(&p)?));
-        } else {
-            tracing::warn!("gameequip: missing {name} in {}", raw_dir.display());
-        }
+
+    // Extract decoded PNGs from the armor and body-texture archives.
+    let equip_archives = [
+        "global17_amr.s3d", "global18_amr.s3d", "global19_amr.s3d", "global20_amr.s3d",
+        "global21_amr.s3d", "global22_amr.s3d", "global23_amr.s3d",
+        "global_chr.s3d",
+        "globalhum_chr.s3d", "globalhum_chr2.s3d",
+        "globalelf_chr.s3d", "globalelf_chr2.s3d",
+        "globaldwf_chr.s3d", "globaldwf_chr2.s3d",
+        "globalgnm_chr.s3d", "globalgnm_chr2.s3d",
+        "globalfroglok_chr.s3d",
+    ];
+    for (name, png) in crate::convert::extract_equip_textures(raw_dir, &equip_archives)? {
+        files.push((format!("equiptex/{name}"), png));
+    }
+
+    // Bake all held-weapon models into a single GLB.
+    let wtmp = std::env::temp_dir().join("weapons.glb");
+    if crate::convert::bake_weapons_glb(raw_dir, &["gequip.s3d","gequip2.s3d","gequip3.s3d","gequip4.s3d","gequip5.s3d","gequip6.s3d","gequip7.s3d","gequip8.s3d"], &wtmp).unwrap_or(false) {
+        files.push(("weapons.glb".to_string(), std::fs::read(&wtmp)?));
+        let _ = std::fs::remove_file(&wtmp);
     }
     store.build_and_write(cas, "gameequip", &files)
 }
