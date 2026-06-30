@@ -14,7 +14,10 @@ pub struct FileEntry {
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 pub struct Manifest {
     pub set: String,
-    pub version: u64,
+    /// Content identity of the set: blake3 over the sorted (path, file-blake3) list. Same content
+    /// yields the same digest on any server, so the client can skip an unchanged set and never
+    /// cross-contaminate between servers with diverging custom assets.
+    pub digest: String,
     pub files: Vec<FileEntry>,
 }
 
@@ -31,9 +34,25 @@ impl ManifestStore {
         self.root.join("manifests").join(set)
     }
 
-    pub fn latest_version(&self, set: &str) -> Option<u64> {
+    /// The set's content identity: blake3 over the files sorted by path, each contributing
+    /// `"{path}\0{blake3}\n"`. Deterministic, build-order-independent, server-independent. MUST stay
+    /// byte-identical to the client's `eqoxide::asset_sync::set_digest`.
+    pub fn set_digest(files: &[FileEntry]) -> String {
+        let mut sorted: Vec<&FileEntry> = files.iter().collect();
+        sorted.sort_by(|a, b| a.path.cmp(&b.path));
+        let mut h = blake3::Hasher::new();
+        for f in sorted {
+            h.update(f.path.as_bytes());
+            h.update(b"\0");
+            h.update(f.blake3.as_bytes());
+            h.update(b"\n");
+        }
+        h.finalize().to_hex().to_string()
+    }
+
+    pub fn latest_digest(&self, set: &str) -> Option<String> {
         let p = self.set_dir(set).join("latest");
-        std::fs::read_to_string(p).ok()?.trim().parse().ok()
+        std::fs::read_to_string(p).ok().map(|s| s.trim().to_string())
     }
 
     pub fn build_and_write(
@@ -52,28 +71,30 @@ impl ManifestStore {
                 chunks,
             });
         }
-        let version = self.latest_version(set).unwrap_or(0) + 1;
-        let manifest = Manifest { set: set.to_string(), version, files: entries };
+        let digest = Self::set_digest(&entries);
+        let manifest = Manifest { set: set.to_string(), digest: digest.clone(), files: entries };
 
+        // Content-addressed store: identical content overwrites the same `<digest>.json` (no-op,
+        // no counter churn); changed content writes a new digest and `latest` repoints.
         let dir = self.set_dir(set);
         std::fs::create_dir_all(&dir)?;
         let json = serde_json::to_vec_pretty(&manifest)?;
-        std::fs::write(dir.join(format!("{version}.json")), json)?;
-        std::fs::write(dir.join("latest"), version.to_string())?;
+        std::fs::write(dir.join(format!("{digest}.json")), json)?;
+        std::fs::write(dir.join("latest"), &digest)?;
         Ok(manifest)
     }
 
-    pub fn load(&self, set: &str, version: u64) -> anyhow::Result<Manifest> {
-        let p = self.set_dir(set).join(format!("{version}.json"));
+    pub fn load(&self, set: &str, digest: &str) -> anyhow::Result<Manifest> {
+        let p = self.set_dir(set).join(format!("{digest}.json"));
         let bytes = std::fs::read(p)?;
         Ok(serde_json::from_slice(&bytes)?)
     }
 
     pub fn load_latest(&self, set: &str) -> anyhow::Result<Manifest> {
-        let v = self
-            .latest_version(set)
+        let d = self
+            .latest_digest(set)
             .ok_or_else(|| anyhow::anyhow!("no manifest for set {set}"))?;
-        self.load(set, v)
+        self.load(set, &d)
     }
 }
 
@@ -88,21 +109,54 @@ mod tests {
         ]
     }
 
+    fn fe(path: &str, blake3: &str) -> FileEntry {
+        FileEntry { path: path.into(), size: 1, blake3: blake3.into(), chunks: vec![blake3.into()] }
+    }
+
     #[test]
-    fn build_writes_manifest_and_increments_version() {
+    fn digest_is_deterministic_and_order_independent() {
+        let a = vec![fe("b.bin", "22"), fe("a.bin", "11")];
+        let b = vec![fe("a.bin", "11"), fe("b.bin", "22")];
+        assert_eq!(ManifestStore::set_digest(&a), ManifestStore::set_digest(&b));
+        assert_eq!(ManifestStore::set_digest(&a).len(), 64);
+    }
+
+    #[test]
+    fn digest_changes_when_a_file_changes() {
+        let a = vec![fe("a.bin", "11")];
+        let b = vec![fe("a.bin", "99")];
+        assert_ne!(ManifestStore::set_digest(&a), ManifestStore::set_digest(&b));
+    }
+
+    #[test]
+    fn build_writes_digest_named_manifest_and_latest() {
         let dir = tempfile::tempdir().unwrap();
         let cas = Cas::new(dir.path());
         let store = ManifestStore::new(dir.path());
 
-        let m1 = store.build_and_write(&cas, "common", &files()).unwrap();
-        assert_eq!(m1.version, 1);
-        assert_eq!(m1.set, "common");
-        assert_eq!(m1.files.len(), 2);
-        assert_eq!(store.latest_version("common"), Some(1));
+        let m = store.build_and_write(&cas, "common", &files()).unwrap();
+        assert_eq!(m.set, "common");
+        assert_eq!(m.files.len(), 2);
+        assert_eq!(m.digest.len(), 64);
+        assert!(store.set_dir("common").join(format!("{}.json", m.digest)).exists());
+        assert_eq!(
+            std::fs::read_to_string(store.set_dir("common").join("latest")).unwrap(),
+            m.digest
+        );
+        assert_eq!(store.latest_digest("common").as_deref(), Some(m.digest.as_str()));
+    }
 
+    #[test]
+    fn identical_rebuild_dedups_no_new_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas = Cas::new(dir.path());
+        let store = ManifestStore::new(dir.path());
+        let m1 = store.build_and_write(&cas, "common", &files()).unwrap();
+        let count1 = std::fs::read_dir(store.set_dir("common")).unwrap().count();
         let m2 = store.build_and_write(&cas, "common", &files()).unwrap();
-        assert_eq!(m2.version, 2);
-        assert_eq!(store.latest_version("common"), Some(2));
+        let count2 = std::fs::read_dir(store.set_dir("common")).unwrap().count();
+        assert_eq!(m1.digest, m2.digest);
+        assert_eq!(count1, count2); // <digest>.json + latest, no churn
     }
 
     #[test]

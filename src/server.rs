@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use axum::{
     body::Body,
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -32,9 +32,10 @@ struct AuthReq {
     password: String,
 }
 
-#[derive(Deserialize)]
-struct VersionQuery {
-    version: Option<u64>,
+/// True when the client's `If-None-Match` (quotes optional) equals the set's current digest, i.e.
+/// the client already has this exact content and the server should answer `304 Not Modified`.
+fn etag_matches(if_none_match: Option<&str>, digest: &str) -> bool {
+    if_none_match.is_some_and(|inm| inm.trim().trim_matches('"') == digest)
 }
 
 fn bearer(headers: &HeaderMap, tokens: &TokenIssuer) -> Option<String> {
@@ -56,17 +57,20 @@ async fn get_manifest(
     State(st): State<AppState>,
     headers: HeaderMap,
     Path(set): Path<String>,
-    Query(q): Query<VersionQuery>,
 ) -> Response {
     if !st.no_auth && bearer(&headers, &st.tokens).is_none() {
         return (StatusCode::UNAUTHORIZED, "missing/invalid token").into_response();
     }
-    let result = match q.version {
-        Some(v) => st.manifests.load(&set, v),
-        None => st.manifests.load_latest(&set),
+    let Some(digest) = st.manifests.latest_digest(&set) else {
+        return (StatusCode::NOT_FOUND, "no such manifest").into_response();
     };
-    match result {
-        Ok(m) => Json(m).into_response(),
+    // Conditional GET: identical content the client already has → 304, no body.
+    let inm = headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok());
+    if etag_matches(inm, &digest) {
+        return StatusCode::NOT_MODIFIED.into_response();
+    }
+    match st.manifests.load_latest(&set) {
+        Ok(m) => ([(header::ETAG, format!("\"{digest}\""))], Json(m)).into_response(),
         Err(_) => (StatusCode::NOT_FOUND, "no such manifest").into_response(),
     }
 }
@@ -105,4 +109,22 @@ pub async fn serve(state: AppState, addr: SocketAddr) -> anyhow::Result<()> {
     tracing::info!("asset server listening on {addr}");
     axum::serve(listener, router(state)).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::etag_matches;
+
+    #[test]
+    fn etag_matches_with_and_without_quotes() {
+        assert!(etag_matches(Some("\"abc\""), "abc"));
+        assert!(etag_matches(Some("abc"), "abc"));
+        assert!(etag_matches(Some("  \"abc\" "), "abc"));
+    }
+
+    #[test]
+    fn etag_no_match_when_stale_or_absent() {
+        assert!(!etag_matches(Some("\"stale\""), "abc"));
+        assert!(!etag_matches(None, "abc"));
+    }
 }
