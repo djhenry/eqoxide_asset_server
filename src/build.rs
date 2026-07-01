@@ -230,6 +230,35 @@ pub fn build_zones_from_raw(
 /// weapon geometry (previously `gequip*.s3d`) is now bundled into `weapons.glb` by
 /// `bake_weapons_glb` (added in Task 5). This removes the client's dependency on
 /// the raw S3D format for both worn-armor textures and held-weapon models.
+/// Fixed worn-armor texture archives (shared across races/genders).
+const GAMEEQUIP_AMR_ARCHIVES: &[&str] = &[
+    "global17_amr.s3d", "global18_amr.s3d", "global19_amr.s3d", "global20_amr.s3d",
+    "global21_amr.s3d", "global22_amr.s3d", "global23_amr.s3d",
+];
+
+/// Archives the gameequip texture extraction scans: the fixed armor (`_amr`)
+/// archives plus EVERY per-race character archive (`global*_chr*.s3d` — both
+/// genders and `_chr2` supplements) found in `raw_dir`. Globbing the character
+/// archives (rather than a hand-picked list) ensures MALE and female body-cloth
+/// textures for all races are extracted; the old hand-picked list omitted most
+/// male archives, so pieces like `elmch0003` were never served (#7).
+fn equip_archives(raw_dir: &Path) -> Vec<String> {
+    let mut v: Vec<String> = GAMEEQUIP_AMR_ARCHIVES.iter().map(|s| s.to_string()).collect();
+    if let Ok(rd) = std::fs::read_dir(raw_dir) {
+        let mut chr: Vec<String> = rd
+            .flatten()
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|n| {
+                let l = n.to_lowercase();
+                l.starts_with("global") && l.contains("_chr") && l.ends_with(".s3d")
+            })
+            .collect();
+        chr.sort();
+        v.extend(chr);
+    }
+    v
+}
+
 pub fn build_gameequip_from_raw(
     cas: &Cas,
     store: &ManifestStore,
@@ -238,17 +267,9 @@ pub fn build_gameequip_from_raw(
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();
 
     // Extract decoded PNGs from the armor and body-texture archives.
-    let equip_archives = [
-        "global17_amr.s3d", "global18_amr.s3d", "global19_amr.s3d", "global20_amr.s3d",
-        "global21_amr.s3d", "global22_amr.s3d", "global23_amr.s3d",
-        "global_chr.s3d",
-        "globalhum_chr.s3d", "globalhum_chr2.s3d",
-        "globalelf_chr.s3d", "globalelf_chr2.s3d",
-        "globaldwf_chr.s3d", "globaldwf_chr2.s3d",
-        "globalgnm_chr.s3d", "globalgnm_chr2.s3d",
-        "globalfroglok_chr.s3d",
-    ];
-    for (name, png) in crate::convert::extract_equip_textures(raw_dir, &equip_archives)? {
+    let archives = equip_archives(raw_dir);
+    let arch_refs: Vec<&str> = archives.iter().map(|s| s.as_str()).collect();
+    for (name, png) in crate::convert::extract_equip_textures(raw_dir, &arch_refs)? {
         files.push((format!("equiptex/{name}"), png));
     }
 
@@ -347,6 +368,49 @@ mod tests {
         ] {
             assert!(!is_zone_archive(c), "{c} should NOT be a zone");
         }
+    }
+
+    #[test]
+    fn equip_archives_scan_both_genders_all_races() {
+        // Issue #7: the equip-texture extraction must scan MALE race archives too.
+        // equip_archives globs every global*_chr*.s3d so male body cloth (e.g.
+        // globalelm_chr.s3d's elmch0003) is extracted, not just the female archive.
+        let dir = tempfile::tempdir().unwrap();
+        for f in ["globalelf_chr.s3d", "globalelm_chr.s3d", "globalhuf_chr.s3d",
+                  "globalhum_chr.s3d", "globalelm_chr2.s3d", "global_chr.s3d",
+                  "blackburrow_chr.s3d", "qeynos.s3d", "gequip.s3d"] {
+            std::fs::write(dir.path().join(f), b"x").unwrap();
+        }
+        let a = super::equip_archives(dir.path());
+        for want in ["globalelm_chr.s3d", "globalelf_chr.s3d", "globalhuf_chr.s3d",
+                     "globalhum_chr.s3d", "globalelm_chr2.s3d", "global_chr.s3d"] {
+            assert!(a.iter().any(|s| s == want), "must scan {want}, got {a:?}");
+        }
+        assert!(a.iter().any(|s| s == "global17_amr.s3d"), "keeps fixed armor archives");
+        for no in ["blackburrow_chr.s3d", "qeynos.s3d", "gequip.s3d"] {
+            assert!(!a.iter().any(|s| s == no), "must not scan non-global/non-chr {no}");
+        }
+    }
+
+    #[test]
+    #[ignore = "requires ~/eq_assets/EQ_Files"]
+    fn male_cloth_textures_extracted_from_real_assets() {
+        // #7 end-to-end: the male wood-elf chest sub-piece elmch0003 must now be
+        // extracted, and male coverage should roughly match the female's.
+        let home = std::env::var("HOME").unwrap();
+        let raw = std::path::PathBuf::from(format!("{home}/eq_assets/EQ_Files"));
+        if !raw.join("globalelm_chr.s3d").exists() { eprintln!("skip"); return; }
+        let archives = super::equip_archives(&raw);
+        let refs: Vec<&str> = archives.iter().map(|s| s.as_str()).collect();
+        let out = crate::convert::extract_equip_textures(&raw, &refs).unwrap();
+        let names: std::collections::HashSet<&str> = out.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains("elmch0003.png"), "male chest variant-03 must be extracted (#7)");
+        let count = |race: &str| out.iter().filter(|(n, _)| n.starts_with(race)).count();
+        let (elm, elf) = (count("elm"), count("elf"));
+        // Male coverage should now roughly match female (was ~111 vs 187 before the
+        // fix); allow minor genuine per-gender asset asymmetry.
+        assert!(elm * 10 >= elf * 9, "male coverage {elm} should be within 10% of female {elf}");
+        eprintln!("equip textures: elm={elm} elf={elf} total={}", out.len());
     }
 
     #[test]
