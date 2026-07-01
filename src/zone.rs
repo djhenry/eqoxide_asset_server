@@ -279,6 +279,49 @@ fn merge_by_texture(meshes: Vec<ZoneMesh>) -> Vec<ZoneMesh> {
     result
 }
 
+/// Collect the zone's SOLID collision geometry from its terrain WLD(s), in world-space libeq
+/// coordinates (matching [`load_terrain`]). Uses libeq `Mesh::collision_indices()`, which keeps
+/// every face whose flag bit 0x0010 is CLEAR — i.e. all SOLID faces, INCLUDING invisible-but-
+/// solid ones (zone boundaries, invisible walls, doorframes) that have no render material, while
+/// excluding PASSABLE faces (water surfaces, foliage; flag 0x0010 = "player can pass through",
+/// per libeq `DmSpriteDef2FaceEntry`). Returns merged `(positions, indices)` referencing those
+/// positions. The native client collides against this superset; eqoxide previously collided only
+/// against the rendered terrain, so invisible walls were walk-through.
+fn load_collision_geometry(main_s3d: &Path) -> anyhow::Result<(Vec<[f32; 3]>, Vec<u32>)> {
+    let file = std::fs::File::open(main_s3d).with_context(|| format!("open {}", main_s3d.display()))?;
+    let mut pfs = libeq_pfs::PfsReader::open(file)
+        .with_context(|| format!("parse PFS {}", main_s3d.display()))?;
+    let names: Vec<String> = pfs.filenames()?;
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    for wn in names.iter().filter(|f| f.to_lowercase().ends_with(".wld")) {
+        let bytes = match pfs.get(wn) {
+            Ok(Some(b)) => b,
+            _ => continue,
+        };
+        let wld = match libeq_wld::load(&bytes) { Ok(w) => w, Err(_) => continue };
+        for mesh in wld.meshes() {
+            let all_pos = mesh.positions();
+            if all_pos.is_empty() { continue; }
+            let col = mesh.collision_indices();
+            if col.is_empty() { continue; }
+            let (cx, cy, cz) = mesh.center();
+            let offset = positions.len() as u32;
+            for p in &all_pos {
+                positions.push([p[0] + cx, p[1] + cy, p[2] + cz]);
+            }
+            // Keep whole triangles only; drop any face referencing an out-of-range vertex.
+            for tri in col.chunks_exact(3) {
+                if tri.iter().any(|&i| i as usize >= all_pos.len()) { continue; }
+                for &i in tri {
+                    indices.push(i + offset);
+                }
+            }
+        }
+    }
+    Ok((positions, indices))
+}
+
 /// Bake a zone into a single glb: terrain from `main_s3d` plus placed objects
 /// from `obj_s3d` (when present). Positions stay in raw libeq space (no
 /// re-orientation). Each distinct EQ texture name becomes one named glTF
@@ -414,6 +457,25 @@ pub fn bake_zone(main_s3d: &Path, obj_s3d: Option<&Path>, output_glb: &Path) -> 
     ) {
         let mesh_idx = meshes.len();
         meshes.push(md);
+        nodes.push(NodeDef { mesh_idx, matrix: None });
+    }
+
+    // 1b. Collision geometry: a dedicated `__collision__` mesh holding every SOLID terrain face
+    //     (incl. invisible-but-solid zone boundaries / invisible walls / doorframes; PASSABLE
+    //     water+foliage excluded). The client skips drawing it and uses it for collision instead
+    //     of the rendered terrain (back-compat: older zones without it fall back to the terrain).
+    //     Positions-only; normals/uvs are placeholders. material_idx 0 is a valid reference but
+    //     never rendered (the client routes this mesh to collision by its `__collision__` name).
+    let (col_pos, col_idx) = load_collision_geometry(main_s3d)?;
+    if !col_idx.is_empty() && !materials.is_empty() {
+        let mesh_idx = meshes.len();
+        meshes.push(MeshData {
+            name: "__collision__".to_string(),
+            normals: vec![[0.0, 0.0, 1.0]; col_pos.len()],
+            uvs: vec![[0.0, 0.0]; col_pos.len()],
+            primitives: vec![PrimitiveData { indices: col_idx, material_idx: 0, extras: None }],
+            positions: col_pos,
+        });
         nodes.push(NodeDef { mesh_idx, matrix: None });
     }
 
@@ -598,6 +660,44 @@ mod weld_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A baked zone GLB must carry a dedicated `__collision__` mesh whose face count is at least
+    /// the rendered terrain's, since collision keeps every SOLID face including invisible-but-
+    /// solid ones that the render path never emits (no material). Validates the asset-server half
+    /// of Component B end-to-end against a real zone with known zone boundaries (gfaydark).
+    #[test]
+    #[ignore = "requires ~/eq_assets/EQ_Files/gfaydark.s3d"]
+    fn baked_zone_has_collision_mesh_with_invisible_faces() {
+        let home = std::env::var("HOME").unwrap();
+        let main = std::path::PathBuf::from(format!("{home}/eq_assets/EQ_Files/gfaydark.s3d"));
+        let obj = std::path::PathBuf::from(format!("{home}/eq_assets/EQ_Files/gfaydark_obj.s3d"));
+        if !main.exists() { eprintln!("skip: gfaydark.s3d missing"); return; }
+        let out = std::env::temp_dir().join("eqoxide_test_gfaydark.glb");
+        bake_zone(&main, obj.exists().then_some(obj.as_path()), &out).unwrap();
+
+        // Parse the GLB JSON chunk and find the __collision__ mesh.
+        let bytes = std::fs::read(&out).unwrap();
+        let json_len = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) as usize;
+        let json: serde_json::Value =
+            serde_json::from_slice(&bytes[20..20 + json_len]).unwrap();
+        let meshes = json["meshes"].as_array().unwrap();
+        let col = meshes.iter().find(|m| m["name"] == "__collision__")
+            .expect("baked zone must contain a __collision__ mesh");
+        let col_idx_acc = col["primitives"][0]["indices"].as_u64().unwrap() as usize;
+        let col_faces = json["accessors"][col_idx_acc]["count"].as_u64().unwrap() / 3;
+
+        let terrain = meshes.iter().find(|m| m["name"] == "terrain").unwrap();
+        let render_faces: u64 = terrain["primitives"].as_array().unwrap().iter().map(|p| {
+            let a = p["indices"].as_u64().unwrap() as usize;
+            json["accessors"][a]["count"].as_u64().unwrap() / 3
+        }).sum();
+
+        assert!(col_faces > 0, "collision mesh has faces");
+        // Collision (solid, incl. invisible) is generally >= rendered solid faces.
+        assert!(col_faces >= render_faces / 2,
+            "collision faces {col_faces} unexpectedly small vs render {render_faces}");
+        eprintln!("gfaydark: render_faces={render_faces} collision_faces={col_faces}");
+    }
 
     #[test]
     fn place_instance_translates_and_rotates() {
