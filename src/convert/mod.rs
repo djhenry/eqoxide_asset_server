@@ -1179,6 +1179,63 @@ fn gather_skinned_geo(frag: &DmSpriteDef2, skel: &Skel) -> Option<SkinnedGeo> {
     })
 }
 
+/// Outward hair-shell thickness as a fraction of the scalp region's bounding-box
+/// diagonal. Scales with model size so it works across races. Visual-tuning knob.
+const HAIR_SHELL_FRACTION: f32 = 0.05;
+
+/// Geometry for a synthetic hair shell: new vertices to append to the model's
+/// global arrays, plus triangle indices that are 0-based into those new vertices.
+struct HairShell {
+    positions: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
+    joints: Vec<u16>,
+    indices: Vec<u32>,
+}
+
+/// Build a synthetic hair shell over a scalp region. `idxs` are triangle indices
+/// into the model's global vertex arrays (the scalp region's faces). Each unique
+/// referenced vertex is duplicated and pushed outward along its (unit) normal by
+/// `offset` EQ units, copying its normal/uv/joint — so the shell skins to the same
+/// head bone (follows head animation) and sits as a thin hair layer above the bald
+/// scalp. Returned `indices` are remapped 0-based into the returned vertex arrays.
+fn build_hair_shell(
+    positions: &[[f32; 3]],
+    normals: &[[f32; 3]],
+    uvs: &[[f32; 2]],
+    joints: &[u16],
+    idxs: &[u32],
+    offset: f32,
+) -> HairShell {
+    let mut remap: HashMap<u32, u32> = HashMap::new();
+    let mut shell = HairShell {
+        positions: Vec::new(),
+        normals: Vec::new(),
+        uvs: Vec::new(),
+        joints: Vec::new(),
+        indices: Vec::with_capacity(idxs.len()),
+    };
+    for &gi in idxs {
+        let local = match remap.get(&gi) {
+            Some(&l) => l,
+            None => {
+                let u = gi as usize;
+                let p = positions[u];
+                let n = normals[u];
+                let l = shell.positions.len() as u32;
+                shell.positions.push([p[0] + n[0] * offset, p[1] + n[1] * offset, p[2] + n[2] * offset]);
+                shell.normals.push(n);
+                shell.uvs.push(uvs[u]);
+                shell.joints.push(joints[u]);
+                remap.insert(gi, l);
+                l
+            }
+        };
+        shell.indices.push(local);
+    }
+    shell
+}
+
 fn convert_s3d_to_glb_skinned(input: &Path, output: &Path, model_code: Option<&str>) -> Result<()> {
     let file = fs::File::open(input)
         .with_context(|| format!("failed to open {}", input.display()))?;
@@ -1326,38 +1383,69 @@ fn convert_s3d_to_glb_skinned(input: &Path, output: &Path, model_code: Option<&s
                 const SWAPPABLE: [u8; 3] = [1, 4, 5];
                 match (!race_code.is_empty()).then(|| head_region_from_material_name(mat_name_str)).flatten() {
                     Some(n) if SWAPPABLE.contains(&n) => {
-                        // Hairstyle-swappable region: emit 8 variants H=0..7.
+                        // Swappable head region (scalp/back/sides = hair pieces 1/4/5).
+                        // H=0 is the flat bald base skin (visible). H=1..7 are synthetic
+                        // HAIR SHELLS: the scalp faces duplicated and pushed outward along
+                        // their normals, textured with the per-style hesk texture and tagged
+                        // eq_head_part:"hair" so the client selects by hairstyle and tints by
+                        // haircolor. Luclin ships no hair geometry (only bone sockets + hesk
+                        // skin textures), so we generate it from the scalp region here (#4).
+                        let region_offset = {
+                            let (mut mn, mut mx) = ([f32::MAX; 3], [f32::MIN; 3]);
+                            for &gi in &idxs {
+                                let p = positions[gi as usize];
+                                for k in 0..3 { mn[k] = mn[k].min(p[k]); mx[k] = mx[k].max(p[k]); }
+                            }
+                            let diag = ((mx[0]-mn[0]).powi(2) + (mx[1]-mn[1]).powi(2) + (mx[2]-mn[2]).powi(2)).sqrt();
+                            diag * HAIR_SHELL_FRACTION
+                        };
                         let mut emitted = 0u8;
                         for hair_h in 0u8..=7 {
                             let tex_name = format!("{}hesk{}{}", race_code, hair_h, n);
-                            match load_or_cache_texture(&mut pfs, &tex_name, AlphaMode::Opaque, &mut textures, &mut texture_map) {
-                                Some(tex_idx) => {
-                                    let mat_idx = materials.len();
-                                    materials.push(MaterialData {
-                                        name: tex_name.clone(),
-                                        texture_idx: Some(tex_idx),
-                                        base_color: [1.0, 1.0, 1.0, 1.0],
-                                        alpha_mode: AlphaMode::Opaque,
-                                        anim: None,
-                                    });
-                                    let extras = if hair_h == 0 {
-                                        Some(serde_json::json!({ "eq_hairstyle": 0u8 }))
-                                    } else {
-                                        Some(serde_json::json!({ "eq_hairstyle": hair_h, "eq_default_hidden": true }))
-                                    };
-                                    prims.push(PrimitiveData {
-                                        indices: idxs.clone(),
-                                        material_idx: mat_idx,
-                                        extras,
-                                    });
-                                    emitted += 1;
-                                }
+                            let tex_idx = match load_or_cache_texture(&mut pfs, &tex_name, AlphaMode::Opaque, &mut textures, &mut texture_map) {
+                                Some(t) => t,
                                 None => {
                                     eprintln!("  head region N={} hairstyle H={}: texture '{}' not found in archive", n, hair_h, tex_name);
+                                    continue;
                                 }
+                            };
+                            let mat_idx = materials.len();
+                            materials.push(MaterialData {
+                                name: tex_name.clone(),
+                                texture_idx: Some(tex_idx),
+                                base_color: [1.0, 1.0, 1.0, 1.0],
+                                alpha_mode: AlphaMode::Opaque,
+                                anim: None,
+                            });
+                            if hair_h == 0 {
+                                // Flat bald base skin: reuse the scalp faces as-is, visible.
+                                prims.push(PrimitiveData {
+                                    indices: idxs.clone(),
+                                    material_idx: mat_idx,
+                                    extras: Some(serde_json::json!({ "eq_hairstyle": 0u8 })),
+                                });
+                            } else {
+                                // Synthetic hair-shell geometry, offset outward from the scalp.
+                                let shell = build_hair_shell(&positions, &normals, &uvs, &joints, &idxs, region_offset);
+                                let base = positions.len() as u32;
+                                positions.extend(shell.positions);
+                                normals.extend(shell.normals);
+                                uvs.extend(shell.uvs);
+                                joints.extend(shell.joints);
+                                let hair_idxs: Vec<u32> = shell.indices.iter().map(|i| i + base).collect();
+                                prims.push(PrimitiveData {
+                                    indices: hair_idxs,
+                                    material_idx: mat_idx,
+                                    extras: Some(serde_json::json!({
+                                        "eq_head_part": "hair",
+                                        "eq_hairstyle": hair_h,
+                                        "eq_default_hidden": true
+                                    })),
+                                });
                             }
+                            emitted += 1;
                         }
-                        eprintln!("  head region N={} (swappable): emitted {}/8 hairstyle variants", n, emitted);
+                        eprintln!("  head region N={} (swappable): emitted {}/8 (H=0 base + hair shells)", n, emitted);
                     }
                     Some(n) => {
                         // Fixed head region: emit once with {race}hesk0{N}.dds.
@@ -2463,6 +2551,30 @@ mod tests {
     }
 
     #[test]
+    fn hair_shell_offsets_verts_along_normals_and_remaps() {
+        // A scalp region: 3 verts (one tri), all normals +Z. The hair shell must
+        // push each unique vert out along its normal by `offset`, copy uv/joint,
+        // dedup shared verts, and remap the triangle indices to local 0-based.
+        let positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let normals = vec![[0.0, 0.0, 1.0], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0]];
+        let uvs = vec![[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]];
+        let joints = vec![7u16, 7, 7];
+        // Two triangles sharing all three verts (global indices).
+        let idxs = vec![0u32, 1, 2, 2, 1, 0];
+
+        let shell = build_hair_shell(&positions, &normals, &uvs, &joints, &idxs, 0.5);
+
+        assert_eq!(shell.positions.len(), 3, "shared verts deduped");
+        assert_eq!(shell.positions[0], [0.0, 0.0, 0.5], "pushed out +0.5 along +Z");
+        assert_eq!(shell.positions[1], [1.0, 0.0, 0.5]);
+        assert_eq!(shell.positions[2], [0.0, 1.0, 0.5]);
+        assert_eq!(shell.normals, normals, "normals copied");
+        assert_eq!(shell.uvs, uvs, "uvs copied");
+        assert_eq!(shell.joints, joints, "joints (bone) copied so hair follows head");
+        assert_eq!(shell.indices, vec![0, 1, 2, 2, 1, 0], "remapped to local, topology kept");
+    }
+
+    #[test]
     fn masked_material_emits_mask_alphamode() {
         let mat = MaterialData {
             name: "leaf".into(), texture_idx: Some(0),
@@ -2506,6 +2618,71 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(extras.get()).unwrap();
         let eq_height = v["eq_height"].as_f64().expect("eq_height field present");
         assert!(eq_height > 0.0, "eq_height should be > 0, got {eq_height}");
+    }
+
+    #[test]
+    #[ignore = "requires ~/eq_assets/EQ_Files/globalhum_chr.s3d"]
+    fn hair_shells_emitted_per_style_with_outboard_geometry() {
+        // Issue #4: hairstyles 1..7 must be real hair-shell GEOMETRY (tagged
+        // eq_head_part:"hair", default-hidden) offset outward from the bald scalp —
+        // not a flat re-texture of the H=0 base skin.
+        let home = std::env::var("HOME").unwrap();
+        let inp = std::path::PathBuf::from(format!("{home}/eq_assets/EQ_Files/globalhum_chr.s3d"));
+        if !inp.exists() { eprintln!("skip: {inp:?} missing"); return; }
+        let out = std::env::temp_dir().join("eqoxide_test_hum_hair.glb");
+        convert_s3d_to_glb_skinned(&inp, &out, None).unwrap();
+
+        // Read per-primitive vertex positions (all prims share one POSITION accessor,
+        // so we must resolve each prim's own indexed verts, not the accessor bbox).
+        let (gdoc, buffers, _imgs) = gltf::import(&out).unwrap();
+        let mesh = gdoc.meshes().next().unwrap();
+        let expand = |acc: &mut Option<([f64; 3], [f64; 3])>, ps: &[[f32; 3]]| {
+            for p in ps {
+                let p = [p[0] as f64, p[1] as f64, p[2] as f64];
+                let e = acc.get_or_insert((p, p));
+                for k in 0..3 { e.0[k] = e.0[k].min(p[k]); e.1[k] = e.1[k].max(p[k]); }
+            }
+        };
+
+        let mut hair_styles = std::collections::BTreeSet::new();
+        let mut base_bbox: Option<([f64; 3], [f64; 3])> = None;
+        let mut hair_bbox: Option<([f64; 3], [f64; 3])> = None;
+        for p in mesh.primitives() {
+            let ex: serde_json::Value = match p.extras().as_ref() {
+                Some(e) => serde_json::from_str(e.get()).unwrap(),
+                None => continue,
+            };
+            let reader = p.reader(|b| Some(&buffers[b.index()]));
+            let all: Vec<[f32; 3]> = reader.read_positions().unwrap().collect();
+            let idx: Vec<u32> = reader.read_indices().unwrap().into_u32().collect();
+            let verts: Vec<[f32; 3]> = idx.iter().map(|&i| all[i as usize]).collect();
+            if ex["eq_head_part"].as_str() == Some("hair") {
+                let h = ex["eq_hairstyle"].as_u64().expect("hair prim has eq_hairstyle") as u8;
+                assert_eq!(ex["eq_default_hidden"].as_bool(), Some(true), "hair style {h} default-hidden");
+                hair_styles.insert(h);
+                expand(&mut hair_bbox, &verts);
+            } else if ex["eq_hairstyle"].as_u64() == Some(0) {
+                // Bald base scalp region: visible, not tagged as hair.
+                assert!(ex["eq_head_part"].is_null(), "H=0 base is not a hair part");
+                assert!(ex["eq_default_hidden"].is_null(), "H=0 base is visible");
+                expand(&mut base_bbox, &verts);
+            }
+        }
+
+        assert_eq!(hair_styles, (1u8..=7).collect(),
+            "all 7 hairstyles emit hair geometry, got {hair_styles:?}");
+        let (hmn, hmx) = hair_bbox.expect("hair geometry present");
+        let (bmn, bmx) = base_bbox.expect("H=0 base scalp present");
+        // The hair shell is the scalp pushed OUT along normals, so its bbox must
+        // strictly enclose the bald base region (geometry differs, not just texture).
+        for k in 0..3 {
+            assert!(hmn[k] <= bmn[k] + 1e-4 && hmx[k] >= bmx[k] - 1e-4,
+                "hair bbox must enclose base on axis {k}: hair[{hmn:?},{hmx:?}] base[{bmn:?},{bmx:?}]");
+        }
+        let base_vol = (bmx[0]-bmn[0]) * (bmx[1]-bmn[1]) * (bmx[2]-bmn[2]);
+        let hair_vol = (hmx[0]-hmn[0]) * (hmx[1]-hmn[1]) * (hmx[2]-hmn[2]);
+        assert!(hair_vol > base_vol, "hair shell must be larger than bald base: {hair_vol} > {base_vol}");
+        eprintln!("hum hair: styles={hair_styles:?} base_vol={base_vol:.3} hair_vol={hair_vol:.3}");
     }
 
     // ── head region detection unit tests ─────────────────────────────────────
