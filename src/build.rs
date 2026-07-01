@@ -27,7 +27,7 @@ const COMMON_MODELS: &[(&str, Option<&str>, &str)] = &[
     ("globalhum_chr.s3d",     None,        "humanoid.glb"),  // human male
     ("globalelf_chr.s3d",     None,        "elf.glb"),       // wood elf
     ("globaldwf_chr.s3d",     None,        "dwarf.glb"),     // dwarf
-    ("globalgnm_chr.s3d",     None,        "gnoll.glb"),     // gnome (placeholder for gnoll)
+    ("blackburrow_chr.s3d",   Some("GNN"), "gnoll.glb"),     // gnoll (GNN model; GNM/GNF are gnome)
     ("globalfroglok_chr.s3d", None,        "frog.glb"),      // froglok
     ("global_chr.s3d",        Some("SKE"), "skeleton.glb"),
     ("befallen_chr.s3d",      Some("ZOM"), "zombie.glb"),
@@ -411,6 +411,19 @@ mod tests {
         // fix); allow minor genuine per-gender asset asymmetry.
         assert!(elm * 10 >= elf * 9, "male coverage {elm} should be within 10% of female {elf}");
         eprintln!("equip textures: elm={elm} elf={elf} total={}", out.len());
+    }
+
+    #[test]
+    fn gnoll_glb_baked_from_real_gnoll_not_gnome() {
+        // Issue #5: gnoll.glb must come from the actual gnoll model (blackburrow_chr.s3d,
+        // model code GNN), not the gnome archive globalgnm_chr.s3d.
+        let (src, code, _) = super::COMMON_MODELS
+            .iter()
+            .find(|(_, _, out)| *out == "gnoll.glb")
+            .expect("gnoll.glb entry present");
+        assert_eq!(*src, "blackburrow_chr.s3d", "gnoll source archive");
+        assert_eq!(*code, Some("GNN"), "gnoll model code");
+        assert_ne!(*src, "globalgnm_chr.s3d", "must not be the gnome placeholder");
     }
 
     #[test]
