@@ -613,16 +613,20 @@ fn dag_track_def<'a>(doc: &'a WldDoc, dag: &Dag) -> Option<&'a TrackDef> {
 fn frame_trs(td: &TrackDef, frame: usize) -> (Vec3, Quat) {
     if let Some(frames) = &td.frame_transforms {
         if let Some(f) = frames.get(frame).or_else(|| frames.first()) {
-            let rot = if f.rotate_denominator != 0 {
-                Quat::from_xyzw(
+            // `rotate_denominator` is the quaternion's W component, and it can legitimately be 0 —
+            // that's a valid 180° rotation (W=0), NOT identity. The old `if denominator != 0` guard
+            // silently dropped those flips: the wolf's rear hind-leg-top bones store raw x/y
+            // numerators with W=0, so they came out un-rotated and the whole rear half rendered
+            // inverted/upside-down (eqoxide#40). Only fall back to identity when ALL four components
+            // are 0 (an unnormalizable, genuinely-absent rotation).
+            let rot = {
+                let q = Quat::from_xyzw(
                     f.rotate_x_numerator as f32,
                     f.rotate_y_numerator as f32,
                     f.rotate_z_numerator as f32,
                     f.rotate_denominator as f32,
-                )
-                .normalize()
-            } else {
-                Quat::IDENTITY
+                );
+                if q.length_squared() > 1e-12 { q.normalize() } else { Quat::IDENTITY }
             };
             let trans = if f.shift_denominator != 0 {
                 let d = f.shift_denominator as f32;
