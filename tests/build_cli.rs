@@ -30,10 +30,11 @@ fn ingest_dir_chunks_all_files_with_relative_paths() {
     paths.sort();
     assert_eq!(paths, vec!["humanoid.glb", "textures/skin.png"]);
 
-    // re-ingesting identical content reuses chunks
+    // re-ingesting identical content reuses chunks and yields the same content digest
+    // (the store is content-addressed; there is no version counter to bump)
     let m2 = ingest_dir(&cas, &store, "common", src.path()).unwrap();
     let a = m.files.iter().find(|f| f.path == "humanoid.glb").unwrap();
     let b = m2.files.iter().find(|f| f.path == "humanoid.glb").unwrap();
     assert_eq!(a.chunks, b.chunks);
-    assert_eq!(m2.version, 2);
+    assert_eq!(m.digest, m2.digest);
 }
