@@ -1725,7 +1725,13 @@ fn write_glb_skinned(
         let local_t = if i == 0 { skel.local_t[i] + offset } else { skel.local_t[i] };
         let t = rq * local_t;
         let r = (rq * skel.local_r[i] * rq_conj).normalize();
+        // Carry the WLD bone name (base track minus the "_TRACK" suffix, e.g.
+        // "HUFR_POINT") so the client can locate attachment bones (R_POINT /
+        // L_POINT / SHIELD_POINT) for held items by name.
+        let bone_name = skel.base_track[i].trim_end_matches("_TRACK");
+        let bone_name = if bone_name.is_empty() { format!("BONE{i}") } else { bone_name.to_string() };
         let mut node = serde_json::json!({
+            "name": bone_name,
             "translation": [t.x, t.y, t.z],
             "rotation": [r.x, r.y, r.z, r.w],
         });
@@ -2586,6 +2592,33 @@ mod tests {
         // Races that ship their own animations have no donor.
         for c in ["HUM", "BAM", "ELM", "OGM", "TRM"] {
             assert_eq!(anim_donor(c), None, "{c}");
+        }
+    }
+
+    #[test]
+    #[ignore = "requires ~/eq_assets/everquest_rof2/globalhuf_chr.s3d"]
+    fn skinned_glb_joints_carry_bone_names_including_attach_points() {
+        // The client attaches held weapons to the rig's dedicated attachment bones
+        // (R_POINT = primary hand, L_POINT = left hand, SHIELD_POINT = shield), so
+        // every joint node must carry its WLD bone name in the glTF `name` field.
+        let home = std::env::var("HOME").unwrap();
+        let inp = std::path::PathBuf::from(format!("{home}/eq_assets/everquest_rof2/globalhuf_chr.s3d"));
+        if !inp.exists() { eprintln!("skip: {inp:?} missing"); return; }
+        let out = std::env::temp_dir().join("eqoxide_test_huf_joint_names.glb");
+        convert_s3d_to_glb_skinned(&inp, &out, None).unwrap();
+
+        let (gdoc, _buffers, _imgs) = gltf::import(&out).unwrap();
+        let skin = gdoc.skins().next().expect("skin present");
+        let names: Vec<String> = skin.joints()
+            .map(|n| n.name().unwrap_or("").to_uppercase())
+            .collect();
+        let named = names.iter().filter(|n| !n.is_empty()).count();
+        assert_eq!(named, names.len(), "every joint must be named, got {named}/{}", names.len());
+        for suffix in ["R_POINT", "L_POINT", "SHIELD_POINT"] {
+            assert!(
+                names.iter().any(|n| n.ends_with(suffix)),
+                "expected a joint ending in {suffix}; sample: {:?}", &names[..names.len().min(8)]
+            );
         }
     }
 
