@@ -1108,7 +1108,7 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 [[package]]
 name = "libeq_pfs"
 version = "0.5.0"
-source = "git+https://github.com/djhenry/libeq?branch=fix%2Ftolerant-zone-wld-parsing#2481c4937d3ff55665a8336bd007121d0601fca9"
+source = "git+https://github.com/djhenry/libeq?branch=fix%2Ftolerant-zone-wld-parsing#39fb132fe0d206b7e5878213649eeb5e33c67d78"
 dependencies = [
  "flate2",
  "thiserror 2.0.18",
@@ -1117,7 +1117,7 @@ dependencies = [
 [[package]]
 name = "libeq_wld"
 version = "0.5.0"
-source = "git+https://github.com/djhenry/libeq?branch=fix%2Ftolerant-zone-wld-parsing#2481c4937d3ff55665a8336bd007121d0601fca9"
+source = "git+https://github.com/djhenry/libeq?branch=fix%2Ftolerant-zone-wld-parsing#39fb132fe0d206b7e5878213649eeb5e33c67d78"
 dependencies = [
  "encoding_rs",
  "nom",
