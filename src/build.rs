@@ -11,7 +11,7 @@ use crate::zone::bake_zone;
 /// model code converts the whole archive (one model per `global*_chr.s3d`); a
 /// `Some("XXX")` extracts that single 3-char EQ model out of a multi-model archive.
 /// Reproducible from raw EQ files alone (no curated/hand-built artifacts) — other
-/// EQEmu operators get the same set from their own `EQ_Files`. Missing/unparseable
+/// EQEmu operators get the same set from their own client install. Missing/unparseable
 /// archives are skipped with a warning, not fatal.
 ///
 /// Two groups:
@@ -114,7 +114,7 @@ fn is_zone_archive(name: &str) -> bool {
     if stem.starts_with("global") || stem.starts_with("gequip") || stem == "sky" {
         return false;
     }
-    // Non-terrain archives that sit in EQ_Files: loading-screen bitmaps (bmpwad*),
+    // Non-terrain archives that sit in the client install: loading-screen bitmaps (bmpwad*),
     // per-zone lighting (`*_lit`), and the shared grass texture archive.
     if stem.starts_with("bmpwad") || stem.ends_with("_lit") || stem == "grass" {
         return false;
@@ -393,12 +393,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires ~/eq_assets/EQ_Files"]
+    #[ignore = "requires ~/eq_assets/everquest_rof2"]
     fn male_cloth_textures_extracted_from_real_assets() {
         // #7 end-to-end: the male wood-elf chest sub-piece elmch0003 must now be
         // extracted, and male coverage should roughly match the female's.
         let home = std::env::var("HOME").unwrap();
-        let raw = std::path::PathBuf::from(format!("{home}/eq_assets/EQ_Files"));
+        let raw = std::path::PathBuf::from(format!("{home}/eq_assets/everquest_rof2"));
         if !raw.join("globalelm_chr.s3d").exists() { eprintln!("skip"); return; }
         let archives = super::equip_archives(&raw);
         let refs: Vec<&str> = archives.iter().map(|s| s.as_str()).collect();

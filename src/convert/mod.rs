@@ -2623,10 +2623,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires ~/eq_assets/EQ_Files/globalhum_chr.s3d"]
+    #[ignore = "requires ~/eq_assets/everquest_rof2/globalhum_chr.s3d"]
     fn skinned_conversion_is_centered_grounded() {
         let home = std::env::var("HOME").unwrap();
-        let inp = std::path::PathBuf::from(format!("{home}/eq_assets/EQ_Files/globalhum_chr.s3d"));
+        let inp = std::path::PathBuf::from(format!("{home}/eq_assets/everquest_rof2/globalhum_chr.s3d"));
         let out = std::path::PathBuf::from("/tmp/test_hum_norm.glb");
         convert_s3d_to_glb_skinned(&inp, &out, None).unwrap();
 
@@ -2803,10 +2803,10 @@ mod tests {
 mod weapons_glb_tests {
     use super::*;
     #[test]
-    #[ignore = "requires ~/eq_assets/EQ_Files/gequip*.s3d"]
+    #[ignore = "requires ~/eq_assets/everquest_rof2/gequip*.s3d"]
     fn bakes_named_weapon_meshes() {
         let home = std::env::var("HOME").unwrap();
-        let raw = std::path::PathBuf::from(format!("{home}/eq_assets/EQ_Files"));
+        let raw = std::path::PathBuf::from(format!("{home}/eq_assets/everquest_rof2"));
         if !raw.join("gequip.s3d").exists() { eprintln!("skip"); return; }
         let out = std::env::temp_dir().join("weapons_test.glb");
         let archives = ["gequip.s3d","gequip2.s3d","gequip3.s3d","gequip4.s3d","gequip5.s3d","gequip6.s3d","gequip7.s3d","gequip8.s3d"];
@@ -2857,10 +2857,10 @@ pub(crate) fn extract_equip_textures(raw_dir: &Path, archives: &[&str]) -> anyho
 mod equip_tex_tests {
     use super::*;
     #[test]
-    #[ignore = "requires ~/eq_assets/EQ_Files/global_chr.s3d"]
+    #[ignore = "requires ~/eq_assets/everquest_rof2/global_chr.s3d"]
     fn extracts_named_pngs_skipping_stubs() {
         let home = std::env::var("HOME").unwrap();
-        let raw = std::path::PathBuf::from(format!("{home}/eq_assets/EQ_Files"));
+        let raw = std::path::PathBuf::from(format!("{home}/eq_assets/everquest_rof2"));
         if !raw.join("global_chr.s3d").exists() { eprintln!("skip"); return; }
         let out = extract_equip_textures(&raw, &["global_chr.s3d"]).unwrap();
         assert!(!out.is_empty());

@@ -614,10 +614,10 @@ pub fn bake_object_models_glb(obj_s3d: &Path, output_glb: &Path) -> anyhow::Resu
 mod doors_glb_tests {
     use super::*;
     #[test]
-    #[ignore = "requires ~/eq_assets/EQ_Files/qcat_obj.s3d"]
+    #[ignore = "requires ~/eq_assets/everquest_rof2/qcat_obj.s3d"]
     fn bakes_named_object_meshes_with_textures() {
         let home = std::env::var("HOME").unwrap();
-        let obj = std::path::PathBuf::from(format!("{home}/eq_assets/EQ_Files/qcat_obj.s3d"));
+        let obj = std::path::PathBuf::from(format!("{home}/eq_assets/everquest_rof2/qcat_obj.s3d"));
         if !obj.exists() { eprintln!("skip: archive missing"); return; }
         let out = std::env::temp_dir().join("qcat_doors_test.glb");
         let wrote = bake_object_models_glb(&obj, &out).unwrap();
@@ -666,11 +666,11 @@ mod tests {
     /// solid ones that the render path never emits (no material). Validates the asset-server half
     /// of Component B end-to-end against a real zone with known zone boundaries (gfaydark).
     #[test]
-    #[ignore = "requires ~/eq_assets/EQ_Files/gfaydark.s3d"]
+    #[ignore = "requires ~/eq_assets/everquest_rof2/gfaydark.s3d"]
     fn baked_zone_has_collision_mesh_with_invisible_faces() {
         let home = std::env::var("HOME").unwrap();
-        let main = std::path::PathBuf::from(format!("{home}/eq_assets/EQ_Files/gfaydark.s3d"));
-        let obj = std::path::PathBuf::from(format!("{home}/eq_assets/EQ_Files/gfaydark_obj.s3d"));
+        let main = std::path::PathBuf::from(format!("{home}/eq_assets/everquest_rof2/gfaydark.s3d"));
+        let obj = std::path::PathBuf::from(format!("{home}/eq_assets/everquest_rof2/gfaydark_obj.s3d"));
         if !main.exists() { eprintln!("skip: gfaydark.s3d missing"); return; }
         let out = std::env::temp_dir().join("eqoxide_test_gfaydark.glb");
         bake_zone(&main, obj.exists().then_some(obj.as_path()), &out).unwrap();
@@ -751,11 +751,11 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires ~/eq_assets/EQ_Files/qcat.s3d + qcat_obj.s3d"]
+    #[ignore = "requires ~/eq_assets/everquest_rof2/qcat.s3d + qcat_obj.s3d"]
     fn placements_are_off_origin() {
         let home = std::env::var("HOME").unwrap();
-        let main = std::path::PathBuf::from(format!("{home}/eq_assets/EQ_Files/qcat.s3d"));
-        let obj = std::path::PathBuf::from(format!("{home}/eq_assets/EQ_Files/qcat_obj.s3d"));
+        let main = std::path::PathBuf::from(format!("{home}/eq_assets/everquest_rof2/qcat.s3d"));
+        let obj = std::path::PathBuf::from(format!("{home}/eq_assets/everquest_rof2/qcat_obj.s3d"));
         if !main.exists() || !obj.exists() { eprintln!("skip: archives missing"); return; }
         let models = load_object_models(&obj).unwrap();
         assert!(!models.is_empty(), "expected object models");
