@@ -31,8 +31,8 @@ enum Cmd {
         #[arg(long)] zones_only: bool,
         /// With --raw: skip zone baking; run common + gamedata + gameequip only.
         /// Lets you re-convert character/equipment archives without touching the
-        /// existing zone GLBs (useful when switching game-file sources for chars
-        /// while keeping Titanium-derived zone geometry intact).
+        /// existing zone GLBs. All sets bake from the same RoF2 client install
+        /// (~/eq_assets/everquest_rof2) — there is no separate zone source.
         #[arg(long)] no_zones: bool,
         /// Number of worker threads for conversion (default: all-but-one core).
         #[arg(long, short = 'j', value_parser = clap::value_parser!(u32).range(1..))]
