@@ -10,6 +10,7 @@ pub mod db;
 pub mod manifest;
 pub mod server;
 pub mod sync_client;
+pub mod water;
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

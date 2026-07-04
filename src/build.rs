@@ -312,6 +312,36 @@ pub fn build_gamedata_from_raw(
     } else {
         tracing::warn!("gamedata: no maps/ dir in {}", raw_dir.display());
     }
+
+    // Water maps are GENERATED from the zone WLD BSPs so their provenance always
+    // matches the zone geometry we bake — a generated maps/water/<zone>.wtr
+    // replaces any same-named file shipped in the raw maps/ tree.
+    let mut generated = 0usize;
+    if let Ok(entries) = std::fs::read_dir(raw_dir) {
+        let mut zone_files: Vec<_> = entries
+            .flatten()
+            .filter(|e| is_zone_archive(&e.file_name().to_string_lossy()))
+            .collect();
+        zone_files.sort_by_key(|e| e.file_name());
+        for e in zone_files {
+            let name = e.file_name().to_string_lossy().to_string();
+            let short = name.trim_end_matches(".s3d").to_string();
+            match crate::water::wtr_from_zone_s3d(&e.path()) {
+                Ok(Some(wtr)) => {
+                    let rel = format!("maps/water/{short}.wtr");
+                    if let Some(slot) = files.iter_mut().find(|(p, _)| *p == rel) {
+                        slot.1 = wtr;
+                    } else {
+                        files.push((rel, wtr));
+                    }
+                    generated += 1;
+                }
+                Ok(None) => {} // dry zone — nothing to flag
+                Err(e) => tracing::warn!("gamedata: water map for {short} failed: {e:#}"),
+            }
+        }
+    }
+    tracing::info!("gamedata: generated {generated} water maps from zone geometry");
     store.build_and_write(cas, "gamedata", &files)
 }
 
