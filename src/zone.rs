@@ -91,7 +91,16 @@ pub fn placement_matrix(center: (f32, f32, f32), rot_z_deg: f32, scale: f32) -> 
 /// Load object models from `obj_s3d` as welded, model-LOCAL meshes keyed by base
 /// name. Vertices include `mesh.center()` (so the model is self-contained) but
 /// carry no placement transform — placements are applied per-node via matrices.
-pub fn load_object_models(obj_s3d: &Path) -> anyhow::Result<HashMap<String, Vec<ZoneMesh>>> {
+///
+/// `main_s3d`, when given, is consulted FIRST by the texture-container sniff (V
+/// convention), matching [`bake_zone`]'s embed order `[main, obj]` — a texture
+/// present only in the sibling main archive still gets the right V treatment.
+/// Pass `None` when textures will be embedded from `obj_s3d` alone (e.g.
+/// [`bake_object_models_glb`]).
+pub fn load_object_models(
+    obj_s3d: &Path,
+    main_s3d: Option<&Path>,
+) -> anyhow::Result<HashMap<String, Vec<ZoneMesh>>> {
     let obj_file = std::fs::File::open(obj_s3d).with_context(|| format!("open {}", obj_s3d.display()))?;
     let mut obj_pfs = libeq_pfs::PfsReader::open(obj_file)?;
     let obj_names: Vec<String> = obj_pfs.filenames()?;
@@ -110,6 +119,14 @@ pub fn load_object_models(obj_s3d: &Path) -> anyhow::Result<HashMap<String, Vec<
             }
         }
     }
+    let mut pfs_list: Vec<libeq_pfs::PfsReader<std::fs::File>> = Vec::new();
+    if let Some(main) = main_s3d {
+        pfs_list.push(libeq_pfs::PfsReader::open(
+            std::fs::File::open(main).with_context(|| format!("open {}", main.display()))?,
+        )?);
+    }
+    pfs_list.push(obj_pfs);
+    apply_gltf_v_convention(models.values_mut().flatten(), &mut pfs_list);
     Ok(models)
 }
 
@@ -139,6 +156,82 @@ pub fn read_placements(main_s3d: &Path) -> anyhow::Result<Vec<(String, [[f32; 4]
         }
     }
     Ok(placements)
+}
+
+/// True when the named texture's on-disk file decodes to a standard, visually-upright
+/// raster (row 0 = visual top): real BMPs (the `image` crate un-flips their bottom-up
+/// rows) and PNGs. False for EQ's repacked DDS files, which keep the original
+/// bottom-up (GL) row order and therefore decode vertically MIRRORED.
+///
+/// Resolution mirrors `convert::load_texture_from_archive`: try the name as-is, then
+/// the stem with `.dds`/`.bmp`/`.png`, across the given archives in order, skipping
+/// candidates that exist but don't decode (so the verdict matches the image the
+/// embed step actually picks). `None` when nothing is found/decodable anywhere
+/// (caller leaves UVs unchanged; the material decode will fail the same way).
+fn texture_decodes_upright(
+    pfs_list: &mut [libeq_pfs::PfsReader<std::fs::File>],
+    name: &str,
+) -> Option<bool> {
+    let lower = name.to_lowercase();
+    let stem = if lower.ends_with(".dds") || lower.ends_with(".bmp") || lower.ends_with(".png") {
+        lower[..lower.len() - 4].to_string()
+    } else {
+        lower.clone()
+    };
+    let mut candidates = vec![lower];
+    for ext in [".dds", ".bmp", ".png"] {
+        let c = format!("{stem}{ext}");
+        if !candidates.contains(&c) { candidates.push(c); }
+    }
+    for pfs in pfs_list.iter_mut() {
+        for cand in &candidates {
+            if let Ok(Some(data)) = pfs.get(cand) {
+                // Present but undecodable files must fall through to the next
+                // candidate, exactly like `convert::try_load_image` does, so the
+                // verdict is for the image that actually gets embedded.
+                if image::load_from_memory(&data).is_err() {
+                    continue;
+                }
+                let is_dds = data.len() >= 4 && &data[0..4] == b"DDS ";
+                return Some(!is_dds);
+            }
+        }
+    }
+    None
+}
+
+/// Convert raw WLD UVs to glTF convention, per texture container.
+///
+/// EQ WLD texture coordinates are bottom-origin (V increases with world height,
+/// OpenGL-style), uniformly across eras — verified against fire sprite cards, whose
+/// vertical orientation is unambiguous: in every zone the card's V increases from the
+/// flame's geometric base to its tip. glTF V is top-origin, so V must be flipped
+/// (`v -> 1 - v`) to sample a visually-upright image correctly.
+///
+/// EQ's DDS repacks (RoF2-era archives; the files keep their original `.bmp` names)
+/// were converted WITHOUT reordering rows, so they decode vertically mirrored — which
+/// exactly cancels the needed flip under REPEAT sampling (`frac(1 - (1 - v)) ==
+/// frac(v)`). Hence: flip V for textures stored upright (real BMP/PNG), keep raw WLD
+/// V for mirrored DDS. This replaces the old animated-sprites-only flip, which was
+/// container-blind: right for BMP-era zones (highpasshold), upside-down for DDS zones
+/// (issue eqoxide#160, the kaladimb Mining Guild campfire), and it left static
+/// BMP-era textures latently flipped.
+pub(crate) fn apply_gltf_v_convention<'a>(
+    meshes: impl Iterator<Item = &'a mut ZoneMesh>,
+    pfs_list: &mut [libeq_pfs::PfsReader<std::fs::File>],
+) {
+    let mut cache: HashMap<String, Option<bool>> = HashMap::new();
+    for m in meshes {
+        let Some(tex) = m.texture_name.clone() else { continue };
+        let upright = *cache
+            .entry(tex.to_lowercase())
+            .or_insert_with(|| texture_decodes_upright(pfs_list, &tex));
+        if upright == Some(true) {
+            for uv in &mut m.uvs {
+                uv[1] = 1.0 - uv[1];
+            }
+        }
+    }
 }
 
 /// Deduplicates identical `(position, normal, uv)` vertices (keyed by `f32::to_bits`,
@@ -172,8 +265,9 @@ pub fn weld(mesh: &ZoneMesh) -> ZoneMesh {
 
 /// Extract one [`ZoneMesh`] per primitive from a WLD mesh, folding the mesh center
 /// into positions. Both [`load_terrain`] and [`load_object_models`] use this helper
-/// so the per-primitive extraction logic (center fold, bounds guard, UV V-flip for
-/// animated sprites) lives in one place.
+/// so the per-primitive extraction logic (center fold, bounds guard) lives in one
+/// place. UVs are emitted RAW (WLD bottom-origin V); callers must run
+/// [`apply_gltf_v_convention`] once per mesh set to fix up V per texture container.
 pub(crate) fn zone_meshes_from_mesh(mesh: &libeq_wld::Mesh<'_>) -> Vec<ZoneMesh> {
     let all_pos = mesh.positions();
     if all_pos.is_empty() { return Vec::new(); }
@@ -198,13 +292,9 @@ pub(crate) fn zone_meshes_from_mesh(mesh: &libeq_wld::Mesh<'_>) -> Vec<ZoneMesh>
         let texture_name = tex.as_ref().and_then(|t| t.source());
         let anim = tex.as_ref().and_then(texture_anim);
         let alpha_mode = crate::convert::alpha_mode_from_render(mat.render_method());
-        // EQ animated sprite cards author their UVs V-inverted vs the upright texture;
-        // flip V so they render correctly.
-        let flip_v = anim.is_some();
-        let uvs = idx.iter().map(|&i| {
-            let uv = all_uv.get(i as usize).copied().unwrap_or([0.0, 0.0]);
-            if flip_v { [uv[0], 1.0 - uv[1]] } else { uv }
-        }).collect();
+        let uvs = idx.iter()
+            .map(|&i| all_uv.get(i as usize).copied().unwrap_or([0.0, 0.0]))
+            .collect();
         out.push(ZoneMesh {
             positions, normals, uvs,
             indices: (0..idx.len() as u32).collect(),
@@ -220,7 +310,11 @@ pub(crate) fn zone_meshes_from_mesh(mesh: &libeq_wld::Mesh<'_>) -> Vec<ZoneMesh>
 /// `wld.meshes()`, flatten per-primitive indices, pick the base-color texture
 /// source. Zone terrain has no skin groups, so the bind-pose posing path used
 /// by the character converter does not apply here.
-fn load_terrain(main_s3d: &Path) -> anyhow::Result<Vec<ZoneMesh>> {
+///
+/// `obj_s3d`, when given, is consulted (after `main_s3d`) by the texture-container
+/// sniff, matching [`bake_zone`]'s embed order `[main, obj]` — a terrain texture
+/// stored only in the sibling object archive still gets the right V treatment.
+fn load_terrain(main_s3d: &Path, obj_s3d: Option<&Path>) -> anyhow::Result<Vec<ZoneMesh>> {
     let file = std::fs::File::open(main_s3d).with_context(|| format!("open {}", main_s3d.display()))?;
     let mut pfs = libeq_pfs::PfsReader::open(file)
         .with_context(|| format!("parse PFS {}", main_s3d.display()))?;
@@ -237,6 +331,13 @@ fn load_terrain(main_s3d: &Path) -> anyhow::Result<Vec<ZoneMesh>> {
             out.extend(zone_meshes_from_mesh(&mesh));
         }
     }
+    let mut pfs_list: Vec<libeq_pfs::PfsReader<std::fs::File>> = vec![pfs];
+    if let Some(obj) = obj_s3d {
+        pfs_list.push(libeq_pfs::PfsReader::open(
+            std::fs::File::open(obj).with_context(|| format!("open {}", obj.display()))?,
+        )?);
+    }
+    apply_gltf_v_convention(out.iter_mut(), &mut pfs_list);
     // EQ zone WLDs split terrain into thousands of tiny primitives (qeynos: ~8500).
     // Emitting one glb mesh primitive per WLD primitive makes the client's from_glb
     // pathologically slow + memory-hungry (per-primitive glTF overhead). Merge all
@@ -449,7 +550,7 @@ pub fn bake_zone(main_s3d: &Path, obj_s3d: Option<&Path>, output_glb: &Path) -> 
     let mut nodes: Vec<NodeDef> = Vec::new();
 
     // 1. Terrain: weld each mesh, one mesh per group, identity node.
-    let terrain = load_terrain(main_s3d)?;
+    let terrain = load_terrain(main_s3d, obj_s3d)?;
     let welded_terrain: Vec<ZoneMesh> = terrain.iter().map(weld).collect();
     if let Some(md) = build_mesh(
         "terrain".to_string(), &welded_terrain,
@@ -482,7 +583,7 @@ pub fn bake_zone(main_s3d: &Path, obj_s3d: Option<&Path>, output_glb: &Path) -> 
     // 2. Object models: one welded mesh per unique base that has a placement,
     //    plus one placement node per (base, matrix).
     if let Some(obj) = obj_s3d {
-        let models = load_object_models(obj)?; // already welded, model-local
+        let models = load_object_models(obj, Some(main_s3d))?; // already welded, model-local
         let placements = read_placements(main_s3d)?;
         let mut base_mesh_idx: HashMap<String, usize> = HashMap::new();
         for (base, matrix) in &placements {
@@ -602,7 +703,7 @@ pub(crate) fn write_object_models_glb(
 /// is applied client-side from live door state, so no instance transforms are emitted.
 /// Returns `Ok(false)` (writing nothing) when the archive has no object models.
 pub fn bake_object_models_glb(obj_s3d: &Path, output_glb: &Path) -> anyhow::Result<bool> {
-    let models = load_object_models(obj_s3d)?;
+    let models = load_object_models(obj_s3d, None)?;
     if models.is_empty() { return Ok(false); }
     let mut pfs = vec![libeq_pfs::PfsReader::open(
         std::fs::File::open(obj_s3d).with_context(|| format!("open {}", obj_s3d.display()))?,
@@ -629,6 +730,94 @@ mod doors_glb_tests {
         assert!(doc.images().count() > 0, "door textures must be embedded");
         assert!(doc.meshes().all(|m| m.name().map_or(false, |n| n == n.to_uppercase())),
             "mesh names must be uppercase base names");
+    }
+}
+
+#[cfg(test)]
+mod fire_orientation_tests {
+    use super::*;
+
+    /// Mean luminance of the embedded-texture row that glTF V coordinate `v`
+    /// samples (REPEAT wrap), from the exact PNG bytes the bake embeds.
+    fn row_luminance(img: &image::RgbaImage, v: f32) -> f64 {
+        let (w, h) = img.dimensions();
+        let row = ((v.rem_euclid(1.0) * h as f32) as u32).min(h - 1);
+        let mut s = 0u64;
+        for x in 0..w {
+            let p = img.get_pixel(x, row);
+            s += (p[0] as u64 + p[1] as u64 + p[2] as u64) / 3;
+        }
+        s as f64 / w as f64
+    }
+
+    /// A flame texture is bright/wide at its base and dim/sparse at its tip, so a
+    /// correctly-oriented fire card must sample brighter texture rows near the
+    /// geometric BASE (min world-up Y) than near the TIP (max Y). This pins the
+    /// (UV, embedded image) pair end-to-end, independent of which container era
+    /// the archive uses: kaladimb is a DDS-repack archive (issue eqoxide#160 —
+    /// the Mining Guild campfire rendered upside down), highpasshold is an
+    /// original real-BMP archive.
+    fn assert_flame_upright(archive: &str, object_base: &str) {
+        let home = std::env::var("HOME").unwrap();
+        let path = std::path::PathBuf::from(format!("{home}/eq_assets/everquest_rof2/{archive}"));
+        let models = load_object_models(&path, None).unwrap();
+        let group = models.get(object_base)
+            .unwrap_or_else(|| panic!("{archive} has object {object_base}"));
+        let fire = group.iter()
+            .find(|m| m.anim.is_some()
+                && m.texture_name.as_deref().is_some_and(|t| t.to_lowercase().starts_with("fire")))
+            .unwrap_or_else(|| panic!("{object_base} has an animated fire primitive"));
+
+        // Geometry up-axis is Y (index 1) in libeq mesh space; grab V at the
+        // flame card's base (min y) and tip (max y).
+        let (mut ymin, mut ymax) = (f32::MAX, f32::MIN);
+        let (mut v_base, mut v_tip) = (0.0f32, 0.0f32);
+        for (p, uv) in fire.positions.iter().zip(fire.uvs.iter()) {
+            if p[1] < ymin { ymin = p[1]; v_base = uv[1]; }
+            if p[1] > ymax { ymax = p[1]; v_tip = uv[1]; }
+        }
+        assert!(ymax - ymin > 1.0, "fire card spans height: {ymin}..{ymax}");
+
+        // Decode frame 0 exactly as the bake embeds it.
+        let mut pfs = libeq_pfs::PfsReader::open(std::fs::File::open(&path).unwrap()).unwrap();
+        let tex = fire.texture_name.clone().unwrap();
+        let png = crate::convert::load_texture_from_archive(&mut pfs, &tex, fire.alpha_mode)
+            .unwrap_or_else(|| panic!("decode {tex} from {archive}"));
+        let img = image::load_from_memory(&png).unwrap().to_rgba8();
+
+        // Compare texture bands sampled just inside each end of the card (avoid
+        // the exact edge rows, which are often black borders).
+        let band = |t0: f32, t1: f32| -> f64 {
+            let mut s = 0.0; let mut n = 0;
+            let mut t = t0;
+            while t <= t1 + 1e-6 {
+                s += row_luminance(&img, v_base + (v_tip - v_base) * t);
+                n += 1;
+                t += 0.05;
+            }
+            s / n as f64
+        };
+        let base_lum = band(0.05, 0.30);
+        let tip_lum = band(0.70, 0.95);
+        eprintln!("{archive} {object_base}: v_base={v_base:.3} v_tip={v_tip:.3} base_lum={base_lum:.1} tip_lum={tip_lum:.1}");
+        assert!(base_lum > tip_lum,
+            "{archive} {object_base}: flame is upside down — texture near geometric base \
+             (lum {base_lum:.1}) must be brighter than near tip (lum {tip_lum:.1})");
+    }
+
+    /// Issue eqoxide#160: kaladimb (DDS-repack archive) Mining Guild campfire.
+    #[test]
+    #[ignore = "requires ~/eq_assets/everquest_rof2/kaladimb_obj.s3d"]
+    fn kaladimb_campfire_flame_is_upright() {
+        assert_flame_upright("kaladimb_obj.s3d", "CAMPFIRE");
+    }
+
+    /// Regression guard for the original-era real-BMP archives, which the old
+    /// animated-only V flip happened to render correctly.
+    #[test]
+    #[ignore = "requires ~/eq_assets/everquest_rof2/highpasshold_obj.s3d"]
+    fn highpass_campfire_flame_is_upright() {
+        assert_flame_upright("highpasshold_obj.s3d", "CAMPFIRE2");
     }
 }
 
@@ -757,7 +946,7 @@ mod tests {
         let main = std::path::PathBuf::from(format!("{home}/eq_assets/everquest_rof2/qcat.s3d"));
         let obj = std::path::PathBuf::from(format!("{home}/eq_assets/everquest_rof2/qcat_obj.s3d"));
         if !main.exists() || !obj.exists() { eprintln!("skip: archives missing"); return; }
-        let models = load_object_models(&obj).unwrap();
+        let models = load_object_models(&obj, None).unwrap();
         assert!(!models.is_empty(), "expected object models");
         let placements = read_placements(&main).unwrap();
         assert!(!placements.is_empty(), "expected placements");
