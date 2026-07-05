@@ -2483,6 +2483,11 @@ pub(crate) fn bake_weapons_glb(
     if models.is_empty() {
         return Ok(false);
     }
+    // zone_meshes_from_mesh emits raw WLD (bottom-origin) UVs; convert to glTF
+    // convention per texture container. The gequip archives are mixed-era:
+    // gequip/gequip2 are all real BMP (flip V), gequip3-8 are all DDS repacks
+    // (keep raw V) — the per-texture sniff handles both.
+    crate::zone::apply_gltf_v_convention(models.values_mut().flatten(), &mut pfs_for_tex);
     crate::zone::write_object_models_glb(models, &mut pfs_for_tex, out_glb)
 }
 
