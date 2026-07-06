@@ -326,7 +326,7 @@ pub fn build_gamedata_from_raw(
         for e in zone_files {
             let name = e.file_name().to_string_lossy().to_string();
             let short = name.trim_end_matches(".s3d").to_string();
-            match crate::water::wtr_from_zone_s3d(&e.path()) {
+            match crate::bsp_regions::wtr_from_zone_s3d(&e.path()) {
                 Ok(Some(wtr)) => {
                     let rel = format!("maps/water/{short}.wtr");
                     if let Some(slot) = files.iter_mut().find(|(p, _)| *p == rel) {
