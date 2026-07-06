@@ -300,6 +300,20 @@ pub fn build_gamedata_from_raw(
             tracing::warn!("gamedata: missing {name} in {}", raw_dir.display());
         }
     }
+    // quests.json — server-derived quest-giver data (NOT a RoF2 client file), delivered through
+    // gamedata so a server can ship custom quests the same way it ships custom zones. An operator
+    // override in raw_dir wins; otherwise we bake the default bundled with the binary so quest
+    // indicators work out of the box.
+    {
+        let override_p = raw_dir.join("quests.json");
+        let bytes = if override_p.exists() {
+            tracing::info!("gamedata: using operator quests.json from {}", override_p.display());
+            std::fs::read(&override_p)?
+        } else {
+            include_bytes!("../content/quests.json").to_vec()
+        };
+        files.push(("quests.json".to_string(), bytes));
+    }
     let maps = raw_dir.join("maps");
     if maps.is_dir() {
         let mut paths = Vec::new();
@@ -384,6 +398,15 @@ pub fn ingest_dir(
 mod tests {
     use super::is_zone_archive;
     use super::resolve_jobs;
+
+    #[test]
+    fn bundled_quests_json_is_valid() {
+        // The default baked into gamedata when the operator has no raw_dir override.
+        let bytes = include_bytes!("../content/quests.json");
+        let v: serde_json::Value = serde_json::from_slice(bytes).expect("bundled quests.json parses");
+        assert!(v.as_object().is_some_and(|m| !m.is_empty()), "bundled quests.json has zones");
+    }
+
     #[test]
     fn zone_vs_companion_archives() {
         // real zones
