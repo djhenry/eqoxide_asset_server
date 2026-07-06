@@ -123,6 +123,13 @@ async fn main() -> anyhow::Result<()> {
             if let Some(parent) = out.parent() {
                 std::fs::create_dir_all(parent)?;
             }
+            // EQG archives (boat/ship models like row.eqg) use the EQGM `.mod` mesh format, not WLD.
+            if archive.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("eqg")) {
+                eqoxide_asset_server::convert::eqg_to_glb_model(&archive, &out)?;
+                let bytes = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
+                println!("converted (EQG) {} -> {} ({} bytes)", archive.display(), out.display(), bytes);
+                return Ok(());
+            }
             eqoxide_asset_server::convert::s3d_to_glb_model(
                 &archive, &out, !static_model, model_code.as_deref(),
             )?;
