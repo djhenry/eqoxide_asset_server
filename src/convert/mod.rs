@@ -1100,15 +1100,21 @@ fn anim_label(code3: &str) -> Option<&'static str> {
         "L03" => "jump_run",
         "L04" => "fall",
         "L05" => "duckwalk",
-        "L06" => "swim",
+        // Swim codes corrected against the RoF2 client's own animation-name table (decompiled
+        // REDACTED-CLIENT jump-table, see docs/eq-technical-knowledgebase/animation-codes.md): L06 is
+        // CROUCH WALK (not swim), L08 is CROUCH — a land squat that was mislabeled "swim_idle" and
+        // made a treading character look like it kept trying to sit down; the real forward swim is
+        // P06 (SWIM FORWD) and the real tread-water/idle-in-water is L09 (TREAD WATER).
+        "L06" => "duckwalk",
         "L07" => "walk_back",
-        "L08" => "swim_idle",
-        "L09" => "swim",
+        "L08" => "crouch",
+        "L09" => "swim_idle",
         "P01" => "idle_neutral",
         "P02" => "sit",
         "P03" => "crouch",
-        "P06" => "kneel",
-        "P07" => "swim_idle",
+        "P05" => "kneel",
+        "P06" => "swim",
+        // P07 has no name in the RoF2 client's table — leave it unmapped rather than guess "swim_idle".
         // Only O01/O02 are the standing idle fidgets ("standby"/"standby2"). O03 is NOT a standing
         // idle — it's a low crouched/looting pose (~knee height), so it must not carry the "idle"
         // label (the client's idle cycle selects clips by the "idle" substring). Confirmed against
