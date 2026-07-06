@@ -43,19 +43,27 @@ fn region_type_for_zone_name(name: &str) -> i32 {
     else { 0 }
 }
 
-/// The zone-point index of a zone-line region named `DRNTP00255<index>_ZONE`.
+/// The zone-point index encoded in a zone-line region's `DRNTP` code.
 ///
-/// `DRNTP00255` is a fixed magic prefix — the RoF2 client itself builds these names
-/// via `sprintf("DRNTP00255%05d000000000000000", N)` — so the index is simply the
-/// run of digits after that prefix (e.g. `DRNTP00255000001_ZONE` → 1). That index
-/// matches `zone_points.number` and the `OP_SendZonepoints` `iterator` field, which
-/// is how the client resolves the destination. Returns `None` when `name` isn't a
-/// zone-line region.
+/// `DRNTP00255` is a fixed magic prefix (the RoF2 client builds these via
+/// `sprintf("DRNTP00255……", N)`), followed by a **6-digit zero-padded index field**.
+/// Two forms occur in RoF2 WLDs:
+///   - short "name" form: `DRNTP00255000001_ZONE`  (index field terminated by `_`)
+///   - long "user_data" form: `DRNTP00255000001000000000000000___…` (index field
+///     followed by 15 padding zeros)
+/// so we must read exactly the 6-digit field, not every trailing digit (the long form's
+/// padding would otherwise overflow). The value matches `zone_points.number` and the
+/// `OP_SendZonepoints` `iterator` field, which is how the client resolves the destination.
+/// Returns `None` when `name` isn't a zone-line region.
 fn zone_line_index(name: &str) -> Option<i32> {
     let n = name.to_uppercase();
     let rest = n.strip_prefix("DRNTP00255")?;
     let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-    digits.parse::<i32>().ok()
+    if digits.is_empty() { return None; }
+    // Fixed 6-digit field: the short form has exactly 6 (then `_`); the long form pads with
+    // trailing zeros, so when there are more than 6 digits the index is just the first 6.
+    let field = if digits.len() > 6 { &digits[..6] } else { digits.as_str() };
+    field.parse::<i32>().ok()
 }
 
 /// Serialize the zone WLD's BSP as an EQEMUWATER v1 blob. Returns `None` when the
@@ -201,11 +209,41 @@ mod tests {
 
     #[test]
     fn zone_line_index_parses_drntp_names() {
+        // Short "name" form (older zones, e.g. everfrost): 6-digit field terminated by `_`.
         assert_eq!(zone_line_index("DRNTP00255000001_ZONE"), Some(1));
         assert_eq!(zone_line_index("DRNTP00255000077_ZONE"), Some(77));
         assert_eq!(zone_line_index("drntp00255000003_zone"), Some(3));
+        // Long "user_data" form (most RoF2 zones, e.g. halas): 6-digit field + 15 padding zeros.
+        // Greedily parsing all digits would overflow i32 — must read only the 6-digit field.
+        assert_eq!(zone_line_index("DRNTP00255000001000000000000000___000000000000"), Some(1));
+        assert_eq!(zone_line_index("DRNTP00255000042000000000000000"), Some(42));
+        // Not a zone line.
         assert_eq!(zone_line_index("WT_ZONE"), None);
+        assert_eq!(zone_line_index("WTN__01768000000000000000000000"), None);
         assert_eq!(zone_line_index("DRP00255000001_ZONE"), None);
+    }
+
+    #[test]
+    #[ignore = "requires ~/eq_assets/everquest_rof2/halas.s3d"]
+    fn halas_wtr_tags_the_everfrost_return_line_with_index_1() {
+        // Halas uses the long user_data form (DRNTP00255000001000…), which must parse to index 1
+        // (DB zone_points #1 → everfrost). Its BSP region sits by the return trigger (-77.88,-692.79).
+        let home = std::env::var("HOME").unwrap();
+        let s3d = std::path::PathBuf::from(format!("{home}/eq_assets/everquest_rof2/halas.s3d"));
+        if !s3d.exists() { eprintln!("skip: {s3d:?} missing"); return; }
+        let wtr = wtr_from_zone_s3d(&s3d).unwrap().expect("halas has flagged regions");
+        // Search a volume around the return trigger for the zone-line leaf.
+        let mut found = None;
+        for zi in -2..=10 {
+            for xi in -3..=3 {
+                for yi in -3..=3 {
+                    let (x, y, z) = (-78.0 + xi as f32 * 12.0, -692.0 + yi as f32 * 12.0, zi as f32 * 8.0);
+                    let (t, idx) = leaf_at(&wtr, x, y, z);
+                    if t == 3 { found = Some(idx); }
+                }
+            }
+        }
+        assert_eq!(found, Some(1), "halas→everfrost return line tagged with index 1");
     }
 
     #[test]
