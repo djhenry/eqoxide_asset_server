@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use glam::{Mat4, Quat, Vec3};
 use libeq_wld::parser::{
-    Dag, DmSpriteDef2, HierarchicalSpriteDef, MaterialType, RenderMethod, Track, TrackDef, WldDoc,
+    Dag, DmSpriteDef2, DrawStyle, HierarchicalSpriteDef, MaterialType, RenderMethod, Track,
+    TrackDef, WldDoc,
 };
 
 pub(crate) struct PrimitiveData {
@@ -403,6 +404,28 @@ pub(crate) fn alpha_mode_from_render(rm: &RenderMethod) -> AlphaMode {
             _ => AlphaMode::Opaque,
         },
         RenderMethod::Standard { .. } => AlphaMode::Opaque,
+    }
+}
+
+/// True for WLD render methods the native client does NOT draw — invisible boundary
+/// geometry: zone sky-lids, underworld planes, and invisible walls. Two encodings exist:
+/// `RenderMethod::Standard` with `DrawStyle::Transparent` (raw render method 0 — e.g. the
+/// qeynos boundary shell: 809 prims spanning height −100..+100, "textured" w1.bmp, which
+/// rendered as an opaque black box enclosing the whole city, eqoxide#213), and
+/// `MaterialType::Boundary` / `InvisibleUnknown*` under `UserDefined`. These faces are
+/// usually SOLID — collision keeps them via `Mesh::collision_indices()` (a separate,
+/// flag-based path), so skipping them here removes them from RENDER geometry only,
+/// matching native-client behavior (you collide with the sky barrier but never see it).
+pub(crate) fn is_invisible_render_method(rm: &RenderMethod) -> bool {
+    match rm {
+        RenderMethod::Standard { draw_style, .. } => *draw_style == DrawStyle::Transparent,
+        RenderMethod::UserDefined { material_type } => matches!(
+            material_type,
+            MaterialType::Boundary
+                | MaterialType::InvisibleUnknown
+                | MaterialType::InvisibleUnknown2
+                | MaterialType::InvisibleUnknown3
+        ),
     }
 }
 
@@ -2665,6 +2688,28 @@ pub fn eqg_to_glb_model(input_eqg: &Path, output_glb: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// eqoxide#213: invisible boundary render methods must be detected so the zone baker can
+    /// skip them from render output (the native client never draws them). Raw values are the
+    /// wire encodings: bit31 set = UserDefined(material_type in low bits), clear = Standard
+    /// (draw_style in bits 0-1; 0 = Transparent = "not drawn" — qeynos's boundary shell).
+    #[test]
+    fn detects_invisible_render_methods() {
+        // Standard, draw_style=Transparent (raw 0) — the qeynos sky-lid/underworld shell.
+        assert!(is_invisible_render_method(&RenderMethod::from_u32(0x0000_0000)));
+        // Standard, draw_style=Solid — ordinary drawn geometry.
+        assert!(!is_invisible_render_method(&RenderMethod::from_u32(0x0000_0003)));
+        // UserDefined Boundary (0x0) — invisible boundary material.
+        assert!(is_invisible_render_method(&RenderMethod::from_u32(0x8000_0000)));
+        // UserDefined Diffuse (0x1) — the standard drawn material.
+        assert!(!is_invisible_render_method(&RenderMethod::from_u32(0x8000_0001)));
+        // UserDefined Transparent50 (0x5) — semi-transparent but DRAWN (blend).
+        assert!(!is_invisible_render_method(&RenderMethod::from_u32(0x8000_0005)));
+        // UserDefined TransparentMaskedPassable (0x7) — foliage cutout, drawn.
+        assert!(!is_invisible_render_method(&RenderMethod::from_u32(0x8000_0007)));
+        // UserDefined InvisibleUnknown (0x53) — invisible.
+        assert!(is_invisible_render_method(&RenderMethod::from_u32(0x8000_0053)));
+    }
 
     /// Build a minimal uncompressed 8bpp BMP (BITMAPINFOHEADER) with the given
     /// palette and one row of pixel indices. Used to test keyed-alpha decoding.
