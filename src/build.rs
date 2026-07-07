@@ -59,6 +59,9 @@ const COMMON_MODELS: &[(&str, Option<&str>, &str)] = &[
     ("globaldam_chr.s3d",     None, "race_dam.glb"), ("globaldaf_chr.s3d", None, "race_daf.glb"),
     ("globalham_chr.s3d",     None, "race_ham.glb"), ("globalhaf_chr.s3d", None, "race_haf.glb"),
     ("globalpcfroglok_chr.s3d", None, "race_pcfroglok.glb"),
+    // Boat/ship NPC models are EQG archives (not S3D) — the bake routes `.eqg` to the EQG converter.
+    ("row.eqg", None, "boat.glb"),   // Rowboat (race 502) → the small boat mesh (#194)
+    ("shi.eqg", None, "ship.glb"),   // Ship/Launch/ferries (races 72/73/141/…) → the large ship hull (#194)
 ];
 
 /// Resolve the worker-thread count for a build. An explicit `--jobs N` (already
@@ -93,7 +96,14 @@ pub fn build_from_raw(
             // Per-model conversion can panic on malformed archives; isolate each so one
             // bad model doesn't abort the whole common build.
             let out = common_out.join(out_name);
-            let result = std::panic::catch_unwind(|| s3d_to_glb_model(&src, &out, true, *model_code));
+            // EQG boat/ship archives (row.eqg, shi.eqg) use the EQGM `.mod` mesh format, not WLD.
+            let result = std::panic::catch_unwind(|| {
+                if archive.to_ascii_lowercase().ends_with(".eqg") {
+                    crate::convert::eqg_to_glb_model(&src, &out)
+                } else {
+                    s3d_to_glb_model(&src, &out, true, *model_code)
+                }
+            });
             match result {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => tracing::warn!("skip model {out_name} from {archive}: {}", short_err(&e)),
