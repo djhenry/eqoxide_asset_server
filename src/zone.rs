@@ -281,6 +281,15 @@ pub(crate) fn zone_meshes_from_mesh(mesh: &libeq_wld::Mesh<'_>) -> Vec<ZoneMesh>
         // Skip primitives whose indices exceed the position array (malformed WLD)
         // instead of panicking on the whole zone.
         if idx.iter().any(|&i| i as usize >= all_pos.len()) { continue; }
+        // Invisible boundary geometry (zone sky-lids, underworld planes, invisible walls) is
+        // never drawn by the native client — skip it from RENDER output. It remains SOLID in
+        // `__collision__` via the separate flag-based `collision_indices()` path. Without this,
+        // qeynos's boundary shell (809 prims, height −100..+100, render method 0) baked into
+        // the render terrain as an opaque black box enclosing the whole city → the zone
+        // appeared as a void from inside. (eqoxide#213)
+        if crate::convert::is_invisible_render_method(prim.material().render_method()) {
+            continue;
+        }
         let positions = idx.iter()
             .map(|&i| { let p = all_pos[i as usize]; [p[0] + cx, p[1] + cy, p[2] + cz] })
             .collect();
@@ -886,6 +895,44 @@ mod tests {
         assert!(col_faces >= render_faces / 2,
             "collision faces {col_faces} unexpectedly small vs render {render_faces}");
         eprintln!("gfaydark: render_faces={render_faces} collision_faces={col_faces}");
+    }
+
+    /// eqoxide#213: invisible boundary primitives (render method 0 / Boundary materials) must be
+    /// EXCLUDED from render meshes while remaining available to collision. qeynos is the known
+    /// worst case: its boundary shell (~809 prims spanning height −100..+100) rendered as an
+    /// opaque black box enclosing the whole city — the zone looked like a void from inside.
+    /// Asserts on the real archive: qeynos HAS invisible prims, and zone_meshes_from_mesh emits
+    /// exactly the valid-minus-invisible primitive count (i.e. the skip removed them all).
+    #[test]
+    #[ignore = "requires ~/eq_assets/everquest_rof2/qeynos.s3d"]
+    fn zone_meshes_skip_invisible_boundary_prims() {
+        let home = std::env::var("HOME").unwrap();
+        let main = std::path::PathBuf::from(format!("{home}/eq_assets/everquest_rof2/qeynos.s3d"));
+        if !main.exists() { eprintln!("skip: qeynos.s3d missing"); return; }
+        let file = std::fs::File::open(&main).unwrap();
+        let mut pfs = libeq_pfs::PfsReader::open(file).unwrap();
+        let names: Vec<String> = pfs.filenames().unwrap();
+        let (mut total_valid, mut invisible, mut emitted) = (0usize, 0usize, 0usize);
+        for wn in names.iter().filter(|f| f.to_lowercase().ends_with(".wld")) {
+            let Ok(Some(bytes)) = pfs.get(wn) else { continue };
+            let Ok(wld) = libeq_wld::load(&bytes) else { continue };
+            for mesh in wld.meshes() {
+                let n_pos = mesh.positions().len();
+                for prim in mesh.primitives() {
+                    let idx = prim.indices();
+                    if idx.is_empty() || idx.iter().any(|&i| i as usize >= n_pos) { continue; }
+                    total_valid += 1;
+                    if crate::convert::is_invisible_render_method(prim.material().render_method()) {
+                        invisible += 1;
+                    }
+                }
+                emitted += zone_meshes_from_mesh(&mesh).len();
+            }
+        }
+        eprintln!("qeynos: valid prims={total_valid} invisible={invisible} emitted={emitted}");
+        assert!(invisible > 0, "qeynos must contain invisible boundary prims (had none?)");
+        assert_eq!(emitted, total_valid - invisible,
+            "render meshes must exclude exactly the invisible boundary prims");
     }
 
     #[test]
