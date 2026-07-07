@@ -2497,6 +2497,171 @@ pub(crate) fn bake_weapons_glb(
     crate::zone::write_object_models_glb(models, &mut pfs_for_tex, out_glb)
 }
 
+// ── EQG boat/ship model → glb (#194) ──────────────────────────────────────────────────────────────
+// RoF2 boat NPC models (row.eqg = Rowboat, shi.eqg = Ship, …) are EQG archives (same PFS container
+// as S3D) holding an EQGM `.mod` mesh, NOT WLD. Parse the static mesh + its diffuse textures and reuse
+// the shared glTF writer. Byte layouts verified against the RoF2 files — see
+// docs/eq-technical-knowledgebase/eqg-ship-models.md.
+
+#[inline] fn eqg_u32(b: &[u8], o: usize) -> u32 { u32::from_le_bytes([b[o], b[o+1], b[o+2], b[o+3]]) }
+#[inline] fn eqg_i32(b: &[u8], o: usize) -> i32 { i32::from_le_bytes([b[o], b[o+1], b[o+2], b[o+3]]) }
+#[inline] fn eqg_f32(b: &[u8], o: usize) -> f32 { f32::from_le_bytes([b[o], b[o+1], b[o+2], b[o+3]]) }
+
+struct EqgMesh {
+    positions: Vec<[f32; 3]>,
+    normals:   Vec<[f32; 3]>,
+    uvs:       Vec<[f32; 2]>,
+    /// (v0, v1, v2, material_index) per triangle.
+    tris:      Vec<(u32, u32, u32, usize)>,
+    /// Diffuse texture filename per material (lowercased), if any.
+    mat_textures: Vec<Option<String>>,
+}
+
+/// Parse an `EQGM`(mesh)/`EQGT`(terrain) `.mod`/`.ter` blob into a static mesh. Branches vertex stride
+/// on the `version` field (v1 = 32B pos/normal/uv, v3 = 44B with a packed vertex-color u32 before the
+/// uv). A skinned model (bone_count > 0) is read as its static bind pose (bone/weight tables after the
+/// triangles are ignored — enough for a stationary boat).
+fn parse_eqg_model(b: &[u8]) -> Result<EqgMesh> {
+    if b.len() < 24 { anyhow::bail!("eqg model too small ({} bytes)", b.len()); }
+    let is_mesh = &b[0..4] == b"EQGM";
+    if !is_mesh && &b[0..4] != b"EQGT" {
+        anyhow::bail!("not an EQGM/EQGT model (magic {:?})", &b[0..4]);
+    }
+    let version    = eqg_u32(b, 4);
+    let str_len    = eqg_u32(b, 8) as usize;
+    let mat_count  = eqg_u32(b, 12) as usize;
+    let vert_count = eqg_u32(b, 16) as usize;
+    let poly_count = eqg_u32(b, 20) as usize;
+    // EQGM carries a bone_count u32 at offset 24; EQGT does not (24-byte vs 28-byte header).
+    let header_len = if is_mesh { 28 } else { 24 };
+    let str_end = header_len + str_len;
+    if str_end > b.len() { anyhow::bail!("eqg string table overruns file"); }
+    let strings = &b[header_len..str_end];
+    let getstr = |off: usize| -> String {
+        if off >= strings.len() { return String::new(); }
+        let end = strings[off..].iter().position(|&c| c == 0).map(|p| off + p).unwrap_or(strings.len());
+        String::from_utf8_lossy(&strings[off..end]).into_owned()
+    };
+
+    // Materials: index,name_off,shader_off,prop_count (16B) then prop_count × (name_off,type,val) (12B).
+    let mut o = str_end;
+    let mut mat_textures = Vec::with_capacity(mat_count);
+    for _ in 0..mat_count {
+        if o + 16 > b.len() { anyhow::bail!("eqg materials overrun"); }
+        let prop_count = eqg_u32(b, o + 12) as usize;
+        o += 16;
+        let mut diffuse = None;
+        for _ in 0..prop_count {
+            if o + 12 > b.len() { anyhow::bail!("eqg material props overrun"); }
+            let pname = getstr(eqg_u32(b, o) as usize).to_lowercase();
+            let ptype = eqg_u32(b, o + 4);
+            let pval  = eqg_u32(b, o + 8);
+            o += 12;
+            // prop_type 2 = string (texture filename). Only the diffuse map is needed to render.
+            if ptype == 2 && pname.contains("texturediffuse0") {
+                diffuse = Some(getstr(pval as usize).to_lowercase());
+            }
+        }
+        mat_textures.push(diffuse);
+    }
+
+    // Vertices.
+    let vstride = if version == 1 { 32 } else { 44 };
+    if o + vstride * vert_count > b.len() { anyhow::bail!("eqg vertices overrun"); }
+    let (mut positions, mut normals, mut uvs) =
+        (Vec::with_capacity(vert_count), Vec::with_capacity(vert_count), Vec::with_capacity(vert_count));
+    for _ in 0..vert_count {
+        positions.push([eqg_f32(b, o), eqg_f32(b, o + 4), eqg_f32(b, o + 8)]);
+        normals.push([eqg_f32(b, o + 12), eqg_f32(b, o + 16), eqg_f32(b, o + 20)]);
+        // v1 uv at +24; v3 has a packed color u32 at +24, so uv is at +28.
+        let uvo = if version == 1 { o + 24 } else { o + 28 };
+        uvs.push([eqg_f32(b, uvo), eqg_f32(b, uvo + 4)]);
+        o += vstride;
+    }
+
+    // Triangles: v0,v1,v2 (i32), material_index (i32), flag (i32) = 20 bytes.
+    if o + 20 * poly_count > b.len() { anyhow::bail!("eqg triangles overrun"); }
+    let mut tris = Vec::with_capacity(poly_count);
+    for _ in 0..poly_count {
+        let (v0, v1, v2) = (eqg_i32(b, o) as u32, eqg_i32(b, o + 4) as u32, eqg_i32(b, o + 8) as u32);
+        let mat = eqg_i32(b, o + 12);
+        o += 20;
+        let mi = if mat >= 0 && (mat as usize) < mat_count { mat as usize } else { 0 };
+        tris.push((v0, v1, v2, mi));
+    }
+    Ok(EqgMesh { positions, normals, uvs, tris, mat_textures })
+}
+
+/// Convert an EQG boat/ship archive (`row.eqg`, `shi.eqg`, …) to a static `.glb`. Picks the visual
+/// mesh — the shortest-named `.mod`/`.ter` that isn't a `col_` collision hull — parses it, rotates
+/// EQ Z-up → glTF Y-up (as the S3D path does), and reuses [`write_glb`]. #194.
+pub fn eqg_to_glb_model(input_eqg: &Path, output_glb: &Path) -> Result<()> {
+    let file = fs::File::open(input_eqg).with_context(|| format!("open {}", input_eqg.display()))?;
+    let mut pfs = libeq_pfs::PfsReader::open(file)
+        .with_context(|| format!("parse PFS {}", input_eqg.display()))?;
+    let filenames = pfs.filenames().context("list PFS filenames")?;
+    let mesh_name = filenames.iter()
+        .filter(|f| {
+            let l = f.to_lowercase();
+            (l.ends_with(".mod") || l.ends_with(".ter")) && !l.starts_with("col_")
+        })
+        .min_by_key(|f| f.len())
+        .cloned()
+        .with_context(|| format!("no visual .mod/.ter mesh in {}", input_eqg.display()))?;
+    let bytes = pfs.get(&mesh_name).context("read mesh")?
+        .with_context(|| format!("empty mesh entry {mesh_name}"))?;
+    let model = parse_eqg_model(&bytes)
+        .with_context(|| format!("parse {mesh_name}"))?;
+
+    // EQ Z-up → glTF Y-up, matching the S3D converter's rotation.
+    let rq = Quat::from_axis_angle(Vec3::X, -std::f32::consts::FRAC_PI_2);
+    let rot = |p: &[f32; 3]| { let v = rq * Vec3::from_array(*p); [v.x, v.y, v.z] };
+    let positions: Vec<[f32; 3]> = model.positions.iter().map(rot).collect();
+    let normals: Vec<[f32; 3]> = model.normals.iter().map(rot).collect();
+
+    // Distinct diffuse textures + one material per source material.
+    let mut textures: Vec<TextureData> = Vec::new();
+    let mut tex_idx: HashMap<String, usize> = HashMap::new();
+    let mut materials: Vec<MaterialData> = Vec::with_capacity(model.mat_textures.len());
+    for (mi, tex) in model.mat_textures.iter().enumerate() {
+        let texture_idx = match tex {
+            Some(name) if !name.is_empty() => {
+                if let Some(&i) = tex_idx.get(name) {
+                    Some(i)
+                } else if let Some(png) = try_load_image(&mut pfs, name, AlphaMode::Opaque) {
+                    let i = textures.len();
+                    textures.push(TextureData { name: name.clone(), png_bytes: png });
+                    tex_idx.insert(name.clone(), i);
+                    Some(i)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        materials.push(MaterialData {
+            name: format!("mat{mi}"),
+            texture_idx,
+            base_color: [1.0, 1.0, 1.0, 1.0],
+            alpha_mode: AlphaMode::Opaque,
+            anim: None,
+        });
+    }
+
+    // Group triangles into one primitive per material.
+    let mut by_mat: HashMap<usize, Vec<u32>> = HashMap::new();
+    for (a, b_, c, mat) in &model.tris {
+        let e = by_mat.entry(*mat).or_default();
+        e.extend_from_slice(&[*a, *b_, *c]);
+    }
+    let primitives: Vec<PrimitiveData> = by_mat.into_iter()
+        .map(|(material_idx, indices)| PrimitiveData { indices, material_idx, extras: None })
+        .collect();
+
+    let mesh = MeshData { name: mesh_name, positions, normals, uvs: model.uvs, primitives };
+    write_glb(output_glb, &[mesh], &materials, &textures)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2604,6 +2769,33 @@ mod tests {
         for c in ["HUM", "BAM", "ELM", "OGM", "TRM"] {
             assert_eq!(anim_donor(c), None, "{c}");
         }
+    }
+
+    #[test]
+    #[ignore = "requires ~/eq_assets/everquest_rof2/row.eqg"]
+    fn eqg_rowboat_converts_to_a_boat_shaped_glb() {
+        // The Rowboat NPC model (race 502) is an EQG static mesh; convert it and sanity-check the
+        // output is a plausible boat: one mesh with hundreds of verts and a longer-than-tall bbox.
+        let home = std::env::var("HOME").unwrap();
+        let inp = std::path::PathBuf::from(format!("{home}/eq_assets/everquest_rof2/row.eqg"));
+        if !inp.exists() { eprintln!("skip: {inp:?} missing"); return; }
+        let out = std::env::temp_dir().join("eqoxide_test_row.glb");
+        super::eqg_to_glb_model(&inp, &out).unwrap();
+
+        let (gdoc, buffers, _imgs) = gltf::import(&out).unwrap();
+        let mesh = gdoc.meshes().next().expect("one mesh");
+        let mut nverts = 0usize;
+        let (mut minx, mut maxx, mut miny, mut maxy) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+        for prim in mesh.primitives() {
+            let r = prim.reader(|b| Some(&buffers[b.index()]));
+            for p in r.read_positions().unwrap() {
+                nverts += 1;
+                minx = minx.min(p[0]); maxx = maxx.max(p[0]);
+                miny = miny.min(p[1]); maxy = maxy.max(p[1]);
+            }
+        }
+        assert!(nverts > 100, "rowboat should have a real mesh, got {nverts} verts");
+        assert!((maxx - minx) > (maxy - miny), "a boat is longer than it is tall: {}x{}", maxx - minx, maxy - miny);
     }
 
     #[test]
