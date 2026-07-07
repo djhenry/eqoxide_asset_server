@@ -111,8 +111,34 @@ pub fn build_from_raw(
             }
         });
     });
-    let common = ingest_dir(cas, store, "common", &common_out)?;
-    Ok(vec![common])
+    // Split the character models into two tiers so the client no longer downloads all ~457 MB up
+    // front (eqoxide#224):
+    //   • The small monster/generic ARCHETYPES stay in `common` — synced once at startup and used
+    //     everywhere (NPC fallbacks).
+    //   • Each big playable-race model (`race_*.glb`, ~15 MB) becomes its own `charmodel/<key>` set
+    //     the client syncs ON DEMAND the first time a spawn of that race appears. Only the races
+    //     actually present in a session are ever downloaded.
+    // The CAS is content-addressed, so splitting into more manifests shares chunks — no extra bytes
+    // stored, just finer-grained fetch units.
+    let mut common_files: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut manifests = Vec::new();
+    for (_, _, out_name) in COMMON_MODELS {
+        let p = common_out.join(out_name);
+        if !p.exists() { continue; } // conversion may have been skipped for a bad/absent archive
+        let bytes = std::fs::read(&p)?;
+        if out_name.starts_with("race_") {
+            // per-race on-demand set, named by the client's model key (the file basename, e.g.
+            // "race_hum" → set "charmodel/race_hum").
+            let key = out_name.strip_suffix(".glb").unwrap_or(out_name);
+            let m = store.build_and_write(cas, &format!("charmodel/{key}"), &[(out_name.to_string(), bytes)])?;
+            manifests.push(m);
+        } else {
+            common_files.push((out_name.to_string(), bytes));
+        }
+    }
+    let common = store.build_and_write(cas, "common", &common_files)?;
+    manifests.push(common);
+    Ok(manifests)
 }
 
 /// True for archives that hold zone terrain (`<short>.s3d`), excluding the
