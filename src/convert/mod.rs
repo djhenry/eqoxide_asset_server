@@ -484,11 +484,18 @@ fn race_code_from_archive(path: &Path) -> Option<String> {
     let stem = path.file_stem()?.to_str()?.to_lowercase();
     let tail = stem.strip_prefix("global")?;
     let code = tail.split('_').next()?;
-    if !code.is_empty() {
-        Some(code.to_string())
-    } else {
-        None
+    // Only Luclin PLAYER-race archives (globalelf_chr, globalhum_chr, …) drive the
+    // head-skin face-variant path. The NUMBERED globals (global2_chr, global3_chr, …)
+    // hold old-world CREATURE models (bears, wolves, …). A numeric "race code" like
+    // "2" would (a) be wrong and (b) make any creature material whose name happens to
+    // end in "HE000{N}" — e.g. the bear's BEAHE0001_MDF (texture beahe0001.bmp) — get
+    // mistaken for a Luclin face region, building bogus "2hesk{F}{N}" texture names
+    // that don't exist (untextured white head) and running the humanoid hair/face
+    // geometry split on non-humanoid heads (collapsed/detached head). See issue #26.
+    if code.is_empty() || !code.bytes().all(|b| b.is_ascii_alphabetic()) {
+        return None;
     }
+    Some(code.to_string())
 }
 
 pub(crate) fn load_texture_from_archive(
@@ -2725,6 +2732,24 @@ pub fn eqg_to_glb_model(input_eqg: &Path, output_glb: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// issue #26: the head-skin face-variant path is for Luclin PLAYER races only.
+    /// Numbered "global" archives (global2_chr, …) hold old-world creatures (bear,
+    /// wolf); their numeric "code" must NOT be treated as a race code, or a creature
+    /// material ending in "HE000{N}" (e.g. the bear's BEAHE0001_MDF) gets mistaken for
+    /// a Luclin face region and rendered white / with a collapsed head.
+    #[test]
+    fn race_code_only_for_alphabetic_player_races() {
+        let rc = |p: &str| race_code_from_archive(Path::new(p));
+        // Luclin player-race archives → real race codes.
+        assert_eq!(rc("globalelf_chr.s3d"), Some("elf".to_string()));
+        assert_eq!(rc("globalhum_chr.s3d"), Some("hum".to_string()));
+        // Numbered creature globals → no race code (was the #26 bug: returned "2").
+        assert_eq!(rc("global2_chr.s3d"), None);
+        assert_eq!(rc("global21_chr.s3d"), None);
+        // Non-global archives never yield a race code.
+        assert_eq!(rc("blackburrow_chr.s3d"), None);
+    }
 
     /// eqoxide#213: invisible boundary render methods must be detected so the zone baker can
     /// skip them from render output (the native client never draws them). Raw values are the
