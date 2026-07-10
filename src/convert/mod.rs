@@ -1022,6 +1022,43 @@ fn gather_anims(doc: &WldDoc, skel: &Skel) -> Vec<Anim> {
             });
         }
     }
+
+    // Repair degenerate clips (eqoxide_asset_server#27). Some source models animate only the ROOT
+    // for a locomotion clip: the gnoll (GNN) has an L01 (walk) track for GNN_TRACK but none for any
+    // limb, so gnoll/orc/goblin/kobold/grimling etc. T-pose and float while walking. When a clip
+    // animates far fewer bones than the model's richest clips, fill it wholesale from a sibling —
+    // preferring the same locomotion family (L02 run for an L01 walk), else the richest clip — so
+    // the limbs move. Whole-clip copy keeps every bone on one consistent frame timeline (no desync).
+    let animated = |a: &Anim| a.bones.iter().filter(|b| b.is_some()).count();
+    let max_bones = anims.iter().map(&animated).max().unwrap_or(0);
+    if max_bones > 2 {
+        let threshold = (max_bones / 4).max(2); // < 25% of the richest clip = degenerate
+        // Snapshot healthy clips as donor candidates (code, frame_ms, bones).
+        let donors: Vec<(String, u32, Vec<Option<Vec<(Vec3, Quat)>>>)> = anims
+            .iter()
+            .filter(|a| animated(a) >= threshold)
+            .map(|a| (a.code.clone(), a.frame_ms, a.bones.clone()))
+            .collect();
+        for a in anims.iter_mut() {
+            let n = animated(a);
+            if n >= threshold {
+                continue;
+            }
+            let pick = donors
+                .iter()
+                .filter(|(c, ..)| c.as_bytes().first() == a.code.as_bytes().first())
+                .max_by_key(|(_, _, b)| b.iter().filter(|x| x.is_some()).count())
+                .or_else(|| donors.iter().max_by_key(|(_, _, b)| b.iter().filter(|x| x.is_some()).count()));
+            if let Some((dcode, dms, dbones)) = pick {
+                tracing::info!(
+                    "anim: repaired degenerate clip {} ({} joints) from sibling {} ({} joints)",
+                    a.code, n, dcode, dbones.iter().filter(|x| x.is_some()).count()
+                );
+                a.frame_ms = *dms;
+                a.bones = dbones.clone();
+            }
+        }
+    }
     anims
 }
 
@@ -3118,5 +3155,38 @@ mod equip_tex_tests {
             let img = image::load_from_memory(bytes).unwrap_or_else(|_| panic!("decode {n}"));
             assert!(img.width() > 8 || img.height() > 8, "{n} should not be an 8x8 stub");
         }
+    }
+
+    /// eqoxide_asset_server#27: the gnoll (GNN) source has an L01 (walk) track only for the root
+    /// bone, so the baked walk clip animated 1/26 joints → gnoll/orc/goblin/kobold T-posed while
+    /// walking. gather_anims now repairs a degenerate clip from a sibling (L02 run). Assert the
+    /// baked gnoll.glb's L01_walk animates ~as many joints as its other clips (not just the root).
+    #[test]
+    #[ignore = "requires ~/eq_assets/everquest_rof2/blackburrow_chr.s3d"]
+    fn gnoll_walk_clip_is_not_degenerate() {
+        let home = std::env::var("HOME").unwrap();
+        let src = std::path::PathBuf::from(format!("{home}/eq_assets/everquest_rof2/blackburrow_chr.s3d"));
+        if !src.exists() { eprintln!("skip: blackburrow_chr.s3d missing"); return; }
+        let out = std::env::temp_dir().join("eqoxide_test_gnoll.glb");
+        s3d_to_glb_model(&src, &out, true, Some("GNN")).unwrap();
+
+        let bytes = std::fs::read(&out).unwrap();
+        let json_len = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) as usize;
+        let json: serde_json::Value = serde_json::from_slice(&bytes[20..20 + json_len]).unwrap();
+        let anims = json["animations"].as_array().unwrap();
+
+        let joints = |name_prefix: &str| -> usize {
+            anims.iter()
+                .find(|a| a["name"].as_str().unwrap_or("").starts_with(name_prefix))
+                .map(|a| a["channels"].as_array().unwrap().iter()
+                    .map(|c| c["target"]["node"].as_u64().unwrap())
+                    .collect::<std::collections::BTreeSet<_>>().len())
+                .unwrap_or(0)
+        };
+        let walk = joints("L01");
+        let run = joints("L02");
+        eprintln!("gnoll: L01_walk joints={walk}, L02_run joints={run}");
+        assert!(run > 5, "sanity: run clip should animate many joints, got {run}");
+        assert!(walk >= run, "walk clip must be repaired to animate the limbs (was 1 joint); got {walk} vs run {run}");
     }
 }
