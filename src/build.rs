@@ -395,6 +395,82 @@ pub fn build_gamedata_from_raw(
     store.build_and_write(cas, "gamedata", &files)
 }
 
+/// Build the zone-audio sets (issue #32):
+///   * `sound/<zone>` — the resolved emitter manifest (`emitters.json`) plus every
+///     `.wav` the zone's sndbnk references (extracted from `sounds/` or `snd*.pfs`).
+///   * `music/<name>` — the zone/background music track(s): `<name>.xmi` and/or
+///     `<name>.mp3`, grouped by basename. (Zone→track selection is the client's job;
+///     TYPE-1 emitter records carry the selector.)
+///
+/// The global exe-baked SFX table (TYPE-1 negative ids) is NOT shipped — it lives in
+/// the client binary, not the assets; emitters surface those as `global_sfx` indices.
+/// Returns (sound_sets_built, music_sets_built).
+pub fn build_audio_from_raw(
+    cas: &Cas,
+    store: &ManifestStore,
+    raw_dir: &Path,
+) -> anyhow::Result<(usize, usize)> {
+    use crate::audio;
+
+    let sources = audio::AudioSources::index(raw_dir);
+
+    // --- sound/<zone> ---
+    let mut sound_sets = 0usize;
+    let mut sndbnks: Vec<(String, PathBuf)> = Vec::new();
+    for entry in std::fs::read_dir(raw_dir)?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if let Some(zone) = name.strip_suffix("_sndbnk.eff") {
+            sndbnks.push((zone.to_string(), entry.path()));
+        }
+    }
+    sndbnks.sort();
+    for (zone, sndbnk_path) in sndbnks {
+        let sounds_path = raw_dir.join(format!("{zone}_sounds.eff"));
+        let bank = audio::parse_sndbnk(&std::fs::read(&sndbnk_path)?);
+        let raw = match std::fs::read(&sounds_path) {
+            Ok(b) => audio::parse_sounds_eff(&b),
+            Err(_) => Vec::new(), // sndbnk with no placements — still ship the (empty) manifest + wavs
+        };
+        let manifest = audio::resolve_emitters(&zone, &bank, &raw);
+        let json = serde_json::to_vec_pretty(&manifest)?;
+
+        let mut files: Vec<(String, Vec<u8>)> = vec![("emitters.json".to_string(), json)];
+        let mut missing = 0usize;
+        for base in audio::bank_wav_names(&bank) {
+            match sources.read_wav(&base) {
+                Some(bytes) => files.push((format!("wav/{base}.wav"), bytes)),
+                None => missing += 1,
+            }
+        }
+        if missing > 0 {
+            tracing::warn!("sound/{zone}: {missing} referenced wav(s) not found in sounds/ or snd*.pfs");
+        }
+        store.build_and_write(cas, &format!("sound/{zone}"), &files)?;
+        sound_sets += 1;
+    }
+
+    // --- music/<name> --- group .xmi + .mp3 by basename.
+    let mut music: std::collections::BTreeMap<String, Vec<(String, Vec<u8>)>> = Default::default();
+    for entry in std::fs::read_dir(raw_dir)?.flatten() {
+        let path = entry.path();
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+        if ext != "xmi" && ext != "mp3" {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+        let fname = path.file_name().unwrap().to_string_lossy().to_string();
+        music.entry(stem.to_lowercase()).or_default().push((fname, std::fs::read(&path)?));
+    }
+    let mut music_sets = 0usize;
+    for (name, mut files) in music {
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        store.build_and_write(cas, &format!("music/{name}"), &files)?;
+        music_sets += 1;
+    }
+
+    Ok((sound_sets, music_sets))
+}
+
 fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;

@@ -1,5 +1,6 @@
 //! eqoxide_asset_server — derived-asset delivery for EQEmu.
 
+pub mod audio;
 pub mod auth;
 pub mod zone;
 pub mod build;

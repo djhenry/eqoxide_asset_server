@@ -111,6 +111,8 @@ async fn main() -> anyhow::Result<()> {
                 println!("built 'gamedata' set {} ({} files)", gd.digest, gd.files.len());
                 let ge = eqoxide_asset_server::build::build_gameequip_from_raw(&cas, &store, &raw_dir)?;
                 println!("built 'gameequip' set {} ({} files)", ge.digest, ge.files.len());
+                let (snd, mus) = eqoxide_asset_server::build::build_audio_from_raw(&cas, &store, &raw_dir)?;
+                println!("built {snd} 'sound/<zone>' + {mus} 'music/<name>' audio set(s)");
             } else {
                 let set = set.expect("--set required without --raw");
                 let from = from.expect("--from required without --raw");
