@@ -1167,8 +1167,8 @@ fn anim_label(code3: &str) -> Option<&'static str> {
         "L03" => "jump_run",
         "L04" => "fall",
         "L05" => "duckwalk",
-        // Swim codes corrected against the RoF2 client's own animation-name table (decompiled
-        // eqgame.exe jump-table, see docs/eq-technical-knowledgebase/animation-codes.md): L06 is
+        // Swim codes corrected against the RoF2 client's own animation-name table (confirmed
+        // against the native RoF2 client's animation-name mapping): L06 is
         // CROUCH WALK (not swim), L08 is CROUCH — a land squat that was mislabeled "swim_idle" and
         // made a treading character look like it kept trying to sit down; the real forward swim is
         // P06 (SWIM FORWD) and the real tread-water/idle-in-water is L09 (TREAD WATER).
@@ -1441,8 +1441,9 @@ fn convert_s3d_to_glb_skinned(input: &Path, output: &Path, model_code: Option<&s
                 //
                 // N ∈ {1, 4, 5}: FACE-variant regions (face+scalp, nose bridge, nose
                 //   tip for huf; layout varies per race). The RoF2 client swaps their
-                //   textures by spawn.face — decompile eqgame FUN_0040d770 attr 1 →
-                //   FUN_0040d1a0 "%sHE%02d%d1_MDF" — NOT by hairstyle (hairstyle is a
+                //   textures by spawn.face — confirmed in the native client's texture-
+                //   selection logic, which resolves the "%sHE%02d%d1_MDF" pattern by
+                //   face index — NOT by hairstyle (hairstyle is a
                 //   dead actor-attach path for S3D races; no "*_HEAD_HAIR" actor ships).
                 //   Emit 8 variants (F=0..7) with texture {race}hesk{F}{N}.dds, each
                 //   split into a facial-skin prim ({"eq_face": F}) and a painted-hair
@@ -2567,8 +2568,7 @@ pub(crate) fn bake_weapons_glb(
 // ── EQG boat/ship model → glb (#194) ──────────────────────────────────────────────────────────────
 // RoF2 boat NPC models (row.eqg = Rowboat, shi.eqg = Ship, …) are EQG archives (same PFS container
 // as S3D) holding an EQGM `.mod` mesh, NOT WLD. Parse the static mesh + its diffuse textures and reuse
-// the shared glTF writer. Byte layouts verified against the RoF2 files — see
-// docs/eq-technical-knowledgebase/eqg-ship-models.md.
+// the shared glTF writer. Byte layouts verified against the RoF2 files.
 
 #[inline] fn eqg_u32(b: &[u8], o: usize) -> u32 { u32::from_le_bytes([b[o], b[o+1], b[o+2], b[o+3]]) }
 #[inline] fn eqg_i32(b: &[u8], o: usize) -> i32 { i32::from_le_bytes([b[o], b[o+1], b[o+2], b[o+3]]) }

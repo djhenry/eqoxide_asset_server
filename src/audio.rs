@@ -65,8 +65,9 @@ pub fn parse_sndbnk(bytes: &[u8]) -> SoundBank {
 }
 
 /// A single emitter placement from `_sounds.eff` (84-byte record), decoded per the
-/// RoF2 client's own parser (`eqgame.exe FUN_004aac30`). Fields are raw values;
-/// sound-name resolution against a [`SoundBank`] happens in [`resolve_emitters`].
+/// layout confirmed against the native RoF2 client's own emitter parser. Fields are
+/// raw values; sound-name resolution against a [`SoundBank`] happens in
+/// [`resolve_emitters`].
 ///
 /// Byte map (little-endian; offsets in the 84-byte record):
 ///   0x00–0x0F opaque tool metadata (client ignores; 0x0C is an ascending id)
@@ -127,7 +128,7 @@ pub fn parse_sounds_eff(bytes: &[u8]) -> Vec<RawEmitter> {
 
 /// First sndbnk index reserved for the LOOP list. EMIT entries occupy 1..=161;
 /// the client always parks the LOOP list at index 162 (`0xA2`) regardless of how
-/// many EMIT entries precede it (`eqgame.exe FUN … :119324-119354`).
+/// many EMIT entries precede it (confirmed against the native RoF2 client).
 pub const LOOP_INDEX_BASE: i32 = 162;
 
 /// A resolved sound reference for one day-or-night slot of an emitter.
