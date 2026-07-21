@@ -3130,12 +3130,55 @@ mod weapons_glb_tests {
     }
 }
 
+/// Whether a classic `.bmp` equip texture must be SKIPPED because the Luclin
+/// generation already owns its PNG name.
+///
+/// Encodes the issue #520 rule. Equip textures share a flat `humch0001.png`
+/// namespace, but the CLASSIC multi-race `global_chr.s3d` ships `.bmp` body
+/// textures laid out for the classic mesh's UVs, while the per-race Luclin
+/// `global<race>_chr.s3d` archives ship same-named `.dds` textures laid out for
+/// the Luclin mesh's UVs. The client renders the LUCLIN player meshes, so the
+/// Luclin `.dds` is the correct atlas. A plain first-wins dedup let
+/// `global_chr.s3d` (sorts first alphabetically) shadow every colliding Luclin
+/// body texture, so the Luclin mesh sampled the classic atlas and mis-rendered
+/// (the tunic's below-belt skirt — drawn on the upper-leg region `humlg0001` —
+/// showed classic leggings, and the yoke/lacing `humch0002` had wrong colors).
+///
+/// Rule: **a Luclin `.dds` OWNS its name; a classic `.bmp` of that name yields.**
+/// This also fixes the trim pieces whose Luclin texture is a transparent stub
+/// (e.g. `humch0001.dds` is 8×8 all-alpha): the stub is filtered out AND classic
+/// is suppressed, so NO texture is served → the client's cloth overlay falls back
+/// to bare skin, which is the authentic Luclin look (a plain "Luclin .dds wins"
+/// dedup would miss this, since the filtered stub leaves the classic `.bmp` to
+/// leak). `candidate_is_dds` = this texture's source is a Luclin `.dds`;
+/// `luclin_owns_name` = some `.dds` of this PNG name ships anywhere in the set.
+fn classic_bmp_yields_to_luclin(candidate_is_dds: bool, luclin_owns_name: bool) -> bool {
+    !candidate_is_dds && luclin_owns_name
+}
+
 /// Extract every BMP/DDS texture from the given S3D archives, decode to RGBA,
 /// filter out ≤8×8 all-alpha "stub" placeholder textures, and re-encode to PNG.
-/// Returns `(name_lower_without_ext + ".png", png_bytes)` pairs, deduped by name
-/// (first-wins insertion order, matching `index_s3d_textures` semantics).
+/// Returns `(name_lower_without_ext + ".png", png_bytes)` pairs, one per unique
+/// PNG name (first-wins insertion order). On a classic-vs-Luclin name collision
+/// the Luclin `.dds` wins — see [`classic_bmp_yields_to_luclin`] (issue #520).
 pub(crate) fn extract_equip_textures(raw_dir: &Path, archives: &[&str]) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
     use std::collections::HashSet;
+    // Pre-pass: every PNG stem that ships as a Luclin `.dds` anywhere in the set.
+    // A classic `.bmp` of any of these names must not be emitted (see the rule doc).
+    let mut luclin_names: HashSet<String> = HashSet::new();
+    for arch in archives {
+        let p = raw_dir.join(arch);
+        let Ok(file) = std::fs::File::open(&p) else { continue };
+        let Ok(mut pfs) = libeq_pfs::PfsReader::open(file) else { continue };
+        let Ok(names) = pfs.filenames() else { continue };
+        for name in names {
+            let lower = name.to_lowercase();
+            if lower.ends_with(".dds") {
+                luclin_names.insert(format!("{}.png", &lower[..lower.len() - 4]));
+            }
+        }
+    }
+
     let mut out: Vec<(String, Vec<u8>)> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for arch in archives {
@@ -3145,9 +3188,12 @@ pub(crate) fn extract_equip_textures(raw_dir: &Path, archives: &[&str]) -> anyho
         let Ok(names) = pfs.filenames() else { continue };
         for name in names {
             let lower = name.to_lowercase();
+            let is_dds = lower.ends_with(".dds");
             let fmt = if lower.ends_with(".bmp") { image::ImageFormat::Bmp }
-                      else if lower.ends_with(".dds") { image::ImageFormat::Dds } else { continue };
+                      else if is_dds { image::ImageFormat::Dds } else { continue };
             let stem = format!("{}.png", &lower[..lower.len()-4]);
+            // #520: a classic .bmp yields to a same-named Luclin .dds.
+            if classic_bmp_yields_to_luclin(is_dds, luclin_names.contains(&stem)) { continue; }
             if seen.contains(&stem) { continue; }
             let Ok(Some(bytes)) = pfs.get(&name) else { continue };
             let Ok(img) = image::load_from_memory_with_format(&bytes, fmt) else { continue };
@@ -3166,6 +3212,62 @@ pub(crate) fn extract_equip_textures(raw_dir: &Path, archives: &[&str]) -> anyho
 #[cfg(test)]
 mod equip_tex_tests {
     use super::*;
+
+    /// issue #520: a classic `.bmp` equip texture must yield whenever the Luclin
+    /// generation ships a `.dds` of the same name (the client renders Luclin player
+    /// meshes, whose UVs need the Luclin atlas). Mutation-check: reverting the fix
+    /// (dropping the suppression → `false` for the classic-with-Luclin-twin case)
+    /// makes the first assertion go RED.
+    #[test]
+    fn classic_bmp_yields_when_luclin_owns_the_name() {
+        // Load-bearing: a classic .bmp whose name a Luclin .dds also ships is skipped.
+        assert!(classic_bmp_yields_to_luclin(false, true),
+            "classic .bmp must yield to a same-named Luclin .dds (#520)");
+        // A classic .bmp with NO Luclin twin is kept (classic-only art: skeletons, cloaks).
+        assert!(!classic_bmp_yields_to_luclin(false, false),
+            "classic-only .bmp (no Luclin twin) must still be served");
+        // A Luclin .dds is never suppressed by this rule, twin-name or not.
+        assert!(!classic_bmp_yields_to_luclin(true, true), "Luclin .dds is never suppressed");
+        assert!(!classic_bmp_yields_to_luclin(true, false), "Luclin .dds is never suppressed");
+    }
+
+    /// issue #520 (integration, asset-gated): scanning the classic `global_chr.s3d`
+    /// together with the Luclin `globalhum_chr.s3d` (their natural alphabetical
+    /// order, which the old first-wins dedup mishandled), the served body textures
+    /// must be the LUCLIN ones. Covers the two reported symptoms directly:
+    ///  • `humlg0001.png` (the below-belt skirt drawn on the upper-leg region) and
+    ///    `humch0002.png` (yoke/lacing) must be byte-identical to the Luclin `.dds`,
+    ///    NOT the classic `.bmp`.
+    ///  • `humch0001.png` (Luclin ships an 8×8 all-alpha stub) must NOT be served at
+    ///    all — so the client's cloth overlay falls back to bare skin (authentic),
+    ///    instead of leaking classic's full-torso tunic onto a trim strip.
+    #[test]
+    #[ignore = "requires ~/eq_assets/everquest_rof2/global_chr.s3d + globalhum_chr.s3d"]
+    fn served_body_textures_are_luclin_not_classic() {
+        let home = std::env::var("HOME").unwrap();
+        let raw = std::path::PathBuf::from(format!("{home}/eq_assets/everquest_rof2"));
+        if !raw.join("global_chr.s3d").exists() || !raw.join("globalhum_chr.s3d").exists() {
+            eprintln!("skip"); return;
+        }
+        let get = |set: &[(String, Vec<u8>)], want: &str| set.iter()
+            .find(|(n, _)| n == want).map(|(_, b)| b.clone());
+        // Natural order: classic sorts first, but the fix must still serve Luclin.
+        let served = extract_equip_textures(&raw, &["global_chr.s3d", "globalhum_chr.s3d"]).unwrap();
+        for tex in ["humlg0001.png", "humch0002.png"] {
+            let classic = get(&extract_equip_textures(&raw, &["global_chr.s3d"]).unwrap(), tex)
+                .unwrap_or_else(|| panic!("classic global_chr has {tex}"));
+            let luclin = get(&extract_equip_textures(&raw, &["globalhum_chr.s3d"]).unwrap(), tex)
+                .unwrap_or_else(|| panic!("luclin globalhum_chr has {tex}"));
+            assert_ne!(classic, luclin, "{tex}: classic and Luclin must differ (else no bug)");
+            assert_eq!(get(&served, tex).unwrap(), luclin,
+                "#520: served {tex} must be the Luclin .dds, not classic .bmp");
+        }
+        // Luclin's humch0001 is a transparent 8×8 stub → filtered; classic must be
+        // suppressed too, so nothing is served (client shows skin under the overlay).
+        assert!(get(&served, "humch0001.png").is_none(),
+            "#520: humch0001 (Luclin transparent stub) must not be served as the classic tunic");
+    }
+
     #[test]
     #[ignore = "requires ~/eq_assets/everquest_rof2/global_chr.s3d"]
     fn extracts_named_pngs_skipping_stubs() {
