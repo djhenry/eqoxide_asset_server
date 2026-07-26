@@ -10,8 +10,8 @@
 //!
 //! ## Zone lines (v2)
 //! A `DRNTP…` region is a zone-line trigger — that's determined entirely by the
-//! `special == 3` region type, which is *intended* to be a complete, load-bearing
-//! signal on its own. The retail client resolves the actual destination by sending
+//! `special == 3` region type, which is a complete, load-bearing signal on its own.
+//! The retail client resolves the actual destination by sending
 //! `OP_ZoneChange(zoneID=0)` and letting the server pick the nearest zone point by
 //! XY; it never decodes the `DRNTP` digits itself. v2's per-node `zone_line_index`
 //! field is a **best-effort debug hint**, recoverable only from zones that use the
@@ -20,13 +20,14 @@
 //! see [`zone_line_index`] below for why that other form's digits must NOT be
 //! parsed as an index.
 //!
-//! **This field is not yet non-load-bearing in practice.** As of this writing, the
-//! `eqoxide` client consumer (`crates/eqoxide-core/src/region_map.rs`) still gates
-//! zone-line detection on `zone_line_index != 0`, which incorrectly drops every
-//! zone-line leaf whose hint wasn't recoverable. That gate is tracked for removal
-//! separately (`djhenry/eqoxide#683`); once it's gone, a `special == 3` leaf will be
-//! a complete, actionable trigger on its own — hint or no hint — matching how the
-//! retail client actually behaves.
+//! The `eqoxide` client consumer (`crates/eqoxide-core/src/region_map.rs`) used to
+//! gate zone-line detection on `zone_line_index != 0`, which incorrectly dropped
+//! every zone-line leaf whose hint wasn't recoverable — e.g. Surefall Glade's only
+//! exit is baked `special == 3, index == 0` and was permanently unreachable
+//! (`djhenry/eqoxide#683`). **That gate is gone as of client `main` `45a9658`**: a
+//! `special == 3` leaf is now a complete, actionable trigger on its own — hint or no
+//! hint — matching how the retail client actually behaves. `zone_line_index` really
+//! is non-load-bearing today; keep it that way.
 //!
 //! ## Layout
 //! `"EQEMUWATER"` + u32 version + u32 node_count + node_count × node records.
@@ -59,9 +60,10 @@ fn region_type_for_zone_name(name: &str) -> i32 {
 /// Best-effort debug hint for `zone_points.number`, recovered ONLY from zones that
 /// use the `DRNTP00255<index>` shorthand naming convention.
 ///
-/// **This is a hint, not a load-bearing signal — but see the module doc for the
-/// caveat that the consumer doesn't honor that yet.** A zone-line leaf is fully
-/// identified by its region type (`special == 3`, from
+/// **This is a hint, not a load-bearing signal — and the consumer no longer treats
+/// it as one** (the `zone_line_index != 0` gate was removed client-side by
+/// `djhenry/eqoxide#683`, landed in client `main` `45a9658`; see the module doc). A
+/// zone-line leaf is fully identified by its region type (`special == 3`, from
 /// [`region_type_for_zone_name`]) alone; the retail client resolves the real
 /// destination via `OP_ZoneChange(zoneID=0)` plus server-side nearest-XY, and never
 /// parses these digits itself.
@@ -263,9 +265,9 @@ mod tests {
         // Surefall Glade (qrg)'s real zone-line region user_data. It does NOT use
         // the "00255" shorthand marker, so zone_line_index correctly recovers no
         // hint — but region_type_for_zone_name still classifies it as a zone line
-        // (special == 3) on its own, which is what actually needs to be true for a
-        // client to treat the leaf as a trigger (once it stops requiring the hint
-        // too, per djhenry/eqoxide#683).
+        // (special == 3) on its own, which is what the client actually treats as
+        // the trigger, hint or no hint, now that the `zone_line_index != 0` gate
+        // has been removed client-side (djhenry/eqoxide#683, client main 45a9658).
         //
         // IMPORTANT: the leading digits ("00004") are NOT zone_points.number. qrg's
         // real zone_points.number values are 5 and 7 — 4 matches neither. Do not
