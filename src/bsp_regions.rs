@@ -10,16 +10,23 @@
 //!
 //! ## Zone lines (v2)
 //! A `DRNTP…` region is a zone-line trigger — that's determined entirely by the
-//! `special == 3` region type, which is a complete, load-bearing signal on its own.
-//! The client resolves the actual destination by sending `OP_ZoneChange(zoneID=0)`
-//! and letting the server pick the nearest zone point by XY; it never decodes the
-//! `DRNTP` digits itself. v2's per-node `zone_line_index` field (0 on every
-//! non-zone-line node) is therefore a **best-effort debug hint** only — handy for a
-//! human or tool cross-referencing `zone_points.number`, but NEVER required for a
-//! zone-line leaf to be actionable. Some RoF2 zones (e.g. Surefall Glade) author the
-//! digits directly rather than via the `00255<index>` convention, so the hint isn't
-//! always recoverable in the same shape — that's fine, since nothing downstream
-//! depends on it.
+//! `special == 3` region type, which is *intended* to be a complete, load-bearing
+//! signal on its own. The retail client resolves the actual destination by sending
+//! `OP_ZoneChange(zoneID=0)` and letting the server pick the nearest zone point by
+//! XY; it never decodes the `DRNTP` digits itself. v2's per-node `zone_line_index`
+//! field is a **best-effort debug hint**, recoverable only from zones that use the
+//! `DRNTP00255<index>` shorthand naming convention. It is 0 both on every
+//! non-zone-line node AND on a genuine zone-line node authored a different way —
+//! see [`zone_line_index`] below for why that other form's digits must NOT be
+//! parsed as an index.
+//!
+//! **This field is not yet non-load-bearing in practice.** As of this writing, the
+//! `eqoxide` client consumer (`crates/eqoxide-core/src/region_map.rs`) still gates
+//! zone-line detection on `zone_line_index != 0`, which incorrectly drops every
+//! zone-line leaf whose hint wasn't recoverable. That gate is tracked for removal
+//! separately (`djhenry/eqoxide#683`); once it's gone, a `special == 3` leaf will be
+//! a complete, actionable trigger on its own — hint or no hint — matching how the
+//! retail client actually behaves.
 //!
 //! ## Layout
 //! `"EQEMUWATER"` + u32 version + u32 node_count + node_count × node records.
@@ -28,8 +35,9 @@
 //! - **v2** node = 40 bytes: v1 fields + trailing `i32 zone_line_index`.
 //!
 //! Node references are 1-based (0 = none); leaves carry the region type in `special`
-//! (and, in v2, the zone-point index in `zone_line_index`). Consumers query with
-//! server `(y, x, z)` — the WLD's native axis order — so the tree is copied verbatim.
+//! (and, in v2, a best-effort `zone_points.number` hint in `zone_line_index`, 0 when
+//! unavailable). Consumers query with server `(y, x, z)` — the WLD's native axis
+//! order — so the tree is copied verbatim.
 
 use anyhow::Context;
 use std::path::Path;
@@ -48,39 +56,47 @@ fn region_type_for_zone_name(name: &str) -> i32 {
     else { 0 }
 }
 
-/// Best-effort debug hint for the zone-point index a `DRNTP` region's code names.
+/// Best-effort debug hint for `zone_points.number`, recovered ONLY from zones that
+/// use the `DRNTP00255<index>` shorthand naming convention.
 ///
-/// **This is a hint, never load-bearing.** A zone-line leaf is fully identified by
-/// its region type (`special == 3`, from [`region_type_for_zone_name`]) alone — the
-/// retail client resolves the real destination via `OP_ZoneChange(zoneID=0)` plus
-/// server-side nearest-XY, and never parses these digits. Nothing in this crate or
-/// the client may treat a missing/mismatched hint as "not a zone line."
+/// **This is a hint, not a load-bearing signal — but see the module doc for the
+/// caveat that the consumer doesn't honor that yet.** A zone-line leaf is fully
+/// identified by its region type (`special == 3`, from
+/// [`region_type_for_zone_name`]) alone; the retail client resolves the real
+/// destination via `OP_ZoneChange(zoneID=0)` plus server-side nearest-XY, and never
+/// parses these digits itself.
 ///
-/// Two authoring conventions exist in RoF2 WLDs, both fixed-width decimal starting
-/// right after the `DRNTP` tag: a 5-digit field A at byte offset `[5,10)` and a
-/// 6-digit field B at `[10,16)` (offsets from the start of the full `DRNTP…` string).
-///   - Most zones (e.g. halas, everfrost) use the `sprintf("DRNTP00255%06d…", N)`
-///     convention: field A is the literal `"00255"` marker and field B carries the
-///     index — short "name" form `DRNTP00255000001_ZONE`, long "user_data" form
-///     `DRNTP00255000001000000000000000___…` (index padded with trailing zeros).
-///   - Other zones (e.g. Surefall Glade / qrg) author field A directly as the index
-///     and never use the `00255` marker at all, e.g.
-///     `DRNTP00004005198000084999999999___000000000000` → field A `00004` → hint 4.
-/// Rule: `number = if field_a == "00255" { field_b } else { field_a }`.
-/// Returns `None` only when `name` isn't a `DRNTP` (zone-line) region at all.
+/// `DRNTP00255` is a fixed marker (the observed field is 6 digits wide), followed by
+/// a **6-digit zero-padded index field**. Two forms occur in RoF2 WLDs:
+///   - short "name" form: `DRNTP00255000001_ZONE`  (index field terminated by `_`)
+///   - long "user_data" form: `DRNTP00255000001000000000000000___…` (index field
+///     followed by 15 padding zeros)
+/// so we must read exactly the digit run immediately after the marker, not every
+/// trailing digit (the long form's padding would otherwise overflow). The value
+/// matches `zone_points.number` and the `OP_SendZonepoints` `iterator` field.
+///
+/// Other RoF2 zones author a `DRNTP…` region WITHOUT the `00255` marker at all
+/// (e.g. Surefall Glade / qrg: `DRNTP00004005198000084999999999___000000000000`).
+/// **Do not parse that form's leading digits as an index — this has been proposed
+/// and falsified before.** qrg's real `zone_points.number` values are 5 and 7;
+/// `00004` matches neither, and the fields past it (`005198`, `000084…`) are signed
+/// trigger coordinates, not a competing index (see the hyphenated fixture
+/// `DRNTP00002-00030000357999999999___…` — a coordinate can carry a sign, an index
+/// can't). A directly-authored zone line simply has **no recoverable hint**, and
+/// that's fine: the hint is never required for the leaf to be actionable, only
+/// convenient when it's there.
+///
+/// Returns `None` when `name` isn't a zone-line region at all, OR when it is one
+/// but wasn't authored with the `00255` shorthand (no hint available).
 fn zone_line_index(name: &str) -> Option<i32> {
     let n = name.to_uppercase();
-    let rest = n.strip_prefix("DRNTP")?;
-    if rest.len() < 5 { return None; }
-    let field_a = &rest[0..5];
-    if !field_a.bytes().all(|b| b.is_ascii_digit()) { return None; }
-    if field_a != "00255" {
-        return field_a.parse::<i32>().ok();
-    }
-    if rest.len() < 11 { return None; }
-    let field_b = &rest[5..11];
-    if !field_b.bytes().all(|b| b.is_ascii_digit()) { return None; }
-    field_b.parse::<i32>().ok()
+    let rest = n.strip_prefix("DRNTP00255")?;
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() { return None; }
+    // Fixed 6-digit field: the short form has exactly 6 (then `_`); the long form pads with
+    // trailing zeros, so when there are more than 6 digits the index is just the first 6.
+    let field = if digits.len() > 6 { &digits[..6] } else { digits.as_str() };
+    field.parse::<i32>().ok()
 }
 
 /// Serialize the zone WLD's BSP as an EQEMUWATER v1 blob. Returns `None` when the
@@ -234,6 +250,8 @@ mod tests {
         // Greedily parsing all digits would overflow i32 — must read only the 6-digit field.
         assert_eq!(zone_line_index("DRNTP00255000001000000000000000___000000000000"), Some(1));
         assert_eq!(zone_line_index("DRNTP00255000042000000000000000"), Some(42));
+        // Tolerant short form: fewer than 6 digits before the terminator still parses.
+        assert_eq!(zone_line_index("DRNTP00255001_ZONE"), Some(1));
         // Not a zone line.
         assert_eq!(zone_line_index("WT_ZONE"), None);
         assert_eq!(zone_line_index("WTN__01768000000000000000000000"), None);
@@ -241,23 +259,29 @@ mod tests {
     }
 
     #[test]
-    fn zone_line_index_handles_directly_authored_non_00255_form() {
-        // Surefall Glade (qrg)'s real zone-line region user_data: field A ("00004")
-        // is NOT the "00255" marker, so the hint is field A itself (4), not field B
-        // ("005198"). The retail client never decodes any of this — it's a debug
-        // hint only — but the parser must still recognize the region as a zone line
-        // (type 3, via region_type_for_zone_name) and must NOT return None just
-        // because the digits don't follow the 00255<index> convention.
+    fn zone_line_index_returns_none_for_a_directly_authored_zone_line() {
+        // Surefall Glade (qrg)'s real zone-line region user_data. It does NOT use
+        // the "00255" shorthand marker, so zone_line_index correctly recovers no
+        // hint — but region_type_for_zone_name still classifies it as a zone line
+        // (special == 3) on its own, which is what actually needs to be true for a
+        // client to treat the leaf as a trigger (once it stops requiring the hint
+        // too, per djhenry/eqoxide#683).
+        //
+        // IMPORTANT: the leading digits ("00004") are NOT zone_points.number. qrg's
+        // real zone_points.number values are 5 and 7 — 4 matches neither. Do not
+        // "fix" this test by asserting Some(4) or any other value parsed from this
+        // string; see zone_line_index's doc comment for why that hypothesis is
+        // already falsified.
         const QRG_ZONE_LINE: &str = "DRNTP00004005198000084999999999___000000000000";
         assert_eq!(
             region_type_for_zone_name(QRG_ZONE_LINE),
             3,
-            "a DRNTP region is a zone line regardless of its digit convention"
+            "a DRNTP region is a zone line even when no index hint is recoverable"
         );
         assert_eq!(
             zone_line_index(QRG_ZONE_LINE),
-            Some(4),
-            "field A (\"00004\") is the hint when it isn't the \"00255\" marker"
+            None,
+            "the directly-authored form has no \"00255\" marker, so no hint is recoverable"
         );
     }
 
