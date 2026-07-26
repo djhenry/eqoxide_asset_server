@@ -66,25 +66,25 @@ fn region_type_for_zone_name(name: &str) -> i32 {
 /// destination via `OP_ZoneChange(zoneID=0)` plus server-side nearest-XY, and never
 /// parses these digits itself.
 ///
-/// `DRNTP00255` is a fixed marker (the observed field is 6 digits wide), followed by
-/// a **6-digit zero-padded index field**. Two forms occur in RoF2 WLDs:
+/// `DRNTP00255` is a fixed marker, followed by a **6-digit zero-padded index field**
+/// (6 is the observed width; treat it as measured, not as a format string). Two
+/// forms occur in RoF2 WLDs:
 ///   - short "name" form: `DRNTP00255000001_ZONE`  (index field terminated by `_`)
 ///   - long "user_data" form: `DRNTP00255000001000000000000000___…` (index field
 ///     followed by 15 padding zeros)
-/// so we must read exactly the digit run immediately after the marker, not every
-/// trailing digit (the long form's padding would otherwise overflow). The value
-/// matches `zone_points.number` and the `OP_SendZonepoints` `iterator` field.
+/// so we must read exactly the 6-digit field, not every trailing digit (the long
+/// form's padding would otherwise overflow). The value matches `zone_points.number`
+/// and the `OP_SendZonepoints` `iterator` field.
 ///
 /// Other RoF2 zones author a `DRNTP…` region WITHOUT the `00255` marker at all
 /// (e.g. Surefall Glade / qrg: `DRNTP00004005198000084999999999___000000000000`).
 /// **Do not parse that form's leading digits as an index — this has been proposed
 /// and falsified before.** qrg's real `zone_points.number` values are 5 and 7;
-/// `00004` matches neither, and the fields past it (`005198`, `000084…`) are signed
-/// trigger coordinates, not a competing index (see the hyphenated fixture
-/// `DRNTP00002-00030000357999999999___…` — a coordinate can carry a sign, an index
-/// can't). A directly-authored zone line simply has **no recoverable hint**, and
-/// that's fine: the hint is never required for the leaf to be actionable, only
-/// convenient when it's there.
+/// `00004` matches neither, and the fields past it carry a sign in libeq's own
+/// fixture (`DRNTP00002-00030000357999999999___…`), which an index cannot —
+/// coordinate-like legacy data, not a competing index. A directly-authored zone
+/// line simply has **no recoverable hint**, and that's fine: the hint is never
+/// required for the leaf to be actionable, only convenient when it's there.
 ///
 /// Returns `None` when `name` isn't a zone-line region at all, OR when it is one
 /// but wasn't authored with the `00255` shorthand (no hint available).
