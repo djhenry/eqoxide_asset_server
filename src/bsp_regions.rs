@@ -9,12 +9,29 @@
 //! derived from some other client's files.
 //!
 //! ## Zone lines (v2)
-//! A `DRNTP…` region is a zone-line trigger. Its name is `DRNTP00255<index>_ZONE`,
-//! where `<index>` matches `zone_points.number` / the `iterator` field the server
-//! sends in `OP_SendZonepoints`. The native client, on entering a `DRNTP` region,
-//! looks that index up in the zone-points packet to find the destination. So a
-//! zone-line leaf needs to carry its index, not just "type 3". v2 adds a per-node
-//! `zone_line_index` field for exactly that (0 on every non-zone-line node).
+//! A `DRNTP…` region is a zone-line trigger — that's determined entirely by the
+//! `special == 3` region type, which is a complete, load-bearing signal on its own.
+//! The retail client is understood to resolve the actual destination by sending
+//! `OP_ZoneChange(zoneID=0)` and letting the server pick the nearest zone point by
+//! XY (the server-side nearest-XY resolve is measured from open-source server code;
+//! that the client sends the zoneID=0 sentinel is deduced from it never parsing a
+//! destination out of the region name, not directly observed on the wire). v2's
+//! per-node `zone_line_index` field is a **best-effort debug hint**, recoverable
+//! only from zones that use the `DRNTP00255<index>` shorthand naming convention.
+//! It is 0 both on every non-zone-line node AND on a genuine zone-line node
+//! authored a different way — see [`zone_line_index`] below for why that other
+//! form's digits must NOT be parsed as an index.
+//!
+//! The `eqoxide` client consumer (`crates/eqoxide-core/src/region_map.rs`) used to
+//! gate zone-line detection on `zone_line_index != 0`, which incorrectly dropped
+//! every zone-line leaf whose hint wasn't recoverable — e.g. Surefall Glade's only
+//! exit is baked `special == 3, index == 0` and was permanently unreachable
+//! (`djhenry/eqoxide#683`). **That gate is gone as of client `main` `45a9658`**: a
+//! `special == 3` leaf is now a complete, actionable trigger on its own — hint or no
+//! hint — matching how the retail client actually behaves. `zone_line_index` is no
+//! longer a trigger gate. It remains a destination-resolution hint: a nonzero value
+//! still selects a `zone_points` row, so a wrong value still crosses to a wrong zone
+//! — which is why the falsified rule below must stay unimplemented.
 //!
 //! ## Layout
 //! `"EQEMUWATER"` + u32 version + u32 node_count + node_count × node records.
@@ -23,8 +40,9 @@
 //! - **v2** node = 40 bytes: v1 fields + trailing `i32 zone_line_index`.
 //!
 //! Node references are 1-based (0 = none); leaves carry the region type in `special`
-//! (and, in v2, the zone-point index in `zone_line_index`). Consumers query with
-//! server `(y, x, z)` — the WLD's native axis order — so the tree is copied verbatim.
+//! (and, in v2, a best-effort `zone_points.number` hint in `zone_line_index`, 0 when
+//! unavailable). Consumers query with server `(y, x, z)` — the WLD's native axis
+//! order — so the tree is copied verbatim.
 
 use anyhow::Context;
 use std::path::Path;
@@ -43,18 +61,39 @@ fn region_type_for_zone_name(name: &str) -> i32 {
     else { 0 }
 }
 
-/// The zone-point index encoded in a zone-line region's `DRNTP` code.
+/// Best-effort debug hint for `zone_points.number`, recovered ONLY from zones that
+/// use the `DRNTP00255<index>` shorthand naming convention.
 ///
-/// `DRNTP00255` is a fixed magic prefix (the RoF2 client builds these via
-/// `sprintf("DRNTP00255……", N)`), followed by a **6-digit zero-padded index field**.
-/// Two forms occur in RoF2 WLDs:
+/// **This is a hint, not a trigger gate — the consumer no longer requires it to
+/// recognize a zone line** (`djhenry/eqoxide#683`, client `main` `45a9658`; see the
+/// module doc), though it still uses a nonzero value to resolve the destination. A
+/// zone-line leaf is fully identified by its region type (`special == 3`, from
+/// [`region_type_for_zone_name`]) alone; the retail client resolves the real
+/// destination via `OP_ZoneChange(zoneID=0)` plus server-side nearest-XY, and never
+/// parses these digits itself.
+///
+/// `DRNTP00255` is a fixed marker, followed by a **6-digit zero-padded index field**
+/// (6 is the observed width; treat it as measured, not as a format string). Two
+/// forms occur in RoF2 WLDs:
 ///   - short "name" form: `DRNTP00255000001_ZONE`  (index field terminated by `_`)
 ///   - long "user_data" form: `DRNTP00255000001000000000000000___…` (index field
 ///     followed by 15 padding zeros)
-/// so we must read exactly the 6-digit field, not every trailing digit (the long form's
-/// padding would otherwise overflow). The value matches `zone_points.number` and the
-/// `OP_SendZonepoints` `iterator` field, which is how the client resolves the destination.
-/// Returns `None` when `name` isn't a zone-line region.
+/// so we must read exactly the 6-digit field, not every trailing digit (the long
+/// form's padding would otherwise overflow). The value matches `zone_points.number`
+/// and the `OP_SendZonepoints` `iterator` field.
+///
+/// Other RoF2 zones author a `DRNTP…` region WITHOUT the `00255` marker at all
+/// (e.g. Surefall Glade / qrg: `DRNTP00004005198000084999999999___000000000000`).
+/// **Do not parse that form's leading digits as an index — this has been proposed
+/// and falsified before.** qrg's real `zone_points.number` values are 5 and 7;
+/// `00004` matches neither, and the fields past it carry a sign in libeq's own
+/// fixture (`DRNTP00002-00030000357999999999___…`), which an index cannot —
+/// coordinate-like legacy data, not a competing index. A directly-authored zone
+/// line simply has **no recoverable hint**, and that's fine: the hint is never
+/// required for the leaf to be actionable, only convenient when it's there.
+///
+/// Returns `None` when `name` isn't a zone-line region at all, OR when it is one
+/// but wasn't authored with the `00255` shorthand (no hint available).
 fn zone_line_index(name: &str) -> Option<i32> {
     let n = name.to_uppercase();
     let rest = n.strip_prefix("DRNTP00255")?;
@@ -217,10 +256,39 @@ mod tests {
         // Greedily parsing all digits would overflow i32 — must read only the 6-digit field.
         assert_eq!(zone_line_index("DRNTP00255000001000000000000000___000000000000"), Some(1));
         assert_eq!(zone_line_index("DRNTP00255000042000000000000000"), Some(42));
+        // Tolerant short form: fewer than 6 digits before the terminator still parses.
+        assert_eq!(zone_line_index("DRNTP00255001_ZONE"), Some(1));
         // Not a zone line.
         assert_eq!(zone_line_index("WT_ZONE"), None);
         assert_eq!(zone_line_index("WTN__01768000000000000000000000"), None);
         assert_eq!(zone_line_index("DRP00255000001_ZONE"), None);
+    }
+
+    #[test]
+    fn zone_line_index_returns_none_for_a_directly_authored_zone_line() {
+        // Surefall Glade (qrg)'s real zone-line region user_data. It does NOT use
+        // the "00255" shorthand marker, so zone_line_index correctly recovers no
+        // hint — but region_type_for_zone_name still classifies it as a zone line
+        // (special == 3) on its own, which is what the client actually treats as
+        // the trigger, hint or no hint, now that the `zone_line_index != 0` gate
+        // has been removed client-side (djhenry/eqoxide#683, client main 45a9658).
+        //
+        // IMPORTANT: the leading digits ("00004") are NOT zone_points.number. qrg's
+        // real zone_points.number values are 5 and 7 — 4 matches neither. Do not
+        // "fix" this test by asserting Some(4) or any other value parsed from this
+        // string; see zone_line_index's doc comment for why that hypothesis is
+        // already falsified.
+        const QRG_ZONE_LINE: &str = "DRNTP00004005198000084999999999___000000000000";
+        assert_eq!(
+            region_type_for_zone_name(QRG_ZONE_LINE),
+            3,
+            "a DRNTP region is a zone line even when no index hint is recoverable"
+        );
+        assert_eq!(
+            zone_line_index(QRG_ZONE_LINE),
+            None,
+            "the directly-authored form has no \"00255\" marker, so no hint is recoverable"
+        );
     }
 
     #[test]
