@@ -11,14 +11,16 @@
 //! ## Zone lines (v2)
 //! A `DRNTP…` region is a zone-line trigger — that's determined entirely by the
 //! `special == 3` region type, which is a complete, load-bearing signal on its own.
-//! The retail client resolves the actual destination by sending
+//! The retail client is understood to resolve the actual destination by sending
 //! `OP_ZoneChange(zoneID=0)` and letting the server pick the nearest zone point by
-//! XY; it never decodes the `DRNTP` digits itself. v2's per-node `zone_line_index`
-//! field is a **best-effort debug hint**, recoverable only from zones that use the
-//! `DRNTP00255<index>` shorthand naming convention. It is 0 both on every
-//! non-zone-line node AND on a genuine zone-line node authored a different way —
-//! see [`zone_line_index`] below for why that other form's digits must NOT be
-//! parsed as an index.
+//! XY (the server-side nearest-XY resolve is measured from open-source server code;
+//! that the client sends the zoneID=0 sentinel is deduced from it never parsing a
+//! destination out of the region name, not directly observed on the wire). v2's
+//! per-node `zone_line_index` field is a **best-effort debug hint**, recoverable
+//! only from zones that use the `DRNTP00255<index>` shorthand naming convention.
+//! It is 0 both on every non-zone-line node AND on a genuine zone-line node
+//! authored a different way — see [`zone_line_index`] below for why that other
+//! form's digits must NOT be parsed as an index.
 //!
 //! The `eqoxide` client consumer (`crates/eqoxide-core/src/region_map.rs`) used to
 //! gate zone-line detection on `zone_line_index != 0`, which incorrectly dropped
@@ -26,8 +28,10 @@
 //! exit is baked `special == 3, index == 0` and was permanently unreachable
 //! (`djhenry/eqoxide#683`). **That gate is gone as of client `main` `45a9658`**: a
 //! `special == 3` leaf is now a complete, actionable trigger on its own — hint or no
-//! hint — matching how the retail client actually behaves. `zone_line_index` really
-//! is non-load-bearing today; keep it that way.
+//! hint — matching how the retail client actually behaves. `zone_line_index` is no
+//! longer a trigger gate. It remains a destination-resolution hint: a nonzero value
+//! still selects a `zone_points` row, so a wrong value still crosses to a wrong zone
+//! — which is why the falsified rule below must stay unimplemented.
 //!
 //! ## Layout
 //! `"EQEMUWATER"` + u32 version + u32 node_count + node_count × node records.
@@ -60,9 +64,9 @@ fn region_type_for_zone_name(name: &str) -> i32 {
 /// Best-effort debug hint for `zone_points.number`, recovered ONLY from zones that
 /// use the `DRNTP00255<index>` shorthand naming convention.
 ///
-/// **This is a hint, not a load-bearing signal — and the consumer no longer treats
-/// it as one** (the `zone_line_index != 0` gate was removed client-side by
-/// `djhenry/eqoxide#683`, landed in client `main` `45a9658`; see the module doc). A
+/// **This is a hint, not a trigger gate — the consumer no longer requires it to
+/// recognize a zone line** (`djhenry/eqoxide#683`, client `main` `45a9658`; see the
+/// module doc), though it still uses a nonzero value to resolve the destination. A
 /// zone-line leaf is fully identified by its region type (`special == 3`, from
 /// [`region_type_for_zone_name`]) alone; the retail client resolves the real
 /// destination via `OP_ZoneChange(zoneID=0)` plus server-side nearest-XY, and never
