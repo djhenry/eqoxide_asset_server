@@ -1175,11 +1175,16 @@ fn anim_supplement(code: &str) -> Option<&'static str> {
     }
 }
 
-/// Fraction of the target skeleton's tracked bones a supplement clip must animate before we accept
-/// it. The supplement is keyed to one specific rig; dropped onto a same-code rig with different
+/// Fraction of the target skeleton's tracked bones the supplement's **best-covering clip** must
+/// animate before we accept the supplement. The test is per-ARCHIVE — one `max` over its clips —
+/// not per-clip: the question it answers is "is this supplement keyed to this rig at all?", and a
+/// supplement that is keyed to the rig is taken whole, including any legitimately sparse clip.
+///
+/// The supplement is keyed to one specific rig; dropped onto a same-code rig with different
 /// bone names it would match a handful of bones and produce a clip that twitches one limb while the
 /// rest of the body holds its bind pose. `globalske_chr2.s3d` covers 46/47 of the 47-bone rig
-/// (0.98) and 4/25 of the 25-bone one (0.16), so half separates them with room to spare.
+/// (0.98) and 4/25 of the 25-bone one (0.16), so half separates them with room to spare. Those two
+/// numbers are the only calibration this threshold has — `SKE` is the only model with a supplement.
 const SUPPLEMENT_MIN_BONE_COVERAGE: f32 = 0.5;
 
 /// Append the clips from this model's animation-only companion archive (see [`anim_supplement`])
@@ -1187,7 +1192,7 @@ const SUPPLEMENT_MIN_BONE_COVERAGE: f32 = 0.5;
 /// by the same base-track-name rule as the primary archive — no bone remapping.
 ///
 /// Silently does nothing when the model has no supplement, the file is absent/unreadable, the
-/// supplement yields no clips, or the clips cover too few of the skeleton's bones
+/// supplement yields no clips, or its best-covering clip animates too few of the skeleton's bones
 /// ([`SUPPLEMENT_MIN_BONE_COVERAGE`]). Codes already present in `anims` are not overwritten.
 fn merge_supplement_anims(input: &Path, skel: &Skel, anims: &mut Vec<Anim>) {
     let Some(code) = skel_model_code(skel) else { return };
