@@ -3243,11 +3243,61 @@ fn classic_bmp_yields_to_luclin(candidate_is_dds: bool, luclin_owns_name: bool) 
     !candidate_is_dds && luclin_owns_name
 }
 
+/// The Luclin-generation multi-model character archive.
+const LUCLIN_CHR_ARCHIVE: &str = "global6_chr.s3d";
+
+/// Lowercase model codes whose GLB this build bakes out of [`LUCLIN_CHR_ARCHIVE`],
+/// read straight off the bake table so the suppression below cannot drift away
+/// from what was actually baked: re-source a model back to a classic archive and
+/// its classic textures start being served again in the same edit.
+fn luclin_baked_model_codes() -> Vec<String> {
+    crate::build::COMMON_MODELS
+        .iter()
+        .filter(|(archive, _, _)| archive.eq_ignore_ascii_case(LUCLIN_CHR_ARCHIVE))
+        .filter_map(|(_, code, _)| code.map(|c| c.to_ascii_lowercase()))
+        .collect()
+}
+
+/// Whether an equip texture must be SKIPPED because it is CLASSIC art belonging to
+/// a model whose mesh we bake from the Luclin generation (issue #704).
+///
+/// [`classic_bmp_yields_to_luclin`] only fires on a name COLLISION — a classic
+/// `.bmp` that some Luclin `.dds` also ships. That is enough for the player races,
+/// whose two generations author the same texture set. It is not enough for `SKE`
+/// (Skeleton), whose GLB moved to the 47-bone Luclin rig in #704, because the two
+/// generations author *different* sets. Measured over the archives
+/// `build::equip_archives` scans:
+///  • classic `global_chr.s3d` ships 26 `ske*.bmp` — a base tier (`ske??00xx`) and
+///    an armour tier (`ske??01xx`), at 16×16–128×128;
+///  • Luclin `global6_chr.s3d` ships 7 `ske*.dds`, base tier ONLY, at 128×256–256×256.
+/// Only 4 names appear in both, so the collision rule leaves the other 22 classic
+/// textures served — laid out for the 25-bone mesh's UVs, on a mesh that is now the
+/// 47-bone one. And they are reachable: for a nonzero armour material `m` the client
+/// builds `ske{region}{m:02}{variant:02}`, which for every region that still parses
+/// lands exactly in the classic-only `ske??01xx` tier. Suppressing them makes that
+/// lookup MISS, and a miss falls back to the model's own baked texture — which is
+/// what the native client does with an armoured skeleton, no Luclin armour tier for
+/// this model being authored anywhere in the install.
+///
+/// Rule: **a model baked from the Luclin archive is served Luclin textures only.**
+/// Today this is `SKE` and `WOL`; `WOL` is a measured no-op (its 36 textures are all
+/// Luclin `.dds` — there is no classic wolf art to suppress).
+fn luclin_baked_model_rejects_classic(
+    stem: &str,
+    candidate_is_dds: bool,
+    luclin_baked_codes: &[String],
+) -> bool {
+    !candidate_is_dds && luclin_baked_codes.iter().any(|code| stem.starts_with(code.as_str()))
+}
+
 /// Extract every BMP/DDS texture from the given S3D archives, decode to RGBA,
 /// filter out ≤8×8 all-alpha "stub" placeholder textures, and re-encode to PNG.
 /// Returns `(name_lower_without_ext + ".png", png_bytes)` pairs, one per unique
-/// PNG name (first-wins insertion order). On a classic-vs-Luclin name collision
-/// the Luclin `.dds` wins — see [`classic_bmp_yields_to_luclin`] (issue #520).
+/// PNG name (first-wins insertion order). Two generation rules apply: on a
+/// classic-vs-Luclin name collision the Luclin `.dds` wins — see
+/// [`classic_bmp_yields_to_luclin`] (issue #520) — and classic art belonging to a
+/// model we bake from the Luclin archive is dropped outright, collision or not —
+/// see [`luclin_baked_model_rejects_classic`] (issue #704).
 pub(crate) fn extract_equip_textures(raw_dir: &Path, archives: &[&str]) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
     use std::collections::HashSet;
     // Pre-pass: every PNG stem that ships as a Luclin `.dds` anywhere in the set.
@@ -3266,6 +3316,9 @@ pub(crate) fn extract_equip_textures(raw_dir: &Path, archives: &[&str]) -> anyho
         }
     }
 
+    // #704: models baked from the Luclin archive are served Luclin textures only.
+    let luclin_baked_codes = luclin_baked_model_codes();
+
     let mut out: Vec<(String, Vec<u8>)> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for arch in archives {
@@ -3281,6 +3334,9 @@ pub(crate) fn extract_equip_textures(raw_dir: &Path, archives: &[&str]) -> anyho
             let stem = format!("{}.png", &lower[..lower.len()-4]);
             // #520: a classic .bmp yields to a same-named Luclin .dds.
             if classic_bmp_yields_to_luclin(is_dds, luclin_names.contains(&stem)) { continue; }
+            // #704: ...and classic art for a Luclin-baked model is skipped even when
+            // no Luclin texture of that name exists to collide with it.
+            if luclin_baked_model_rejects_classic(&stem, is_dds, &luclin_baked_codes) { continue; }
             if seen.contains(&stem) { continue; }
             let Ok(Some(bytes)) = pfs.get(&name) else { continue };
             let Ok(img) = image::load_from_memory_with_format(&bytes, fmt) else { continue };
@@ -3310,7 +3366,9 @@ mod equip_tex_tests {
         // Load-bearing: a classic .bmp whose name a Luclin .dds also ships is skipped.
         assert!(classic_bmp_yields_to_luclin(false, true),
             "classic .bmp must yield to a same-named Luclin .dds (#520)");
-        // A classic .bmp with NO Luclin twin is kept (classic-only art: skeletons, cloaks).
+        // A classic .bmp with NO Luclin twin is kept by THIS rule (classic-only art such as
+        // cloaks). #704's rule is what removes the subset of those that belong to a
+        // Luclin-baked model — see luclin_baked_model_rejects_classic.
         assert!(!classic_bmp_yields_to_luclin(false, false),
             "classic-only .bmp (no Luclin twin) must still be served");
         // A Luclin .dds is never suppressed by this rule, twin-name or not.
@@ -3353,6 +3411,76 @@ mod equip_tex_tests {
         // suppressed too, so nothing is served (client shows skin under the overlay).
         assert!(get(&served, "humch0001.png").is_none(),
             "#520: humch0001 (Luclin transparent stub) must not be served as the classic tunic");
+    }
+
+    /// eqoxide#704: a model baked from the Luclin archive is served Luclin textures
+    /// only. Mutation-check: dropping the `!candidate_is_dds` term makes the
+    /// `skeche0001` assertion RED; dropping the prefix term makes the `humch0101`
+    /// one RED; neutering the CALL SITE makes
+    /// `skeleton_is_served_luclin_textures_only` RED.
+    #[test]
+    fn classic_art_for_a_luclin_baked_model_is_rejected() {
+        let codes = luclin_baked_model_codes();
+        // Derived from the bake table, not a literal: SKE's GLB is baked from the Luclin
+        // archive (build.rs::skeleton_glb_baked_from_the_47_bone_rig pins that entry), so
+        // its code must appear here. Re-source it and this list changes with it.
+        assert!(codes.iter().any(|c| c == "ske"),
+            "skeleton is baked from {LUCLIN_CHR_ARCHIVE}, so `ske` must be a Luclin-baked code; got {codes:?}");
+        // Load-bearing: classic `.bmp` art for such a model is skipped even with no
+        // same-named Luclin texture to collide with (the classic-only `ske??01xx` tier).
+        assert!(luclin_baked_model_rejects_classic("skech0101.png", false, &codes),
+            "classic skeleton armour art must not be served for the Luclin-baked mesh");
+        // Classic art for a model we do NOT bake from the Luclin archive is untouched.
+        assert!(!luclin_baked_model_rejects_classic("humch0101.png", false, &codes),
+            "#704 must not touch models baked from their own generation's archive");
+        // The Luclin textures themselves are of course kept.
+        assert!(!luclin_baked_model_rejects_classic("skeche0001.png", true, &codes),
+            "the Luclin .dds for a Luclin-baked model must be served");
+    }
+
+    /// eqoxide#704 (integration, asset-gated): after the skeleton GLB moved to the
+    /// 47-bone Luclin rig, the served `ske*` texture set must be exactly the Luclin
+    /// one. The classic armour tier (`ske??01xx`) is what the client's swap actually
+    /// reaches for a nonzero armour material, and it is drawn for the 25-bone mesh's
+    /// UVs — serving it would paint 32×32 classic art on a 256×256-UV Luclin mesh.
+    /// Suppressed, the lookup misses and the client keeps the model's baked texture.
+    #[test]
+    #[ignore = "requires ~/eq_assets/everquest_rof2/global_chr.s3d + global6_chr.s3d"]
+    fn skeleton_is_served_luclin_textures_only() {
+        let home = std::env::var("HOME").unwrap();
+        let raw = std::path::PathBuf::from(format!("{home}/eq_assets/everquest_rof2"));
+        if !raw.join("global_chr.s3d").exists() || !raw.join(LUCLIN_CHR_ARCHIVE).exists() {
+            eprintln!("skip"); return;
+        }
+        // Reach control: the classic art this test asserts is ABSENT must really ship,
+        // otherwise the absence assertions pass for the wrong reason (a typo'd name).
+        let f = std::fs::File::open(raw.join("global_chr.s3d")).unwrap();
+        let mut pfs = libeq_pfs::PfsReader::open(f).unwrap();
+        let classic: Vec<String> = pfs.filenames().unwrap().iter().map(|n| n.to_lowercase()).collect();
+        for want in ["skech0101.bmp", "skelg0101.bmp", "skehe0101.bmp", "skeft0101.bmp"] {
+            assert!(classic.contains(&want.to_string()),
+                "reach control: classic global_chr.s3d must ship {want}");
+        }
+
+        let served = extract_equip_textures(&raw, &["global_chr.s3d", LUCLIN_CHR_ARCHIVE]).unwrap();
+        let ske: Vec<&String> = served.iter().map(|(n, _)| n).filter(|n| n.starts_with("ske")).collect();
+        let mut got: Vec<&str> = ske.iter().map(|s| s.as_str()).collect();
+        got.sort_unstable();
+        assert_eq!(got, ["skear0001.png", "skeche0001.png", "skecl0001.png", "skeft0001.png",
+                         "skehe0001.png", "skehn0001.png", "skelg0001.png"],
+            "#704: only the Luclin skeleton textures may be served");
+        // The base-tier legs texture IS reached (material 0 on a body region) and must be
+        // the 256×256 Luclin art, not classic's 32×32 — i.e. #520 still holds here.
+        let lg = served.iter().find(|(n, _)| n == "skelg0001.png").map(|(_, b)| b).unwrap();
+        let img = image::load_from_memory(lg).unwrap();
+        assert_eq!((img.width(), img.height()), (256, 256),
+            "skelg0001 must be the Luclin atlas the 47-bone mesh's UVs address");
+        // Classic-only art in general is untouched: scanning classic alone still serves
+        // plenty, just nothing for a Luclin-baked model.
+        let classic_only = extract_equip_textures(&raw, &["global_chr.s3d"]).unwrap();
+        assert!(classic_only.len() > 100, "control: classic archive still serves its own art");
+        assert!(!classic_only.iter().any(|(n, _)| n.starts_with("ske")),
+            "#704: classic skeleton art must not be served from any archive");
     }
 
     #[test]

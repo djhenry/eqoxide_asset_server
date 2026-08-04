@@ -22,7 +22,7 @@ use crate::zone::bake_zone;
 ///     set, for the client to map spawns onto). Named by raw archive code rather
 ///     than race name to avoid mislabeling (EQ's `hom`/`ham` half-elf/halfling
 ///     codes are easy to swap).
-const COMMON_MODELS: &[(&str, Option<&str>, &str)] = &[
+pub(crate) const COMMON_MODELS: &[(&str, Option<&str>, &str)] = &[
     // --- client render archetypes (match models::archetype_to_chr_s3d) ---
     ("globalhum_chr.s3d",     None,        "humanoid.glb"),  // human male
     ("globalelf_chr.s3d",     None,        "elf.glb"),       // wood elf
