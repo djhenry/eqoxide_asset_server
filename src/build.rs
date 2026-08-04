@@ -29,7 +29,12 @@ const COMMON_MODELS: &[(&str, Option<&str>, &str)] = &[
     ("globaldwf_chr.s3d",     None,        "dwarf.glb"),     // dwarf
     ("blackburrow_chr.s3d",   Some("GNN"), "gnoll.glb"),     // gnoll (GNN model; GNM/GNF are gnome)
     ("globalfroglok_chr.s3d", None,        "frog.glb"),      // froglok
-    ("global_chr.s3d",        Some("SKE"), "skeleton.glb"),
+    // Skeleton: the 47-bone SKE (`SKE_HS_DEF`) in global6_chr.s3d, NOT the 25-bone SKE in
+    // global_chr.s3d. Only the 47-bone rig has combat animation — its melee/hit/spell clips ship
+    // in the animation-only supplement `globalske_chr2.s3d`, whose bone tracks match the 47-bone
+    // rig 46/47 and the 25-bone rig 4/25. No archive anywhere carries C-family (combat) tracks for
+    // the 25-bone rig, so baking that one can never produce a swing (eqoxide#704).
+    ("global6_chr.s3d",       Some("SKE"), "skeleton.glb"),
     ("befallen_chr.s3d",      Some("ZOM"), "zombie.glb"),
     ("acrylia_chr.s3d",       Some("SPI"), "creature.glb"),  // spider
     ("global2_chr.s3d",       Some("BEA"), "bear.glb"),
@@ -589,6 +594,20 @@ mod tests {
         assert_eq!(*src, "blackburrow_chr.s3d", "gnoll source archive");
         assert_eq!(*code, Some("GNN"), "gnoll model code");
         assert_ne!(*src, "globalgnm_chr.s3d", "must not be the gnome placeholder");
+    }
+
+    #[test]
+    fn skeleton_glb_baked_from_the_47_bone_rig() {
+        // eqoxide#704: skeleton.glb must come from the 47-bone SKE in global6_chr.s3d, the only
+        // SKE rig any archive carries combat (C-family) animation for. The 25-bone SKE in
+        // global_chr.s3d has no combat clip anywhere, so baking it can never produce a melee swing.
+        let (src, code, _) = super::COMMON_MODELS
+            .iter()
+            .find(|(_, _, out)| *out == "skeleton.glb")
+            .expect("skeleton.glb entry present");
+        assert_eq!(*src, "global6_chr.s3d", "skeleton source archive (47-bone SKE_HS_DEF)");
+        assert_eq!(*code, Some("SKE"), "skeleton model code");
+        assert_ne!(*src, "global_chr.s3d", "must not be the combat-less 25-bone SKE");
     }
 
     #[test]

@@ -1157,6 +1157,85 @@ fn borrow_anims(input: &Path, target: &Skel) -> Vec<Anim> {
     Vec::new()
 }
 
+/// Animation-only companion archives: a `.s3d` that carries extra animation Tracks for a model
+/// whose skeleton + mesh live in a DIFFERENT archive. Maps a 3-char model code to that archive's
+/// filename (looked up next to the model's own archive).
+///
+/// `SKE` (skeleton) is the case that motivated this (eqoxide#704): `globalske_chr2.s3d` holds the
+/// melee-swing / damage-reaction / spell clips (`C05A/B`, `D02A/B`, `T05A/B`) and nothing else — no
+/// HierarchicalSpriteDef, no mesh. Its bone track names match the 47-bone `SKE_HS_DEF` skeleton in
+/// `global6_chr.s3d`; without this merge the baked skeleton has no combat clip at all.
+///
+/// This is NOT [`borrow_anims`]: that one *substitutes* a whole clip set for a model that has none.
+/// A supplement is *appended* to a model's own clips.
+fn anim_supplement(code: &str) -> Option<&'static str> {
+    match code.to_ascii_uppercase().as_str() {
+        "SKE" => Some("globalske_chr2.s3d"),
+        _ => None,
+    }
+}
+
+/// Fraction of the target skeleton's tracked bones a supplement clip must animate before we accept
+/// it. The supplement is keyed to one specific rig; dropped onto a same-code rig with different
+/// bone names it would match a handful of bones and produce a clip that twitches one limb while the
+/// rest of the body holds its bind pose. `globalske_chr2.s3d` covers 46/47 of the 47-bone rig
+/// (0.98) and 4/25 of the 25-bone one (0.16), so half separates them with room to spare.
+const SUPPLEMENT_MIN_BONE_COVERAGE: f32 = 0.5;
+
+/// Append the clips from this model's animation-only companion archive (see [`anim_supplement`])
+/// to `anims`, in place. Clips are read with the model's OWN already-built [`Skel`], so tracks bind
+/// by the same base-track-name rule as the primary archive — no bone remapping.
+///
+/// Silently does nothing when the model has no supplement, the file is absent/unreadable, the
+/// supplement yields no clips, or the clips cover too few of the skeleton's bones
+/// ([`SUPPLEMENT_MIN_BONE_COVERAGE`]). Codes already present in `anims` are not overwritten.
+fn merge_supplement_anims(input: &Path, skel: &Skel, anims: &mut Vec<Anim>) {
+    let Some(code) = skel_model_code(skel) else { return };
+    let Some(sup_file) = anim_supplement(&code) else { return };
+    let Some(sup_path) = input.parent().map(|p| p.join(sup_file)) else { return };
+
+    let Ok(file) = fs::File::open(&sup_path) else {
+        tracing::warn!("anim supplement {} missing — {code} will have no combat clips", sup_path.display());
+        return;
+    };
+    let Ok(mut pfs) = libeq_pfs::PfsReader::open(file) else { return };
+    let Ok(names) = pfs.filenames() else { return };
+
+    // Bones the primary skeleton actually has a base track for — the denominator for coverage
+    // (bones with no base track can never be animated by ANY archive, so they must not count
+    // against the supplement).
+    let tracked = skel.base_track.iter().filter(|b| !b.is_empty()).count();
+    if tracked == 0 { return }
+
+    let existing: std::collections::HashSet<String> = anims.iter().map(|a| a.code.clone()).collect();
+    for wld_name in names.iter().filter(|f| f.to_lowercase().ends_with(".wld")) {
+        let Ok(Some(bytes)) = pfs.get(wld_name) else { continue };
+        let Ok(doc) = WldDoc::parse(&bytes) else { continue };
+        let sup_anims = gather_anims(&doc, skel);
+        if sup_anims.is_empty() { continue }
+
+        let best = sup_anims.iter().map(|a| a.bones.iter().filter(|b| b.is_some()).count()).max().unwrap_or(0);
+        let coverage = best as f32 / tracked as f32;
+        if coverage < SUPPLEMENT_MIN_BONE_COVERAGE {
+            tracing::warn!(
+                "anim supplement {sup_file} matches only {best}/{tracked} of {code}'s bones \
+                 ({:.0}%) — skipping (wrong skeleton variant?)", coverage * 100.0
+            );
+            return;
+        }
+        let added: Vec<&str> = sup_anims.iter()
+            .map(|a| a.code.as_str())
+            .filter(|c| !existing.contains(*c))
+            .collect();
+        tracing::info!(
+            "{code} merged {} supplement clip(s) from {sup_file} ({best}/{tracked} bones): {}",
+            added.len(), added.join(",")
+        );
+        anims.extend(sup_anims.into_iter().filter(|a| !existing.contains(&a.code)));
+        return;
+    }
+}
+
 /// Map an EQ animation code (first 3 chars, e.g. "L01") to a semantic keyword so
 /// the renderer's name-substring clip selection ("idle"/"walk"/"run"/...) works.
 /// Standard EQ WLD locomotion/passive codes.
@@ -1323,6 +1402,9 @@ fn convert_s3d_to_glb_skinned(input: &Path, output: &Path, model_code: Option<&s
         if anims.is_empty() {
             anims = borrow_anims(input, &skel);
         }
+        // A few models keep some of their clips in an animation-only companion archive; append
+        // those to whatever the model's own archive supplied (eqoxide#704).
+        merge_supplement_anims(input, &skel, &mut anims);
 
         // When extracting one model from a multi-model archive, only its meshes
         // (name starts with the code) belong to this skeleton's skin_assignment bones.
@@ -3315,5 +3397,73 @@ mod equip_tex_tests {
         eprintln!("gnoll: L01_walk joints={walk}, L02_run joints={run}");
         assert!(run > 5, "sanity: run clip should animate many joints, got {run}");
         assert!(walk >= run, "walk clip must be repaired to animate the limbs (was 1 joint); got {walk} vs run {run}");
+    }
+
+    /// Read a baked GLB's animation clip names and per-clip animated-joint counts.
+    #[cfg(test)]
+    fn glb_clips(path: &std::path::Path) -> Vec<(String, usize)> {
+        let bytes = std::fs::read(path).unwrap();
+        let json_len = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) as usize;
+        let json: serde_json::Value = serde_json::from_slice(&bytes[20..20 + json_len]).unwrap();
+        json["animations"].as_array().cloned().unwrap_or_default().iter().map(|a| {
+            let joints = a["channels"].as_array().unwrap().iter()
+                .map(|c| c["target"]["node"].as_u64().unwrap())
+                .collect::<std::collections::BTreeSet<_>>().len();
+            (a["name"].as_str().unwrap_or("").to_string(), joints)
+        }).collect()
+    }
+
+    /// eqoxide#704: the served `skeleton.glb` had NO combat clip, so an attacking skeleton played
+    /// a stand-in idle instead of a melee swing. The skeleton's combat animation ships in the
+    /// animation-only archive `globalske_chr2.s3d` and is keyed to the 47-bone `SKE_HS_DEF`
+    /// skeleton in `global6_chr.s3d` — not the 25-bone `SKE` in `global_chr.s3d` the bake used.
+    ///
+    /// Asserts three things, so a regression in EITHER half reddens it:
+    ///   1. Baking SKE from `global6_chr.s3d` yields a `*_combat` clip (the supplement merge ran).
+    ///   2. That clip animates most of the rig (it bound to real bones, not a stray handful).
+    ///   3. CONTROL: the 25-bone `global_chr.s3d` SKE yields NO combat clip — i.e. the source
+    ///      swap is load-bearing and the merge alone would not have fixed it.
+    #[test]
+    #[ignore = "requires ~/eq_assets/everquest_rof2/{global6_chr,globalske_chr2,global}_chr.s3d"]
+    fn skeleton_combat_clip_comes_from_the_47_bone_rig_plus_supplement() {
+        let home = std::env::var("HOME").unwrap();
+        let raw = std::path::PathBuf::from(format!("{home}/eq_assets/everquest_rof2"));
+        let (rig47, sup, rig25) = (
+            raw.join("global6_chr.s3d"), raw.join("globalske_chr2.s3d"), raw.join("global_chr.s3d"),
+        );
+        for p in [&rig47, &sup, &rig25] {
+            if !p.exists() { eprintln!("skip: {} missing", p.display()); return; }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let out47 = dir.path().join("skeleton.glb");
+        s3d_to_glb_model(&rig47, &out47, true, Some("SKE")).unwrap();
+        let clips = glb_clips(&out47);
+        eprintln!("global6_chr SKE clips: {clips:?}");
+
+        let combat: Vec<&(String, usize)> =
+            clips.iter().filter(|(n, _)| n.contains("combat")).collect();
+        assert!(!combat.is_empty(),
+            "SKE from global6_chr.s3d + globalske_chr2.s3d must yield a 'combat' clip \
+             (the melee swing the renderer resolves for OP_Animation C05); got {clips:?}");
+
+        // The supplement is keyed to this exact rig, so its clips must bind broadly — a clip that
+        // animates a handful of bones would twitch one limb while the body held its bind pose.
+        let richest = clips.iter().map(|(_, j)| *j).max().unwrap_or(0);
+        for (name, joints) in &combat {
+            assert!(*joints * 2 >= richest,
+                "combat clip {name} animates only {joints} joints vs the model's richest clip's \
+                 {richest} — the supplement bound to the wrong skeleton");
+        }
+
+        // CONTROL: the 25-bone rig has no combat animation in ANY archive; the supplement's bone
+        // names match it 4/25, so the coverage guard must reject it rather than emit a broken clip.
+        let out25 = dir.path().join("skeleton_25.glb");
+        s3d_to_glb_model(&rig25, &out25, true, Some("SKE")).unwrap();
+        let clips25 = glb_clips(&out25);
+        eprintln!("global_chr SKE clips (control): {clips25:?}");
+        assert!(clips25.iter().all(|(n, _)| !n.contains("combat")),
+            "control: the 25-bone global_chr SKE must NOT gain a combat clip — the supplement \
+             matches only 4/25 of its bones, so any clip here would be garbage; got {clips25:?}");
     }
 }
