@@ -1157,6 +1157,90 @@ fn borrow_anims(input: &Path, target: &Skel) -> Vec<Anim> {
     Vec::new()
 }
 
+/// Animation-only companion archives: a `.s3d` that carries extra animation Tracks for a model
+/// whose skeleton + mesh live in a DIFFERENT archive. Maps a 3-char model code to that archive's
+/// filename (looked up next to the model's own archive).
+///
+/// `SKE` (skeleton) is the case that motivated this (eqoxide#704): `globalske_chr2.s3d` holds the
+/// melee-swing / damage-reaction / spell clips (`C05A/B`, `D02A/B`, `T05A/B`) and nothing else — no
+/// HierarchicalSpriteDef, no mesh. Its bone track names match the 47-bone `SKE_HS_DEF` skeleton in
+/// `global6_chr.s3d`; without this merge the baked skeleton has no combat clip at all.
+///
+/// This is NOT [`borrow_anims`]: that one *substitutes* a whole clip set for a model that has none.
+/// A supplement is *appended* to a model's own clips.
+fn anim_supplement(code: &str) -> Option<&'static str> {
+    match code.to_ascii_uppercase().as_str() {
+        "SKE" => Some("globalske_chr2.s3d"),
+        _ => None,
+    }
+}
+
+/// Fraction of the target skeleton's tracked bones the supplement's **best-covering clip** must
+/// animate before we accept the supplement. The test is per-ARCHIVE — one `max` over its clips —
+/// not per-clip: the question it answers is "is this supplement keyed to this rig at all?", and a
+/// supplement that is keyed to the rig is taken whole, including any legitimately sparse clip.
+///
+/// The supplement is keyed to one specific rig; dropped onto a same-code rig with different
+/// bone names it would match a handful of bones and produce a clip that twitches one limb while the
+/// rest of the body holds its bind pose. `globalske_chr2.s3d` covers 46/47 of the 47-bone rig
+/// (0.98) and 4/25 of the 25-bone one (0.16), so half separates them with room to spare. Those two
+/// numbers are the only calibration this threshold has — `SKE` is the only model with a supplement.
+const SUPPLEMENT_MIN_BONE_COVERAGE: f32 = 0.5;
+
+/// Append the clips from this model's animation-only companion archive (see [`anim_supplement`])
+/// to `anims`, in place. Clips are read with the model's OWN already-built [`Skel`], so tracks bind
+/// by the same base-track-name rule as the primary archive — no bone remapping.
+///
+/// Silently does nothing when the model has no supplement, the file is absent/unreadable, the
+/// supplement yields no clips, or its best-covering clip animates too few of the skeleton's bones
+/// ([`SUPPLEMENT_MIN_BONE_COVERAGE`]). Codes already present in `anims` are not overwritten.
+fn merge_supplement_anims(input: &Path, skel: &Skel, anims: &mut Vec<Anim>) {
+    let Some(code) = skel_model_code(skel) else { return };
+    let Some(sup_file) = anim_supplement(&code) else { return };
+    let Some(sup_path) = input.parent().map(|p| p.join(sup_file)) else { return };
+
+    let Ok(file) = fs::File::open(&sup_path) else {
+        tracing::warn!("anim supplement {} missing — {code} will have no combat clips", sup_path.display());
+        return;
+    };
+    let Ok(mut pfs) = libeq_pfs::PfsReader::open(file) else { return };
+    let Ok(names) = pfs.filenames() else { return };
+
+    // Bones the primary skeleton actually has a base track for — the denominator for coverage
+    // (bones with no base track can never be animated by ANY archive, so they must not count
+    // against the supplement).
+    let tracked = skel.base_track.iter().filter(|b| !b.is_empty()).count();
+    if tracked == 0 { return }
+
+    let existing: std::collections::HashSet<String> = anims.iter().map(|a| a.code.clone()).collect();
+    for wld_name in names.iter().filter(|f| f.to_lowercase().ends_with(".wld")) {
+        let Ok(Some(bytes)) = pfs.get(wld_name) else { continue };
+        let Ok(doc) = WldDoc::parse(&bytes) else { continue };
+        let sup_anims = gather_anims(&doc, skel);
+        if sup_anims.is_empty() { continue }
+
+        let best = sup_anims.iter().map(|a| a.bones.iter().filter(|b| b.is_some()).count()).max().unwrap_or(0);
+        let coverage = best as f32 / tracked as f32;
+        if coverage < SUPPLEMENT_MIN_BONE_COVERAGE {
+            tracing::warn!(
+                "anim supplement {sup_file} matches only {best}/{tracked} of {code}'s bones \
+                 ({:.0}%) — skipping (wrong skeleton variant?)", coverage * 100.0
+            );
+            return;
+        }
+        let added: Vec<&str> = sup_anims.iter()
+            .map(|a| a.code.as_str())
+            .filter(|c| !existing.contains(*c))
+            .collect();
+        tracing::info!(
+            "{code} merged {} supplement clip(s) from {sup_file} ({best}/{tracked} bones): {}",
+            added.len(), added.join(",")
+        );
+        anims.extend(sup_anims.into_iter().filter(|a| !existing.contains(&a.code)));
+        return;
+    }
+}
+
 /// Map an EQ animation code (first 3 chars, e.g. "L01") to a semantic keyword so
 /// the renderer's name-substring clip selection ("idle"/"walk"/"run"/...) works.
 /// Standard EQ WLD locomotion/passive codes.
@@ -1323,6 +1407,9 @@ fn convert_s3d_to_glb_skinned(input: &Path, output: &Path, model_code: Option<&s
         if anims.is_empty() {
             anims = borrow_anims(input, &skel);
         }
+        // A few models keep some of their clips in an animation-only companion archive; append
+        // those to whatever the model's own archive supplied (eqoxide#704).
+        merge_supplement_anims(input, &skel, &mut anims);
 
         // When extracting one model from a multi-model archive, only its meshes
         // (name starts with the code) belong to this skeleton's skin_assignment bones.
@@ -3156,11 +3243,61 @@ fn classic_bmp_yields_to_luclin(candidate_is_dds: bool, luclin_owns_name: bool) 
     !candidate_is_dds && luclin_owns_name
 }
 
+/// The Luclin-generation multi-model character archive.
+const LUCLIN_CHR_ARCHIVE: &str = "global6_chr.s3d";
+
+/// Lowercase model codes whose GLB this build bakes out of [`LUCLIN_CHR_ARCHIVE`],
+/// read straight off the bake table so the suppression below cannot drift away
+/// from what was actually baked: re-source a model back to a classic archive and
+/// its classic textures start being served again in the same edit.
+fn luclin_baked_model_codes() -> Vec<String> {
+    crate::build::COMMON_MODELS
+        .iter()
+        .filter(|(archive, _, _)| archive.eq_ignore_ascii_case(LUCLIN_CHR_ARCHIVE))
+        .filter_map(|(_, code, _)| code.map(|c| c.to_ascii_lowercase()))
+        .collect()
+}
+
+/// Whether an equip texture must be SKIPPED because it is CLASSIC art belonging to
+/// a model whose mesh we bake from the Luclin generation (issue #704).
+///
+/// [`classic_bmp_yields_to_luclin`] only fires on a name COLLISION — a classic
+/// `.bmp` that some Luclin `.dds` also ships. That is enough for the player races,
+/// whose two generations author the same texture set. It is not enough for `SKE`
+/// (Skeleton), whose GLB moved to the 47-bone Luclin rig in #704, because the two
+/// generations author *different* sets. Measured over the archives
+/// `build::equip_archives` scans:
+///  • classic `global_chr.s3d` ships 26 `ske*.bmp` — a base tier (`ske??00xx`) and
+///    an armour tier (`ske??01xx`), at 16×16–128×128;
+///  • Luclin `global6_chr.s3d` ships 7 `ske*.dds`, base tier ONLY, at 128×256–256×256.
+/// Only 4 names appear in both, so the collision rule leaves the other 22 classic
+/// textures served — laid out for the 25-bone mesh's UVs, on a mesh that is now the
+/// 47-bone one. And they are reachable: for a nonzero armour material `m` the client
+/// builds `ske{region}{m:02}{variant:02}`, which for every region that still parses
+/// lands exactly in the classic-only `ske??01xx` tier. Suppressing them makes that
+/// lookup MISS, and a miss falls back to the model's own baked texture — which is
+/// what the native client does with an armoured skeleton, no Luclin armour tier for
+/// this model being authored anywhere in the install.
+///
+/// Rule: **a model baked from the Luclin archive is served Luclin textures only.**
+/// Today this is `SKE` and `WOL`; `WOL` is a measured no-op (its 36 textures are all
+/// Luclin `.dds` — there is no classic wolf art to suppress).
+fn luclin_baked_model_rejects_classic(
+    stem: &str,
+    candidate_is_dds: bool,
+    luclin_baked_codes: &[String],
+) -> bool {
+    !candidate_is_dds && luclin_baked_codes.iter().any(|code| stem.starts_with(code.as_str()))
+}
+
 /// Extract every BMP/DDS texture from the given S3D archives, decode to RGBA,
 /// filter out ≤8×8 all-alpha "stub" placeholder textures, and re-encode to PNG.
 /// Returns `(name_lower_without_ext + ".png", png_bytes)` pairs, one per unique
-/// PNG name (first-wins insertion order). On a classic-vs-Luclin name collision
-/// the Luclin `.dds` wins — see [`classic_bmp_yields_to_luclin`] (issue #520).
+/// PNG name (first-wins insertion order). Two generation rules apply: on a
+/// classic-vs-Luclin name collision the Luclin `.dds` wins — see
+/// [`classic_bmp_yields_to_luclin`] (issue #520) — and classic art belonging to a
+/// model we bake from the Luclin archive is dropped outright, collision or not —
+/// see [`luclin_baked_model_rejects_classic`] (issue #704).
 pub(crate) fn extract_equip_textures(raw_dir: &Path, archives: &[&str]) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
     use std::collections::HashSet;
     // Pre-pass: every PNG stem that ships as a Luclin `.dds` anywhere in the set.
@@ -3179,6 +3316,9 @@ pub(crate) fn extract_equip_textures(raw_dir: &Path, archives: &[&str]) -> anyho
         }
     }
 
+    // #704: models baked from the Luclin archive are served Luclin textures only.
+    let luclin_baked_codes = luclin_baked_model_codes();
+
     let mut out: Vec<(String, Vec<u8>)> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for arch in archives {
@@ -3194,6 +3334,9 @@ pub(crate) fn extract_equip_textures(raw_dir: &Path, archives: &[&str]) -> anyho
             let stem = format!("{}.png", &lower[..lower.len()-4]);
             // #520: a classic .bmp yields to a same-named Luclin .dds.
             if classic_bmp_yields_to_luclin(is_dds, luclin_names.contains(&stem)) { continue; }
+            // #704: ...and classic art for a Luclin-baked model is skipped even when
+            // no Luclin texture of that name exists to collide with it.
+            if luclin_baked_model_rejects_classic(&stem, is_dds, &luclin_baked_codes) { continue; }
             if seen.contains(&stem) { continue; }
             let Ok(Some(bytes)) = pfs.get(&name) else { continue };
             let Ok(img) = image::load_from_memory_with_format(&bytes, fmt) else { continue };
@@ -3223,7 +3366,9 @@ mod equip_tex_tests {
         // Load-bearing: a classic .bmp whose name a Luclin .dds also ships is skipped.
         assert!(classic_bmp_yields_to_luclin(false, true),
             "classic .bmp must yield to a same-named Luclin .dds (#520)");
-        // A classic .bmp with NO Luclin twin is kept (classic-only art: skeletons, cloaks).
+        // A classic .bmp with NO Luclin twin is kept by THIS rule (classic-only art such as
+        // cloaks). #704's rule is what removes the subset of those that belong to a
+        // Luclin-baked model — see luclin_baked_model_rejects_classic.
         assert!(!classic_bmp_yields_to_luclin(false, false),
             "classic-only .bmp (no Luclin twin) must still be served");
         // A Luclin .dds is never suppressed by this rule, twin-name or not.
@@ -3266,6 +3411,76 @@ mod equip_tex_tests {
         // suppressed too, so nothing is served (client shows skin under the overlay).
         assert!(get(&served, "humch0001.png").is_none(),
             "#520: humch0001 (Luclin transparent stub) must not be served as the classic tunic");
+    }
+
+    /// eqoxide#704: a model baked from the Luclin archive is served Luclin textures
+    /// only. Mutation-check: dropping the `!candidate_is_dds` term makes the
+    /// `skeche0001` assertion RED; dropping the prefix term makes the `humch0101`
+    /// one RED; neutering the CALL SITE makes
+    /// `skeleton_is_served_luclin_textures_only` RED.
+    #[test]
+    fn classic_art_for_a_luclin_baked_model_is_rejected() {
+        let codes = luclin_baked_model_codes();
+        // Derived from the bake table, not a literal: SKE's GLB is baked from the Luclin
+        // archive (build.rs::skeleton_glb_baked_from_the_47_bone_rig pins that entry), so
+        // its code must appear here. Re-source it and this list changes with it.
+        assert!(codes.iter().any(|c| c == "ske"),
+            "skeleton is baked from {LUCLIN_CHR_ARCHIVE}, so `ske` must be a Luclin-baked code; got {codes:?}");
+        // Load-bearing: classic `.bmp` art for such a model is skipped even with no
+        // same-named Luclin texture to collide with (the classic-only `ske??01xx` tier).
+        assert!(luclin_baked_model_rejects_classic("skech0101.png", false, &codes),
+            "classic skeleton armour art must not be served for the Luclin-baked mesh");
+        // Classic art for a model we do NOT bake from the Luclin archive is untouched.
+        assert!(!luclin_baked_model_rejects_classic("humch0101.png", false, &codes),
+            "#704 must not touch models baked from their own generation's archive");
+        // The Luclin textures themselves are of course kept.
+        assert!(!luclin_baked_model_rejects_classic("skeche0001.png", true, &codes),
+            "the Luclin .dds for a Luclin-baked model must be served");
+    }
+
+    /// eqoxide#704 (integration, asset-gated): after the skeleton GLB moved to the
+    /// 47-bone Luclin rig, the served `ske*` texture set must be exactly the Luclin
+    /// one. The classic armour tier (`ske??01xx`) is what the client's swap actually
+    /// reaches for a nonzero armour material, and it is drawn for the 25-bone mesh's
+    /// UVs — serving it would paint 32×32 classic art on a 256×256-UV Luclin mesh.
+    /// Suppressed, the lookup misses and the client keeps the model's baked texture.
+    #[test]
+    #[ignore = "requires ~/eq_assets/everquest_rof2/global_chr.s3d + global6_chr.s3d"]
+    fn skeleton_is_served_luclin_textures_only() {
+        let home = std::env::var("HOME").unwrap();
+        let raw = std::path::PathBuf::from(format!("{home}/eq_assets/everquest_rof2"));
+        if !raw.join("global_chr.s3d").exists() || !raw.join(LUCLIN_CHR_ARCHIVE).exists() {
+            eprintln!("skip"); return;
+        }
+        // Reach control: the classic art this test asserts is ABSENT must really ship,
+        // otherwise the absence assertions pass for the wrong reason (a typo'd name).
+        let f = std::fs::File::open(raw.join("global_chr.s3d")).unwrap();
+        let mut pfs = libeq_pfs::PfsReader::open(f).unwrap();
+        let classic: Vec<String> = pfs.filenames().unwrap().iter().map(|n| n.to_lowercase()).collect();
+        for want in ["skech0101.bmp", "skelg0101.bmp", "skehe0101.bmp", "skeft0101.bmp"] {
+            assert!(classic.contains(&want.to_string()),
+                "reach control: classic global_chr.s3d must ship {want}");
+        }
+
+        let served = extract_equip_textures(&raw, &["global_chr.s3d", LUCLIN_CHR_ARCHIVE]).unwrap();
+        let ske: Vec<&String> = served.iter().map(|(n, _)| n).filter(|n| n.starts_with("ske")).collect();
+        let mut got: Vec<&str> = ske.iter().map(|s| s.as_str()).collect();
+        got.sort_unstable();
+        assert_eq!(got, ["skear0001.png", "skeche0001.png", "skecl0001.png", "skeft0001.png",
+                         "skehe0001.png", "skehn0001.png", "skelg0001.png"],
+            "#704: only the Luclin skeleton textures may be served");
+        // The base-tier legs texture IS reached (material 0 on a body region) and must be
+        // the 256×256 Luclin art, not classic's 32×32 — i.e. #520 still holds here.
+        let lg = served.iter().find(|(n, _)| n == "skelg0001.png").map(|(_, b)| b).unwrap();
+        let img = image::load_from_memory(lg).unwrap();
+        assert_eq!((img.width(), img.height()), (256, 256),
+            "skelg0001 must be the Luclin atlas the 47-bone mesh's UVs address");
+        // Classic-only art in general is untouched: scanning classic alone still serves
+        // plenty, just nothing for a Luclin-baked model.
+        let classic_only = extract_equip_textures(&raw, &["global_chr.s3d"]).unwrap();
+        assert!(classic_only.len() > 100, "control: classic archive still serves its own art");
+        assert!(!classic_only.iter().any(|(n, _)| n.starts_with("ske")),
+            "#704: classic skeleton art must not be served from any archive");
     }
 
     #[test]
@@ -3315,5 +3530,73 @@ mod equip_tex_tests {
         eprintln!("gnoll: L01_walk joints={walk}, L02_run joints={run}");
         assert!(run > 5, "sanity: run clip should animate many joints, got {run}");
         assert!(walk >= run, "walk clip must be repaired to animate the limbs (was 1 joint); got {walk} vs run {run}");
+    }
+
+    /// Read a baked GLB's animation clip names and per-clip animated-joint counts.
+    #[cfg(test)]
+    fn glb_clips(path: &std::path::Path) -> Vec<(String, usize)> {
+        let bytes = std::fs::read(path).unwrap();
+        let json_len = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) as usize;
+        let json: serde_json::Value = serde_json::from_slice(&bytes[20..20 + json_len]).unwrap();
+        json["animations"].as_array().cloned().unwrap_or_default().iter().map(|a| {
+            let joints = a["channels"].as_array().unwrap().iter()
+                .map(|c| c["target"]["node"].as_u64().unwrap())
+                .collect::<std::collections::BTreeSet<_>>().len();
+            (a["name"].as_str().unwrap_or("").to_string(), joints)
+        }).collect()
+    }
+
+    /// eqoxide#704: the served `skeleton.glb` had NO combat clip, so an attacking skeleton played
+    /// a stand-in idle instead of a melee swing. The skeleton's combat animation ships in the
+    /// animation-only archive `globalske_chr2.s3d` and is keyed to the 47-bone `SKE_HS_DEF`
+    /// skeleton in `global6_chr.s3d` — not the 25-bone `SKE` in `global_chr.s3d` the bake used.
+    ///
+    /// Asserts three things, so a regression in EITHER half reddens it:
+    ///   1. Baking SKE from `global6_chr.s3d` yields a `*_combat` clip (the supplement merge ran).
+    ///   2. That clip animates most of the rig (it bound to real bones, not a stray handful).
+    ///   3. CONTROL: the 25-bone `global_chr.s3d` SKE yields NO combat clip — i.e. the source
+    ///      swap is load-bearing and the merge alone would not have fixed it.
+    #[test]
+    #[ignore = "requires ~/eq_assets/everquest_rof2/{global6_chr,globalske_chr2,global}_chr.s3d"]
+    fn skeleton_combat_clip_comes_from_the_47_bone_rig_plus_supplement() {
+        let home = std::env::var("HOME").unwrap();
+        let raw = std::path::PathBuf::from(format!("{home}/eq_assets/everquest_rof2"));
+        let (rig47, sup, rig25) = (
+            raw.join("global6_chr.s3d"), raw.join("globalske_chr2.s3d"), raw.join("global_chr.s3d"),
+        );
+        for p in [&rig47, &sup, &rig25] {
+            if !p.exists() { eprintln!("skip: {} missing", p.display()); return; }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let out47 = dir.path().join("skeleton.glb");
+        s3d_to_glb_model(&rig47, &out47, true, Some("SKE")).unwrap();
+        let clips = glb_clips(&out47);
+        eprintln!("global6_chr SKE clips: {clips:?}");
+
+        let combat: Vec<&(String, usize)> =
+            clips.iter().filter(|(n, _)| n.contains("combat")).collect();
+        assert!(!combat.is_empty(),
+            "SKE from global6_chr.s3d + globalske_chr2.s3d must yield a 'combat' clip \
+             (the melee swing the renderer resolves for OP_Animation C05); got {clips:?}");
+
+        // The supplement is keyed to this exact rig, so its clips must bind broadly — a clip that
+        // animates a handful of bones would twitch one limb while the body held its bind pose.
+        let richest = clips.iter().map(|(_, j)| *j).max().unwrap_or(0);
+        for (name, joints) in &combat {
+            assert!(*joints * 2 >= richest,
+                "combat clip {name} animates only {joints} joints vs the model's richest clip's \
+                 {richest} — the supplement bound to the wrong skeleton");
+        }
+
+        // CONTROL: the 25-bone rig has no combat animation in ANY archive; the supplement's bone
+        // names match it 4/25, so the coverage guard must reject it rather than emit a broken clip.
+        let out25 = dir.path().join("skeleton_25.glb");
+        s3d_to_glb_model(&rig25, &out25, true, Some("SKE")).unwrap();
+        let clips25 = glb_clips(&out25);
+        eprintln!("global_chr SKE clips (control): {clips25:?}");
+        assert!(clips25.iter().all(|(n, _)| !n.contains("combat")),
+            "control: the 25-bone global_chr SKE must NOT gain a combat clip — the supplement \
+             matches only 4/25 of its bones, so any clip here would be garbage; got {clips25:?}");
     }
 }
