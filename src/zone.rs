@@ -93,8 +93,11 @@ pub fn placement_matrix(center: (f32, f32, f32), rot_z_deg: f32, scale: f32) -> 
 /// carry no placement transform — placements are applied per-node via matrices.
 ///
 /// `main_s3d`, when given, is consulted FIRST by the texture-container sniff (V
-/// convention), matching [`bake_zone`]'s embed order `[main, obj]` — a texture
-/// present only in the sibling main archive still gets the right V treatment.
+/// convention), so a texture present only in the sibling main archive still gets the
+/// right V treatment. Note this is not [`bake_zone`]'s embed order: `resolve_texture`
+/// takes object-only names from the object archive first. The two agree on every RoF2
+/// zone (each shadowed name is DDS in both archives), but a corpus that shadowed a BMP
+/// with a DDS under one name would sniff one container and embed the other.
 /// Pass `None` when textures will be embedded from `obj_s3d` alone (e.g.
 /// [`bake_object_models_glb`]).
 pub fn load_object_models(
@@ -321,8 +324,9 @@ pub(crate) fn zone_meshes_from_mesh(mesh: &libeq_wld::Mesh<'_>) -> Vec<ZoneMesh>
 /// by the character converter does not apply here.
 ///
 /// `obj_s3d`, when given, is consulted (after `main_s3d`) by the texture-container
-/// sniff, matching [`bake_zone`]'s embed order `[main, obj]` — a terrain texture
-/// stored only in the sibling object archive still gets the right V treatment.
+/// sniff, so a terrain texture stored only in the sibling object archive still gets the
+/// right V treatment. See [`bake_zone`]'s `resolve_texture` for why this order is not
+/// the embed order.
 fn load_terrain(main_s3d: &Path, obj_s3d: Option<&Path>) -> anyhow::Result<Vec<ZoneMesh>> {
     let file = std::fs::File::open(main_s3d).with_context(|| format!("open {}", main_s3d.display()))?;
     let mut pfs = libeq_pfs::PfsReader::open(file)
@@ -432,6 +436,22 @@ fn load_collision_geometry(main_s3d: &Path) -> anyhow::Result<(Vec<[f32; 3]>, Ve
     Ok((positions, indices))
 }
 
+/// Every texture name the terrain references, lowercased, for `resolve_texture`.
+///
+/// Animated frames count: a material's frames must all come from the same archive as
+/// frame 0, or one animation cycles through images of different sizes (qeynos' smoke
+/// plume ships 256x256 frames in the main archive and 128x256 in the object archive).
+fn terrain_texture_names(meshes: &[ZoneMesh]) -> HashSet<String> {
+    meshes
+        .iter()
+        .flat_map(|m| {
+            let frames = m.anim.iter().flat_map(|(_, f)| f.iter());
+            m.texture_name.iter().chain(frames)
+        })
+        .map(|n| n.to_lowercase())
+        .collect()
+}
+
 /// PNG bytes for `name` (already lowercased), searching `pfs_list` in precedence order.
 ///
 /// A zone's main `.s3d` and its `_obj.s3d` can hold different files under one name, and
@@ -486,11 +506,7 @@ pub fn bake_zone(main_s3d: &Path, obj_s3d: Option<&Path>, output_glb: &Path) -> 
     let terrain = load_terrain(main_s3d, obj_s3d)?;
     let welded_terrain: Vec<ZoneMesh> = terrain.iter().map(weld).collect();
 
-    // Drives archive precedence in `resolve_texture`.
-    let terrain_tex_names: HashSet<String> = welded_terrain
-        .iter()
-        .filter_map(|m| m.texture_name.as_ref().map(|n| n.to_lowercase()))
-        .collect();
+    let terrain_tex_names = terrain_texture_names(&welded_terrain);
 
     // Resolve a ZoneMesh's texture to a glTF material index (decoding+naming once).
     let mut material_for = |m: &ZoneMesh,
@@ -1147,5 +1163,30 @@ mod texture_precedence_tests {
         let terrain: HashSet<String> = ["ground.bmp".to_string()].into_iter().collect();
         let png = resolve_texture(&mut pfs, &terrain, "bpine.bmp", AlphaMode::Masked).unwrap();
         assert!(transparent_texels(&png) > 0);
+    }
+    /// A terrain material's animated frames must all land in the set. Otherwise frame 0
+    /// (the mesh's `texture_name`) resolves main-first while frames 1..N resolve
+    /// object-first, and one animation cycles through images from two archives — in
+    /// qeynos that means a smoke plume alternating 256x256 and 128x256 frames.
+    #[test]
+    fn terrain_names_include_animated_frames() {
+        let mesh = ZoneMesh {
+            texture_name: Some("SMKE1.BMP".to_string()),
+            anim: Some((100, vec!["smke1.bmp".into(), "SMKE2.bmp".into(), "smke3.bmp".into()])),
+            ..Default::default()
+        };
+        let names = terrain_texture_names(std::slice::from_ref(&mesh));
+        for n in ["smke1.bmp", "smke2.bmp", "smke3.bmp"] {
+            assert!(names.contains(n), "{n} missing from the set; it would resolve object-first");
+        }
+    }
+
+    /// A static terrain material contributes just its own name.
+    #[test]
+    fn terrain_names_cover_static_materials() {
+        let mesh = ZoneMesh { texture_name: Some("Ground.BMP".into()), ..Default::default() };
+        let names = terrain_texture_names(std::slice::from_ref(&mesh));
+        assert_eq!(names.len(), 1);
+        assert!(names.contains("ground.bmp"));
     }
 }
