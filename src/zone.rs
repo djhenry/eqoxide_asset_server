@@ -459,6 +459,28 @@ pub fn bake_zone(main_s3d: &Path, obj_s3d: Option<&Path>, output_glb: &Path) -> 
     let mut tex_map: HashMap<String, usize> = HashMap::new(); // tex name -> texture idx
     let mut mat_map: HashMap<String, usize> = HashMap::new(); // tex name -> material idx
 
+    // Terrain comes first because its texture names decide archive precedence below.
+    let terrain = load_terrain(main_s3d, obj_s3d)?;
+    let welded_terrain: Vec<ZoneMesh> = terrain.iter().map(weld).collect();
+
+    // Texture names the TERRAIN references. A zone's main `.s3d` and its sibling
+    // `_obj.s3d` often ship same-named but DIFFERENT files, and the main archive
+    // sometimes keeps a stale copy of a texture only the object WLD still uses:
+    // qeytoqrg.s3d has opaque DXT1 `treea.bmp`/`tree70.bmp` that nothing in the zone
+    // WLD references, while qeytoqrg_obj.s3d has the alpha-keyed DXT5 versions the
+    // tree objects actually want. Searching [main, obj] blindly picked the stale
+    // opaque copy, so the trees baked as MASK materials with a fully opaque texture
+    // and rendered as solid green blocks (eqoxide#688).
+    //
+    // So resolve a texture from the OBJECT archive first unless the terrain also
+    // references that name. Keeping main-first for terrain names matters: each
+    // distinct name must map to exactly ONE glTF image, because the client links
+    // meshes to textures by image name — two same-named images would be ambiguous.
+    let terrain_tex_names: std::collections::HashSet<String> = welded_terrain
+        .iter()
+        .filter_map(|m| m.texture_name.as_ref().map(|n| n.to_lowercase()))
+        .collect();
+
     // Resolve a ZoneMesh's texture to a glTF material index (decoding+naming once).
     let mut material_for = |m: &ZoneMesh,
                             materials: &mut Vec<MaterialData>,
@@ -487,7 +509,16 @@ pub fn bake_zone(main_s3d: &Path, obj_s3d: Option<&Path>, output_glb: &Path) -> 
             if let Some(&t) = tex_map.get(&cache_key) {
                 return Some(t);
             }
-            let png = pfs_list.iter_mut().find_map(|pfs| load_texture_from_archive(pfs, &lower, alpha_mode));
+            // Object-only texture names resolve from the object archive first (see
+            // `terrain_tex_names`); terrain names keep the historical main-first order.
+            let order: Vec<usize> = if terrain_tex_names.contains(&lower) {
+                (0..pfs_list.len()).collect()
+            } else {
+                (0..pfs_list.len()).rev().collect()
+            };
+            let png = order
+                .into_iter()
+                .find_map(|i| load_texture_from_archive(&mut pfs_list[i], &lower, alpha_mode));
             png.map(|png_bytes| {
                 let t = textures.len();
                 textures.push(TextureData { name: lower, png_bytes });
@@ -559,8 +590,7 @@ pub fn bake_zone(main_s3d: &Path, obj_s3d: Option<&Path>, output_glb: &Path) -> 
     let mut nodes: Vec<NodeDef> = Vec::new();
 
     // 1. Terrain: weld each mesh, one mesh per group, identity node.
-    let terrain = load_terrain(main_s3d, obj_s3d)?;
-    let welded_terrain: Vec<ZoneMesh> = terrain.iter().map(weld).collect();
+    //    (loaded above — its texture names pin archive precedence.)
     if let Some(md) = build_mesh(
         "terrain".to_string(), &welded_terrain,
         &mut materials, &mut textures, &mut tex_map, &mut mat_map, &mut pfs_list, &mut material_for,
