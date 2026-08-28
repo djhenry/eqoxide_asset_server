@@ -432,6 +432,30 @@ fn load_collision_geometry(main_s3d: &Path) -> anyhow::Result<(Vec<[f32; 3]>, Ve
     Ok((positions, indices))
 }
 
+/// PNG bytes for `name` (already lowercased), searching `pfs_list` in precedence order.
+///
+/// A zone's main `.s3d` and its `_obj.s3d` can hold different files under one name, and
+/// the main copy may be stale: qeytoqrg.s3d's treea.bmp is opaque DXT1 that no zone mesh
+/// references, while qeytoqrg_obj.s3d has the alpha-keyed DXT5 the tree objects use
+/// (eqoxide#688). So a name the terrain does not reference resolves from the object
+/// archive first. Terrain names stay main-first so each name maps to one glTF image; the
+/// client links meshes to textures by name.
+fn resolve_texture(
+    pfs_list: &mut [libeq_pfs::PfsReader<std::fs::File>],
+    terrain_tex_names: &HashSet<String>,
+    name: &str,
+    alpha_mode: crate::convert::AlphaMode,
+) -> Option<Vec<u8>> {
+    let order: Vec<usize> = if terrain_tex_names.contains(name) {
+        (0..pfs_list.len()).collect()
+    } else {
+        (0..pfs_list.len()).rev().collect()
+    };
+    order
+        .into_iter()
+        .find_map(|i| crate::convert::load_texture_from_archive(&mut pfs_list[i], name, alpha_mode))
+}
+
 /// Bake a zone into a single glb: terrain from `main_s3d` plus placed objects
 /// from `obj_s3d` (when present). Positions stay in raw libeq space (no
 /// re-orientation). Each distinct EQ texture name becomes one named glTF
@@ -439,7 +463,7 @@ fn load_collision_geometry(main_s3d: &Path) -> anyhow::Result<(Vec<[f32; 3]>, Ve
 /// `convert::write_glb` and `convert::load_texture_from_archive`.
 pub fn bake_zone(main_s3d: &Path, obj_s3d: Option<&Path>, output_glb: &Path) -> anyhow::Result<()> {
     use crate::convert::{
-        load_texture_from_archive, write_glb_instanced, MaterialData, MeshData, NodeDef,
+        write_glb_instanced, MaterialData, MeshData, NodeDef,
         PrimitiveData, TextureData,
     };
 
@@ -462,11 +486,7 @@ pub fn bake_zone(main_s3d: &Path, obj_s3d: Option<&Path>, output_glb: &Path) -> 
     let terrain = load_terrain(main_s3d, obj_s3d)?;
     let welded_terrain: Vec<ZoneMesh> = terrain.iter().map(weld).collect();
 
-    // Both archives can hold different files under one name, and the main copy may be
-    // stale: qeytoqrg.s3d's treea.bmp is opaque DXT1 that no zone mesh references,
-    // while qeytoqrg_obj.s3d has the alpha-keyed DXT5 the tree objects use
-    // (eqoxide#688). Object names resolve obj-first. Terrain names stay main-first so
-    // each name maps to one glTF image; the client links meshes to textures by name.
+    // Drives archive precedence in `resolve_texture`.
     let terrain_tex_names: HashSet<String> = welded_terrain
         .iter()
         .filter_map(|m| m.texture_name.as_ref().map(|n| n.to_lowercase()))
@@ -500,15 +520,7 @@ pub fn bake_zone(main_s3d: &Path, obj_s3d: Option<&Path>, output_glb: &Path) -> 
             if let Some(&t) = tex_map.get(&cache_key) {
                 return Some(t);
             }
-            // Ordering rule: see `terrain_tex_names`.
-            let order: Vec<usize> = if terrain_tex_names.contains(&lower) {
-                (0..pfs_list.len()).collect()
-            } else {
-                (0..pfs_list.len()).rev().collect()
-            };
-            let png = order
-                .into_iter()
-                .find_map(|i| load_texture_from_archive(&mut pfs_list[i], &lower, alpha_mode));
+            let png = resolve_texture(pfs_list, &terrain_tex_names, &lower, alpha_mode);
             png.map(|png_bytes| {
                 let t = textures.len();
                 textures.push(TextureData { name: lower, png_bytes });
@@ -1020,5 +1032,120 @@ mod tests {
         let off_origin = placements.iter()
             .any(|(_, m)| m[3][0].abs() > 1.0 || m[3][2].abs() > 1.0);
         assert!(off_origin, "placements should not all be at the origin");
+    }
+}
+
+#[cfg(test)]
+mod texture_precedence_tests {
+    use super::*;
+    use crate::convert::AlphaMode;
+    use std::io::Cursor;
+
+    /// Minimal single-mip DDS wrapper around already-encoded blocks.
+    fn dds(fourcc: &[u8; 4], w: u32, h: u32, blocks: &[u8]) -> Vec<u8> {
+        let mut d = Vec::with_capacity(128 + blocks.len());
+        d.extend_from_slice(b"DDS ");
+        d.extend_from_slice(&124u32.to_le_bytes()); // dwSize
+        d.extend_from_slice(&0x0008_1007u32.to_le_bytes()); // CAPS|HEIGHT|WIDTH|PIXELFORMAT|LINEARSIZE
+        d.extend_from_slice(&h.to_le_bytes());
+        d.extend_from_slice(&w.to_le_bytes());
+        d.extend_from_slice(&(blocks.len() as u32).to_le_bytes());
+        d.extend_from_slice(&[0u8; 8]); // depth, mipmap count
+        d.extend_from_slice(&[0u8; 44]); // reserved1[11]
+        d.extend_from_slice(&32u32.to_le_bytes()); // ddspf.dwSize
+        d.extend_from_slice(&4u32.to_le_bytes()); // ddspf.dwFlags = FOURCC
+        d.extend_from_slice(fourcc);
+        d.extend_from_slice(&[0u8; 20]); // bit count + channel masks
+        d.extend_from_slice(&0x1000u32.to_le_bytes()); // dwCaps = TEXTURE
+        d.extend_from_slice(&[0u8; 16]); // caps2..4, reserved2
+        d.extend_from_slice(blocks);
+        d
+    }
+
+    /// 16x16 DXT1, every texel the same opaque green (`c0 > c1`, all indices 0).
+    fn opaque_dxt1() -> Vec<u8> {
+        let block = [0xE0, 0x07, 0x01, 0x00, 0, 0, 0, 0];
+        dds(b"DXT1", 16, 16, &block.repeat(16))
+    }
+
+    /// 16x16 DXT5, half the texels alpha 0 — a foliage cutout in miniature.
+    fn keyed_dxt5() -> Vec<u8> {
+        let mut bits: u64 = 0;
+        for t in 8..16 {
+            bits |= 1 << (3 * t); // alpha index 1 => a1 => 0
+        }
+        let mut block = vec![255u8, 0]; // a0 = 255, a1 = 0
+        block.extend_from_slice(&bits.to_le_bytes()[..6]);
+        block.extend_from_slice(&[0xE0, 0x07, 0x01, 0x00, 0, 0, 0, 0]);
+        dds(b"DXT5", 16, 16, &block.repeat(16))
+    }
+
+    fn write_s3d(path: &Path, files: &[(&str, Vec<u8>)]) {
+        let mut w = libeq_pfs::PfsWriter::create(Cursor::new(Vec::new())).unwrap();
+        for (name, bytes) in files {
+            w.insert(*name, Cursor::new(bytes.clone())).unwrap();
+        }
+        std::fs::write(path, w.finish().unwrap().into_inner()).unwrap();
+    }
+
+    fn open_pfs(path: &Path) -> libeq_pfs::PfsReader<std::fs::File> {
+        libeq_pfs::PfsReader::open(std::fs::File::open(path).unwrap()).unwrap()
+    }
+
+    fn transparent_texels(png: &[u8]) -> usize {
+        image::load_from_memory(png).unwrap().to_rgba8().pixels().filter(|p| p[3] < 128).count()
+    }
+
+    /// Both archives ship `foliage.bmp`, but only the object archive's copy is
+    /// alpha-keyed. A name the terrain does not reference must resolve to that copy;
+    /// taking the main archive's opaque copy is what made qeytoqrg's trees render as
+    /// solid blocks (eqoxide#688).
+    #[test]
+    fn object_only_name_resolves_from_the_object_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("z.s3d");
+        let obj = dir.path().join("z_obj.s3d");
+        // RoF2 ships DDS under .bmp names, so the fixture does too.
+        write_s3d(&main, &[("foliage.bmp", opaque_dxt1()), ("ground.bmp", opaque_dxt1())]);
+        write_s3d(&obj, &[("foliage.bmp", keyed_dxt5())]);
+        let mut pfs = vec![open_pfs(&main), open_pfs(&obj)];
+
+        let terrain: HashSet<String> = ["ground.bmp".to_string()].into_iter().collect();
+        let png = resolve_texture(&mut pfs, &terrain, "foliage.bmp", AlphaMode::Masked).unwrap();
+        assert!(
+            transparent_texels(&png) > 0,
+            "resolved the main archive's opaque copy; a MASK material over it discards nothing"
+        );
+    }
+
+    /// Terrain-referenced names keep main-first order: one name must map to one glTF
+    /// image, because the client links meshes to textures by image name.
+    #[test]
+    fn terrain_referenced_name_resolves_from_the_main_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("z.s3d");
+        let obj = dir.path().join("z_obj.s3d");
+        write_s3d(&main, &[("shared.bmp", opaque_dxt1())]);
+        write_s3d(&obj, &[("shared.bmp", keyed_dxt5())]);
+        let mut pfs = vec![open_pfs(&main), open_pfs(&obj)];
+
+        let terrain: HashSet<String> = ["shared.bmp".to_string()].into_iter().collect();
+        let png = resolve_texture(&mut pfs, &terrain, "shared.bmp", AlphaMode::Masked).unwrap();
+        assert_eq!(transparent_texels(&png), 0, "terrain names must stay main-first");
+    }
+
+    /// A name only the object archive has still resolves (the qeytoqrg `bpine.bmp` case).
+    #[test]
+    fn name_absent_from_the_main_archive_still_resolves() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("z.s3d");
+        let obj = dir.path().join("z_obj.s3d");
+        write_s3d(&main, &[("ground.bmp", opaque_dxt1())]);
+        write_s3d(&obj, &[("bpine.bmp", keyed_dxt5())]);
+        let mut pfs = vec![open_pfs(&main), open_pfs(&obj)];
+
+        let terrain: HashSet<String> = ["ground.bmp".to_string()].into_iter().collect();
+        let png = resolve_texture(&mut pfs, &terrain, "bpine.bmp", AlphaMode::Masked).unwrap();
+        assert!(transparent_texels(&png) > 0);
     }
 }
