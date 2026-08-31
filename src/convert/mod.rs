@@ -1257,7 +1257,22 @@ fn anim_label(code3: &str) -> Option<&'static str> {
         // made a treading character look like it kept trying to sit down; the real forward swim is
         // P06 (SWIM FORWD) and the real tread-water/idle-in-water is L09 (TREAD WATER).
         "L06" => "duckwalk",
-        "L07" => "walk_back",
+        // L07 is CLIMB, not a backward walk. Same class of mislabel as L06/L08 above, and
+        // settled the same way — by checking the animation rather than trusting the name.
+        // Forward kinematics across `L07A` in `humanoid.glb`: the hands rise ABOVE the head
+        // twice per cycle (peak +0.97u past the head, at t=0.00 and t=0.52 — alternating
+        // hand-over-hand reach) while the pelvis travels 0.31u in total, and the hands travel
+        // further than the feet (1.47 vs 1.05). A backward walk rocks the pelvis and never
+        // lifts a hand past the shoulders. The clip was then watched directly and confirmed
+        // by eye as a ladder climb. `eq_kb/animation-codes.md` had this right all along, and
+        // lists no confirmed retail code for backward walking at all — so the old "walk_back"
+        // was not merely the wrong name for this clip, it named a motion EQ may not ship.
+        //
+        // eqoxide consumes this as the "climbing" action for ladder ascent (eqoxide#309). That
+        // side matches on the animation CODE (`l07a`) as well as this keyword, so already-baked
+        // assets carrying the old label keep working and a re-bake is an improvement, not a
+        // requirement.
+        "L07" => "climb",
         "L08" => "crouch",
         "L09" => "swim_idle",
         "P01" => "idle_neutral",
