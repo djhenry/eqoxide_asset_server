@@ -23,11 +23,21 @@ pub struct Manifest {
 
 pub struct ManifestStore {
     root: PathBuf,
+    allow_shrink: bool,
 }
 
 impl ManifestStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        ManifestStore { root: root.into() }
+        ManifestStore { root: root.into(), allow_shrink: false }
+    }
+
+    /// Permit a set to publish fewer files than its current `latest`. Off by default: a
+    /// shrinking set is nearly always a failed bake (#45), so `build_and_write` refuses it
+    /// rather than repointing `latest` at a degraded manifest. Intentional removals — the
+    /// -22 classic `ske*` textures of eqoxide#704, say — opt in with `--allow-shrink`.
+    pub fn allow_shrink(mut self, yes: bool) -> Self {
+        self.allow_shrink = yes;
+        self
     }
 
     fn set_dir(&self, set: &str) -> PathBuf {
@@ -55,12 +65,61 @@ impl ManifestStore {
         std::fs::read_to_string(p).ok().map(|s| s.trim().to_string())
     }
 
+    /// Fail if publishing `incoming` files to `set` would leave it smaller than its current
+    /// `latest`.
+    ///
+    /// Only a genuinely absent `latest` pointer is a benign "nothing to compare against"
+    /// (the first publish of a set). Every other failure — an unreadable pointer, a dangling
+    /// one, a corrupt manifest — is fatal rather than a silent pass. Swallowing those with
+    /// `if let Ok(..)` would disable this guard exactly when the store is in the damaged
+    /// state it exists to protect, which is the same error-collapsing mistake as #45 itself.
+    fn check_would_not_shrink(&self, set: &str, incoming: usize) -> anyhow::Result<()> {
+        let p = self.set_dir(set).join("latest");
+        let digest = match std::fs::read_to_string(&p) {
+            Ok(d) => d.trim().to_string(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => anyhow::bail!(
+                "refusing to publish '{set}': cannot read {} to check for a shrinking set: {e}",
+                p.display(),
+            ),
+        };
+        let prev = self.load(set, &digest).map_err(|e| {
+            anyhow::anyhow!(
+                "refusing to publish '{set}': its current latest ({}) could not be loaded to \
+                 check for a shrinking set: {e}",
+                &digest[..12.min(digest.len())],
+            )
+        })?;
+        if incoming < prev.files.len() {
+            anyhow::bail!(
+                "refusing to publish '{set}': {} file(s), down from {} in the current \
+                 latest ({}). A shrinking set is nearly always a failed bake; re-run \
+                 with --allow-shrink if the removal is intentional.",
+                incoming,
+                prev.files.len(),
+                &digest[..12.min(digest.len())],
+            );
+        }
+        Ok(())
+    }
+
     pub fn build_and_write(
         &self,
         cas: &Cas,
         set: &str,
         files: &[(String, Vec<u8>)],
     ) -> anyhow::Result<Manifest> {
+        // Guard the one place `latest` repoints. A set that loses files between bakes is
+        // almost always a degraded build (a skipped conversion, an unreadable archive); the
+        // store is append-only so the old manifest survives, but `latest` is what the client
+        // follows, and repointing it is what shipped bad assets in #45.
+        //
+        // This runs before the chunking loop below, so a refused publish writes nothing at
+        // all. Chunking first would strand its chunks in the CAS, which has no GC.
+        if !self.allow_shrink {
+            self.check_would_not_shrink(set, files.len())?;
+        }
+
         let mut entries = Vec::new();
         for (path, bytes) in files {
             let chunks = chunk_into(cas, bytes)?;
@@ -72,6 +131,7 @@ impl ManifestStore {
             });
         }
         let digest = Self::set_digest(&entries);
+
         let manifest = Manifest { set: set.to_string(), digest: digest.clone(), files: entries };
 
         // Content-addressed store: identical content overwrites the same `<digest>.json` (no-op,
@@ -271,4 +331,180 @@ mod tests {
         // identical inputs => identical chunk hash lists (content-addressed dedup)
         assert_eq!(m1.files[0].chunks, m2.files[0].chunks);
     }
+
+    /// #45: `latest` must not repoint at a set that lost files. The store is append-only so
+    /// the old manifest survives, but `latest` is what the client follows.
+    #[test]
+    fn shrinking_set_is_refused_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas = Cas::new(dir.path());
+        let store = ManifestStore::new(dir.path());
+
+        let two = vec![
+            ("a.glb".to_string(), vec![1u8; 1000]),
+            ("b.glb".to_string(), vec![2u8; 1000]),
+        ];
+        let before = store.build_and_write(&cas, "common", &two).unwrap();
+
+        let one = vec![("a.glb".to_string(), vec![1u8; 1000])];
+        let err = store.build_and_write(&cas, "common", &one).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("refusing to publish"), "unexpected error: {msg}");
+        assert!(msg.contains("--allow-shrink"), "error should name the escape hatch: {msg}");
+
+        // and `latest` still points at the full set
+        assert_eq!(store.latest_digest("common").unwrap(), before.digest);
+    }
+
+    /// Intentional removals opt in — eqoxide#704's -22 classic `ske*` textures are a real one.
+    #[test]
+    fn shrinking_set_is_allowed_with_the_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas = Cas::new(dir.path());
+        let store = ManifestStore::new(dir.path()).allow_shrink(true);
+
+        let two = vec![
+            ("a.glb".to_string(), vec![1u8; 1000]),
+            ("b.glb".to_string(), vec![2u8; 1000]),
+        ];
+        store.build_and_write(&cas, "common", &two).unwrap();
+
+        let one = vec![("a.glb".to_string(), vec![1u8; 1000])];
+        let after = store.build_and_write(&cas, "common", &one).unwrap();
+        assert_eq!(after.files.len(), 1);
+        assert_eq!(store.latest_digest("common").unwrap(), after.digest);
+    }
+
+    /// Growing and same-size republishes are ordinary and must not be blocked.
+    #[test]
+    fn same_size_and_growing_sets_still_publish() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas = Cas::new(dir.path());
+        let store = ManifestStore::new(dir.path());
+
+        let one = vec![("a.glb".to_string(), vec![1u8; 1000])];
+        store.build_and_write(&cas, "common", &one).unwrap();
+
+        // same count, changed content
+        let changed = vec![("a.glb".to_string(), vec![9u8; 1000])];
+        store.build_and_write(&cas, "common", &changed).unwrap();
+
+        let two = vec![
+            ("a.glb".to_string(), vec![9u8; 1000]),
+            ("b.glb".to_string(), vec![2u8; 1000]),
+        ];
+        let grown = store.build_and_write(&cas, "common", &two).unwrap();
+        assert_eq!(grown.files.len(), 2);
+        assert_eq!(store.latest_digest("common").unwrap(), grown.digest);
+    }
+
+    fn cas_chunk_count(dir: &std::path::Path) -> usize {
+        std::fs::read_dir(dir.join("cas")).map(|d| d.count()).unwrap_or(0)
+    }
+
+    /// #45 review F5: the guard must run before any chunk is written. The CAS has no GC, so
+    /// chunking first would strand the refused set's chunks on disk permanently.
+    #[test]
+    fn a_refused_publish_writes_nothing_to_the_cas() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas = Cas::new(dir.path());
+        let store = ManifestStore::new(dir.path());
+
+        let two = vec![
+            ("a.glb".to_string(), vec![1u8; 4096]),
+            ("b.glb".to_string(), vec![2u8; 4096]),
+        ];
+        store.build_and_write(&cas, "common", &two).unwrap();
+        let before = cas_chunk_count(dir.path());
+
+        let one = vec![("c.glb".to_string(), vec![3u8; 4096])];
+        store.build_and_write(&cas, "common", &one).unwrap_err();
+
+        assert_eq!(
+            cas_chunk_count(dir.path()),
+            before,
+            "a refused publish must not leave orphan chunks in the CAS"
+        );
+    }
+
+    /// #45 review F3: `latest` present but its manifest missing (a crash between the two
+    /// non-atomic writes). Swallowing this with `if let Ok(..)` silently disabled the guard
+    /// in exactly the damaged state it exists to protect.
+    #[test]
+    fn a_dangling_latest_pointer_is_fatal_not_a_silent_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas = Cas::new(dir.path());
+        let store = ManifestStore::new(dir.path());
+
+        let two = vec![
+            ("a.glb".to_string(), vec![1u8; 1000]),
+            ("b.glb".to_string(), vec![2u8; 1000]),
+        ];
+        let before = store.build_and_write(&cas, "common", &two).unwrap();
+        std::fs::remove_file(
+            dir.path().join(format!("manifests/common/{}.json", before.digest)),
+        )
+        .unwrap();
+
+        let one = vec![("a.glb".to_string(), vec![1u8; 1000])];
+        let err = store.build_and_write(&cas, "common", &one).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("refusing to publish"), "unexpected error: {msg}");
+        assert!(msg.contains("could not be loaded"), "unexpected error: {msg}");
+        assert_eq!(
+            store.latest_digest("common").unwrap(),
+            before.digest,
+            "the damaged set's latest must not be repointed"
+        );
+    }
+
+    /// A corrupt manifest must be just as fatal as a dangling one.
+    #[test]
+    fn a_corrupt_latest_manifest_is_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas = Cas::new(dir.path());
+        let store = ManifestStore::new(dir.path());
+
+        let two = vec![
+            ("a.glb".to_string(), vec![1u8; 1000]),
+            ("b.glb".to_string(), vec![2u8; 1000]),
+        ];
+        let before = store.build_and_write(&cas, "common", &two).unwrap();
+        std::fs::write(
+            dir.path().join(format!("manifests/common/{}.json", before.digest)),
+            b"{ truncated",
+        )
+        .unwrap();
+
+        let one = vec![("a.glb".to_string(), vec![1u8; 1000])];
+        let err = store.build_and_write(&cas, "common", &one).unwrap_err();
+        assert!(
+            err.to_string().contains("refusing to publish"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// --allow-shrink is an explicit override, so it bypasses the damaged-store checks too
+    /// rather than wedging an operator who is deliberately repairing a set.
+    #[test]
+    fn allow_shrink_still_publishes_over_a_dangling_latest() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas = Cas::new(dir.path());
+        let store = ManifestStore::new(dir.path()).allow_shrink(true);
+
+        let two = vec![
+            ("a.glb".to_string(), vec![1u8; 1000]),
+            ("b.glb".to_string(), vec![2u8; 1000]),
+        ];
+        let before = store.build_and_write(&cas, "common", &two).unwrap();
+        std::fs::remove_file(
+            dir.path().join(format!("manifests/common/{}.json", before.digest)),
+        )
+        .unwrap();
+
+        let one = vec![("a.glb".to_string(), vec![1u8; 1000])];
+        let after = store.build_and_write(&cas, "common", &one).unwrap();
+        assert_eq!(store.latest_digest("common").unwrap(), after.digest);
+    }
+
 }

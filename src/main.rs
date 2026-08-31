@@ -37,6 +37,10 @@ enum Cmd {
         /// Number of worker threads for conversion (default: all-but-one core).
         #[arg(long, short = 'j', value_parser = clap::value_parser!(u32).range(1..))]
         jobs: Option<u32>,
+        /// Allow a set to publish fewer files than its current `latest`. Refused by
+        /// default: a shrinking set is nearly always a failed bake (#45). Pass this
+        /// only when the removal is intentional.
+        #[arg(long)] allow_shrink: bool,
     },
     /// Convert a single `.s3d` archive to a `.glb` model (skinned by default).
     /// Useful for producing one race/character model without re-baking the whole set.
@@ -84,22 +88,31 @@ fn load_secret(path: &PathBuf) -> [u8; 32] {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Default to `info`, not the `ERROR` that `from_default_env()` falls back to with no
+    // RUST_LOG set. Every skip warning below is emitted at warn!, so the old default hid
+    // exactly the diagnostics that would have exposed #45 as it happened.
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
         .init();
 
     match Cli::parse().cmd {
-        Cmd::Build { set, from, raw, out, zones_only, no_zones, jobs } => {
+        Cmd::Build { set, from, raw, out, zones_only, no_zones, jobs, allow_shrink } => {
             let cas = Cas::new(&out);
-            let store = ManifestStore::new(&out);
+            let store = ManifestStore::new(&out).allow_shrink(allow_shrink);
             if let Some(raw_dir) = raw {
                 let n = eqoxide_asset_server::build::resolve_jobs(jobs.map(|j| j as usize));
                 let pool = rayon::ThreadPoolBuilder::new().num_threads(n).build()?;
                 println!("building with {n} worker thread(s)");
                 let work = out.join("work");
                 if !zones_only {
-                    let ms = eqoxide_asset_server::build::build_from_raw(&cas, &store, &raw_dir, &work, &pool)?;
-                    println!("built {} set(s) from raw archives", ms.len());
+                    let rep = eqoxide_asset_server::build::build_from_raw(&cas, &store, &raw_dir, &work, &pool)?;
+                    println!(
+                        "built {} set(s) from raw archives (converted {} of {} models; {} archive(s) absent, {} conversion(s) failed)",
+                        rep.manifests.len(), rep.converted, rep.expected, rep.absent, rep.failed,
+                    );
                 }
                 if !no_zones {
                     let zones = eqoxide_asset_server::build::build_zones_from_raw(&cas, &store, &raw_dir, &work, &pool)?;
