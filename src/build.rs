@@ -11,8 +11,10 @@ use crate::zone::bake_zone;
 /// model code converts the whole archive (one model per `global*_chr.s3d`); a
 /// `Some("XXX")` extracts that single 3-char EQ model out of a multi-model archive.
 /// Reproducible from raw EQ files alone (no curated/hand-built artifacts) — other
-/// EQEmu operators get the same set from their own client install. Missing/unparseable
-/// archives are skipped with a warning, not fatal.
+/// EQEmu operators get the same set from their own client install. An archive that is
+/// genuinely absent is skipped with a warning and a model that fails to convert is
+/// non-fatal, but an archive that is present-but-unreadable, a bake that converts nothing,
+/// and a bake that yields no `common` files are all fatal (#45).
 ///
 /// Two groups:
 ///  1. The client's render archetypes (`humanoid`, `elf`, … — the names
@@ -169,8 +171,10 @@ pub fn build_from_raw(
         .collect();
     if !unreadable.is_empty() {
         anyhow::bail!(
-            "{} expected archive(s) exist but could not be read — refusing to publish a \
-             degraded bake. Check permissions/SELinux labels on {}:\n  {}",
+            "{} expected archive(s) could not be read — refusing to publish a degraded \
+             bake. Each open failed with something other than 'not found', so the files or \
+             the directory holding them are unreachable rather than absent. Check \
+             permissions/SELinux labels on {}:\n  {}",
             unreadable.len(), raw_dir.display(), unreadable.join("\n  "),
         );
     }
@@ -194,6 +198,21 @@ pub fn build_from_raw(
             COMMON_MODELS.len(), raw_dir.display(),
         );
     }
+    // The check above counts all of COMMON_MODELS, but the 29 `race_*` entries publish to
+    // their own `charmodel/*` sets — so one converted race archive satisfies it while
+    // `common` itself gets nothing, and an empty `common` is republished with `latest`
+    // repointed at it. That is precisely the symptom #45 reports, so gate on it separately.
+    // Checked here, before the loop below publishes anything, so a doomed bake does not
+    // leave half its `charmodel/*` sets updated.
+    if !converted.iter().any(|n| !n.starts_with("race_")) {
+        anyhow::bail!(
+            "converted {} model(s) from {} but none of them belong to the 'common' set — \
+             refusing to publish it empty. Are the archetype archives (global*_chr.s3d and \
+             the zone character archives) present and readable?",
+            converted.len(), raw_dir.display(),
+        );
+    }
+
     // Split the character models into two tiers so the client no longer downloads all ~457 MB up
     // front (eqoxide#224):
     //   • The small monster/generic ARCHETYPES stay in `common` — synced once at startup and used

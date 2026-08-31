@@ -82,11 +82,16 @@ fn empty_raw_dir_fails_instead_of_publishing_empty_common() {
     );
 }
 
-/// The ingest read whatever sat in `work/`, which is never cleaned between bakes, so a
-/// skipped conversion republished an earlier run's GLB as if freshly built. This is why the
-/// live incident served two-month-old models rather than an empty set.
+/// A bake that converts nothing must not publish whatever happens to be sitting in `work/`,
+/// which is never cleaned between bakes.
+///
+/// Note what this does and does not cover: with an empty raw dir the zero-converted gate
+/// fires first, so this pins that gate's behaviour in the presence of a stale artifact, not
+/// the ingest filter itself. Exercising the filter needs a bake that actually converts
+/// something, which needs real client archives — see
+/// `stale_work_artifact_is_excluded_when_other_models_convert` below.
 #[test]
-fn stale_work_artifact_is_not_republished_as_fresh() {
+fn a_bake_that_converts_nothing_does_not_publish_stale_work_artifacts() {
     let raw = tempfile::tempdir().unwrap();
     let out = tempfile::tempdir().unwrap();
     let work = out.path().join("work/common");
@@ -99,6 +104,47 @@ fn stale_work_artifact_is_not_republished_as_fresh() {
     assert!(
         !out.path().join("manifests/common/latest").exists(),
         "the stale work/ artifact must not be published as this run's output"
+    );
+}
+
+/// The real ingest-filter regression: a bake that converts *some* models must publish only
+/// those, not the leftovers of an earlier run. Needs a readable EQ client install, so it is
+/// opt-in via `EQOXIDE_TEST_RAW_DIR=/path/to/client` and skipped otherwise — CI has no
+/// client files. Run it whenever this ingest path changes.
+#[test]
+fn stale_work_artifact_is_excluded_when_other_models_convert() {
+    let Ok(client) = std::env::var("EQOXIDE_TEST_RAW_DIR") else {
+        eprintln!("skip: set EQOXIDE_TEST_RAW_DIR to an EQ client dir to run this");
+        return;
+    };
+    let client = std::path::Path::new(&client);
+    // An archetype archive (yields `humanoid.glb`), so the bake produces a non-empty `common`.
+    let src = client.join("globalhum_chr.s3d");
+    if !src.is_file() {
+        eprintln!("skip: {} has no globalhum_chr.s3d", client.display());
+        return;
+    }
+
+    let raw = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    std::fs::copy(&src, raw.path().join("globalhum_chr.s3d")).unwrap();
+
+    // A model whose archive is absent from `raw`, planted in work/ as a previous run's output.
+    let work = out.path().join("work/common");
+    std::fs::create_dir_all(&work).unwrap();
+    let stale = b"STALE-GLB-FROM-A-PREVIOUS-BAKE".to_vec();
+    std::fs::write(work.join("boat.glb"), &stale).unwrap();
+
+    let res = run_bake(raw.path(), out.path());
+    let log = combined(&res);
+    assert!(res.status.success(), "expected a successful bake; log was:\n{log}");
+
+    let manifest = out.path().join("manifests/common");
+    let digest = std::fs::read_to_string(manifest.join("latest")).unwrap();
+    let json = std::fs::read_to_string(manifest.join(format!("{}.json", digest.trim()))).unwrap();
+    assert!(
+        !json.contains("boat.glb"),
+        "a GLB left in work/ by an earlier bake must not be ingested as this run's output"
     );
 }
 
