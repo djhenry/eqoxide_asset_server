@@ -82,21 +82,59 @@ pub fn resolve_jobs(requested: Option<usize>) -> usize {
     }
 }
 
+/// What happened to one `COMMON_MODELS` entry during a bake. Distinguishing these is the
+/// whole point of #45: "the operator doesn't have this archive" and "this archive is there
+/// but we couldn't read it" used to be the same code path.
+enum ModelOutcome {
+    /// THIS run wrote the `.glb`. Only these are safe to ingest.
+    Converted,
+    /// The archive is genuinely absent. Legitimate and non-fatal: operators may hold a
+    /// partial client install.
+    Absent,
+    /// The archive is present but unreadable (permissions, SELinux label, IO error).
+    /// Never a legitimate skip — an archive we name is one we expect to read.
+    Unreadable(String),
+    /// The archive was read but conversion failed or panicked. Non-fatal, as before.
+    Failed,
+}
+
+/// Outcome counts for a `build_from_raw`, so the caller can print a summary that makes
+/// "converted 0 of 47" visible on stdout without setting `RUST_LOG`.
+pub struct RawBuildReport {
+    pub manifests: Vec<Manifest>,
+    pub converted: usize,
+    pub absent: usize,
+    pub failed: usize,
+    pub expected: usize,
+}
+
 pub fn build_from_raw(
     cas: &Cas,
     store: &ManifestStore,
     raw_dir: &Path,
     work_dir: &Path,
     pool: &rayon::ThreadPool,
-) -> anyhow::Result<Vec<Manifest>> {
+) -> anyhow::Result<RawBuildReport> {
     let common_out = work_dir.join("common");
     std::fs::create_dir_all(&common_out)?;
-    pool.install(|| {
-        COMMON_MODELS.par_iter().for_each(|(archive, model_code, out_name)| {
+    let outcomes: Vec<(&str, ModelOutcome)> = pool.install(|| {
+        COMMON_MODELS.par_iter().map(|(archive, model_code, out_name)| {
             let src = raw_dir.join(archive);
-            if !src.exists() {
-                tracing::warn!("skip missing archive {archive} (for {out_name})");
-                return;
+            // Probe with an actual open rather than `Path::exists()`, which collapses every
+            // stat error into `false` and so made an unreadable archive look exactly like one
+            // the operator simply doesn't have (#45). `fs::metadata` is not enough either: it
+            // succeeds on a mode-000 file, so only an open proves the bytes are reachable.
+            if let Err(e) = std::fs::File::open(&src) {
+                return match e.kind() {
+                    std::io::ErrorKind::NotFound => {
+                        tracing::warn!("skip missing archive {archive} (for {out_name})");
+                        (*out_name, ModelOutcome::Absent)
+                    }
+                    _ => {
+                        tracing::error!("cannot read archive {archive} (for {out_name}): {e}");
+                        (*out_name, ModelOutcome::Unreadable(format!("{archive}: {e}")))
+                    }
+                };
             }
             // Per-model conversion can panic on malformed archives; isolate each so one
             // bad model doesn't abort the whole common build.
@@ -110,12 +148,52 @@ pub fn build_from_raw(
                 }
             });
             match result {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => tracing::warn!("skip model {out_name} from {archive}: {}", short_err(&e)),
-                Err(_) => tracing::warn!("skip model {out_name} from {archive}: conversion panicked"),
+                Ok(Ok(())) => (*out_name, ModelOutcome::Converted),
+                Ok(Err(e)) => {
+                    tracing::warn!("skip model {out_name} from {archive}: {}", short_err(&e));
+                    (*out_name, ModelOutcome::Failed)
+                }
+                Err(_) => {
+                    tracing::warn!("skip model {out_name} from {archive}: conversion panicked");
+                    (*out_name, ModelOutcome::Failed)
+                }
             }
-        });
+        }).collect()
     });
+
+    // An archive we expect but cannot read is a broken environment, not a partial install.
+    // In the incident the whole raw tree was labelled `user_home_t` and every one of 4253
+    // archives read as "missing", so the bake happily published a degraded set.
+    let unreadable: Vec<&str> = outcomes.iter()
+        .filter_map(|(_, o)| match o { ModelOutcome::Unreadable(m) => Some(m.as_str()), _ => None })
+        .collect();
+    if !unreadable.is_empty() {
+        anyhow::bail!(
+            "{} expected archive(s) exist but could not be read — refusing to publish a \
+             degraded bake. Check permissions/SELinux labels on {}:\n  {}",
+            unreadable.len(), raw_dir.display(), unreadable.join("\n  "),
+        );
+    }
+
+    // Ingest only what THIS run produced. The work dir is never cleaned between bakes, so
+    // globbing it republishes an earlier run's artifacts as if freshly built (#45).
+    let converted: std::collections::HashSet<&str> = outcomes.iter()
+        .filter(|(_, o)| matches!(o, ModelOutcome::Converted))
+        .map(|(n, _)| *n)
+        .collect();
+    let absent = outcomes.iter().filter(|(_, o)| matches!(o, ModelOutcome::Absent)).count();
+    let failed = outcomes.iter().filter(|(_, o)| matches!(o, ModelOutcome::Failed)).count();
+
+    // Converting nothing at all is never a real bake: --raw is pointing somewhere wrong.
+    // Without this, a fresh store publishes an empty `common` and exits 0, because every
+    // archive looked legitimately absent and there was no previous manifest to shrink from.
+    if converted.is_empty() {
+        anyhow::bail!(
+            "converted 0 of {} expected models from {} — refusing to publish. \
+             Is --raw pointing at an EQ client install, and is it readable?",
+            COMMON_MODELS.len(), raw_dir.display(),
+        );
+    }
     // Split the character models into two tiers so the client no longer downloads all ~457 MB up
     // front (eqoxide#224):
     //   • The small monster/generic ARCHETYPES stay in `common` — synced once at startup and used
@@ -128,8 +206,9 @@ pub fn build_from_raw(
     let mut common_files: Vec<(String, Vec<u8>)> = Vec::new();
     let mut manifests = Vec::new();
     for (_, _, out_name) in COMMON_MODELS {
+        // Not `p.exists()`: a leftover GLB from an earlier bake also exists.
+        if !converted.contains(out_name) { continue; }
         let p = common_out.join(out_name);
-        if !p.exists() { continue; } // conversion may have been skipped for a bad/absent archive
         let bytes = std::fs::read(&p)?;
         if out_name.starts_with("race_") {
             // per-race on-demand set, named by the client's model key (the file basename, e.g.
@@ -143,7 +222,13 @@ pub fn build_from_raw(
     }
     let common = store.build_and_write(cas, "common", &common_files)?;
     manifests.push(common);
-    Ok(manifests)
+    Ok(RawBuildReport {
+        manifests,
+        converted: converted.len(),
+        absent,
+        failed,
+        expected: COMMON_MODELS.len(),
+    })
 }
 
 /// True for archives that hold zone terrain (`<short>.s3d`), excluding the
