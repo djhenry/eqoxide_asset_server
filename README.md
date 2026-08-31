@@ -19,4 +19,16 @@ eq_client_lite client over HTTP, authenticated against EQEmu's MariaDB.
 ## Run alongside EQEmu (podman)
     podman compose -f ~/git/EQEmu/compose.yaml -f compose.assets.yaml up --build
 
+## Diagnostics
+
+Read-only WLD/PFS inspectors, for answering "what is actually in this archive?"
+when a bake looks wrong. They are not shipped: the `Containerfile` builds only
+`--bin eqoxide-assets`.
+
+    cargo run --bin wlddump    -- <archive.s3d>                          # fragment inventory, skeletons, raw fragment histogram
+    cargo run --bin wlddump    -- extract <archive.s3d> <file> <out>     # pull one file out of a PFS archive
+    cargo run --bin trackdump  -- <archive.s3d> [NAME_FILTER]            # Track (0x13) animation fragment names, per WLD
+    cargo run --bin skinbones  -- <archive.s3d> <wld> <mesh> <skeleton>  # vertex-range -> bone, face-range -> material
+    cargo run --bin skelmeshes -- <archive.s3d> <wld> <skeleton>         # attached-mesh list + per-mesh bbox/scale/skin groups
+
 This is an **addon**: it does not modify the EQEmu source tree.
