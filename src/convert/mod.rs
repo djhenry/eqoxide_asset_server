@@ -468,6 +468,21 @@ fn head_region_from_material_name(name: &str) -> Option<u8> {
     None
 }
 
+/// The race/sex code that prefixes a head-region material name — everything
+/// before the trailing `HE000{N}` group. `ELFHE0002_MDF` → `"elf"`,
+/// `FROHE0002_MDF` → `"fro"`. `None` when `name` is not a head-region material.
+///
+/// This is the code the head-skin *texture* files actually carry, which is not
+/// always the archive stem: `globalfroglok_chr.s3d` ships `fro*` / `frg*`
+/// textures whose material is `FROHE000N_MDF`, so [`race_code_from_archive`]
+/// ("froglok") builds names that never resolve.
+fn head_material_prefix(name: &str) -> Option<String> {
+    head_region_from_material_name(name)?;
+    let u = name.to_uppercase();
+    let stem = u.trim_end_matches("_MDF");
+    Some(stem[..stem.len() - 6].to_lowercase())
+}
+
 /// Load a texture by filename from the PFS archive, caching in `texture_map` to
 /// avoid duplicate buffer entries. `Ok(Some(idx))` is the index in `textures`;
 /// `Ok(None)` means the file is genuinely absent from this archive (the caller
@@ -493,6 +508,67 @@ fn load_or_cache_texture(
         }
         None => Ok(None),
     }
+}
+
+/// Resolve a Luclin head-region skin texture for region `n`, face `face` (0 for
+/// the fixed regions). Widens past the reconstructed `{race_code}hesk{face}{n}`
+/// name — which only the 25 base `global{code}_chr.s3d` race/sex archives ship —
+/// by also trying, in order:
+///   1. `{race_code}hesk{face}{n}` — the archive-stem name; unchanged for every
+///      race whose archive stem *is* its texture prefix.
+///   2. `{mat_prefix}hesk{face}{n}` — the material's own race/sex code, for an
+///      archive whose stem differs from its texture prefix (`globalpcfroglok_chr`
+///      → `frm` / `frf`).
+///   3. `{mat_prefix}he000{n}` and the material's declared base-colour texture —
+///      face `0` only — for an archive that ships no `hesk` head-skin family at
+///      all (`globalfroglok_chr` → `frohe0002`). Such a race has no runtime
+///      face-swap, so only the base face is emitted.
+///
+/// `Ok(Some((name, idx)))` is the resolved texture; `Ok(None)` means no candidate
+/// exists in the archive (the caller decides whether that is fatal); `Err` means
+/// a candidate was present but unreadable.
+#[allow(clippy::too_many_arguments)]
+fn resolve_head_skin_texture(
+    pfs: &mut libeq_pfs::PfsReader<fs::File>,
+    race_code: &str,
+    mat_name: &str,
+    mat_texture: Option<&str>,
+    n: u8,
+    face: u8,
+    textures: &mut Vec<TextureData>,
+    texture_map: &mut HashMap<String, usize>,
+) -> Result<Option<(String, usize)>> {
+    let mat_prefix = head_material_prefix(mat_name);
+    let mut candidates: Vec<String> = Vec::new();
+    let mut push = |c: String| {
+        if !c.is_empty() && !candidates.contains(&c) {
+            candidates.push(c);
+        }
+    };
+    if !race_code.is_empty() {
+        push(format!("{race_code}hesk{face}{n}"));
+    }
+    if let Some(p) = &mat_prefix {
+        push(format!("{p}hesk{face}{n}"));
+    }
+    if face == 0 {
+        if let Some(p) = &mat_prefix {
+            push(format!("{p}he000{n}"));
+        }
+        if let Some(t) = mat_texture {
+            // WLD texture refs are frequently upper-case; the archive file
+            // table is not. `get_or_create_material` lower-cases the same way.
+            push(t.to_lowercase());
+        }
+    }
+    for cand in candidates {
+        if let Some(idx) =
+            load_or_cache_texture(pfs, &cand, AlphaMode::Opaque, textures, texture_map)?
+        {
+            return Ok(Some((cand, idx)));
+        }
+    }
+    Ok(None)
 }
 
 /// Extract the 3-char EQ race/sex code from a Luclin character archive path.
@@ -1622,17 +1698,26 @@ fn convert_s3d_to_glb_skinned(input: &Path, output: &Path, model_code: Option<&s
                 match (!race_code.is_empty()).then(|| head_region_from_material_name(mat_name_str)).flatten() {
                     Some(n) if SWAPPABLE.contains(&n) => {
                         let (hair_idxs, face_idxs) = split_hair_face(&idxs, &joints, &bones);
+                        let mat_tex = material.base_color_texture().and_then(|t| t.source());
                         let mut emitted = 0u8;
                         for f in 0u8..=7 {
-                            let tex_name = format!("{}hesk{}{}", race_code, f, n);
                             // Speculative probe: not every race ships all 8 face
                             // variants, so a genuine absence (`Ok(None)`) just
                             // skips that variant. A present-but-broken texture
                             // (`Err`) still aborts the conversion.
-                            let tex_idx = match load_or_cache_texture(&mut pfs, &tex_name, AlphaMode::Opaque, &mut textures, &mut texture_map)? {
-                                Some(t) => t,
+                            let (tex_name, tex_idx) = match resolve_head_skin_texture(
+                                &mut pfs,
+                                &race_code,
+                                mat_name_str,
+                                mat_tex.as_deref(),
+                                n,
+                                f,
+                                &mut textures,
+                                &mut texture_map,
+                            )? {
+                                Some(hit) => hit,
                                 None => {
-                                    eprintln!("  head region N={} face F={}: texture '{}' not found in archive", n, f, tex_name);
+                                    eprintln!("  head region N={n} face F={f}: no head-skin texture in archive");
                                     continue;
                                 }
                             };
@@ -1670,13 +1755,28 @@ fn convert_s3d_to_glb_skinned(input: &Path, output: &Path, model_code: Option<&s
                         );
                     }
                     Some(n) => {
-                        // Fixed head region: emit once with {race}hesk0{N}.dds.
-                        // This region is always part of the head — its texture is
-                        // required, so a miss is a hard error, not an untextured
-                        // face.
-                        let tex_name = format!("{}hesk0{}", race_code, n);
-                        let tex_idx = load_or_cache_texture(&mut pfs, &tex_name, AlphaMode::Opaque, &mut textures, &mut texture_map)?
-                            .with_context(|| format!("fixed head region N={n} requires texture '{tex_name}', absent from archive"))?;
+                        // Fixed head region: emit once with {race}hesk0{N}.dds
+                        // (or, for a race that ships no `hesk` family, the
+                        // material's own `{prefix}he000{N}` skin). This region is
+                        // always part of the head — a total miss is a hard error,
+                        // not an untextured face.
+                        let mat_tex = material.base_color_texture().and_then(|t| t.source());
+                        let (tex_name, tex_idx) = resolve_head_skin_texture(
+                            &mut pfs,
+                            &race_code,
+                            mat_name_str,
+                            mat_tex.as_deref(),
+                            n,
+                            0,
+                            &mut textures,
+                            &mut texture_map,
+                        )?
+                        .with_context(|| {
+                            format!(
+                                "fixed head region N={n} (material '{mat_name_str}') requires a head-skin \
+                                 texture, but none of its candidate names are in the archive"
+                            )
+                        })?;
                         let mat_idx = materials.len();
                         materials.push(MaterialData {
                             name: tex_name.clone(),
@@ -3139,6 +3239,26 @@ mod tests {
     }
 
     #[test]
+    fn head_material_prefix_extracts_race_gender_code() {
+        // The race/sex code that the head-skin *texture* files use is the prefix
+        // of the material name, not the archive stem. For `global{code}_chr.s3d`
+        // the two agree; for `globalfroglok_chr.s3d` they do not (textures are
+        // `fro*` / `frg*`, material is `FROHE000N_MDF`).
+        for (name, expected) in [
+            ("ELFHE0002_MDF", Some("elf".to_string())),
+            ("FROHE0002_MDF", Some("fro".to_string())),
+            ("FRGHE0004_MDF", Some("frg".to_string())),
+            ("FRMHE0001_MDF", Some("frm".to_string())),
+            ("HUFHE0007_MDF", Some("huf".to_string())),
+            ("elfhe0001_mdf", Some("elf".to_string())), // case-insensitive
+            ("ELFCH0001_MDF", None),                    // not a head region
+            ("ELFHE0011_MDF", None),                    // hair colour variant, not a base region
+        ] {
+            assert_eq!(head_material_prefix(name), expected, "head_material_prefix({name:?})");
+        }
+    }
+
+    #[test]
     fn race_code_extraction_from_path() {
         use std::path::PathBuf;
         assert_eq!(race_code_from_archive(&PathBuf::from("globalelf_chr.s3d")), Some("elf".into()));
@@ -3206,6 +3326,44 @@ mod tests {
                 .filter(|p| p.material().index() == Some(mat_idx))
                 .count();
             assert!(prim_count > 0, "no primitive for head region material '{}'", region_mat);
+        }
+    }
+
+    /// #50 follow-up: `globalfroglok_chr.s3d` ships no `hesk` head-skin texture
+    /// family and its texture prefix (`fro`/`frg`) differs from the archive stem
+    /// (`froglok`), so the reconstructed `froglokhesk0N` names resolve to
+    /// nothing. Before the fix the conversion aborted on the first fixed head
+    /// region; the model had been shipping with an untextured white head. After
+    /// the fix every head-region material resolves (from `{prefix}he000{N}`) and
+    /// the conversion succeeds.
+    #[test]
+    #[ignore = "requires ~/eq_assets/everquest_rof2/globalfroglok_chr.s3d"]
+    fn froglok_glb_bakes_with_a_textured_head() {
+        let home = std::env::var("HOME").unwrap();
+        let inp = std::path::PathBuf::from(
+            format!("{home}/eq_assets/everquest_rof2/globalfroglok_chr.s3d")
+        );
+        if !inp.exists() { eprintln!("skip: {inp:?} missing"); return; }
+        let out = std::env::temp_dir().join("test_froglok_head.glb");
+        convert_s3d_to_glb_skinned(&inp, &out, None).unwrap();
+
+        let (doc, _buffers, images) = gltf::import(&out).unwrap();
+        assert!(!images.is_empty(), "froglok GLB must carry textures");
+
+        // Every head-region material (name ends `he000{N}` or matches `hesk{F}{N}`)
+        // must resolve to a texture — no untextured white head regions.
+        let head_mats: Vec<_> = doc.materials()
+            .filter(|m| m.name().is_some_and(|n| {
+                let n = n.to_lowercase();
+                n.contains("hesk") || (n.contains("he00") && n.len() >= 8)
+            }))
+            .collect();
+        assert!(!head_mats.is_empty(), "expected ≥1 head-region material in froglok GLB");
+        for m in &head_mats {
+            assert!(
+                m.pbr_metallic_roughness().base_color_texture().is_some(),
+                "head region material {:?} has no texture", m.name()
+            );
         }
     }
 }
