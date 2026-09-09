@@ -20,6 +20,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Inventory unsupported EQG zone sources without baking or publishing assets.
+    InventoryZones {
+        #[arg(long)] raw: PathBuf,
+        /// Print a deterministic machine-readable report.
+        #[arg(long)] json: bool,
+    },
     /// Chunk a directory of derived assets into the CAS + a manifest.
     Build {
         #[arg(long)] set: Option<String>,
@@ -99,6 +105,22 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     match Cli::parse().cmd {
+        Cmd::InventoryZones { raw, json } => {
+            let report = eqoxide_asset_server::zone_source::inventory_zones(&raw)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("{}", report.summary());
+                for candidate in &report.candidates {
+                    println!("{}: {} recognized descriptor(s), selection not attempted", candidate.archive, candidate.descriptors.len());
+                }
+                for error in &report.errors {
+                    eprintln!("{}: {}", error.resource, error.message);
+                }
+            }
+            anyhow::ensure!(report.errors.is_empty(), "inventory incomplete: {} error(s)", report.errors.len());
+            Ok(())
+        }
         Cmd::Build { set, from, raw, out, zones_only, no_zones, jobs, allow_shrink } => {
             let cas = Cas::new(&out);
             let store = ManifestStore::new(&out).allow_shrink(allow_shrink);

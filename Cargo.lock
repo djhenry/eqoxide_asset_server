@@ -514,6 +514,7 @@ dependencies = [
  "gltf",
  "hex",
  "image",
+ "libeq_eqg",
  "libeq_pfs",
  "libeq_wld",
  "md-5",
@@ -1104,6 +1105,14 @@ name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+
+[[package]]
+name = "libeq_eqg"
+version = "0.5.0"
+source = "git+https://github.com/djhenry/libeq?rev=86430747764a57e7f0f620ec0a4c71245a3c3af4#86430747764a57e7f0f620ec0a4c71245a3c3af4"
+dependencies = [
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "libeq_pfs"

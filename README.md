@@ -21,6 +21,33 @@ eq_client_lite client over HTTP, authenticated against EQEmu's MariaDB.
 
 ## Diagnostics
 
+### EQG zone coverage
+
+Inventory EQG zone descriptors without baking or publishing anything:
+
+```sh
+cargo run --bin eqoxide-assets -- inventory-zones --raw /path/to/client
+cargo run --bin eqoxide-assets -- inventory-zones --raw /path/to/client --json > eqg-inventory.json
+```
+
+The report inspects loose and archive-contained descriptors, retains original
+resource names, and counts manifest-bearing archives separately from model-only
+archives and unresolved terrain candidates. Header identification comes from
+`libeq_eqg`; it does not validate whole files or establish playable-zone counts.
+Competing descriptors are retained with `selection: "not_attempted"`.
+
+Unknown/truncated descriptors, unreadable archives, and case collisions produce
+diagnostics and a nonzero inventory-command exit status. JSON output remains
+available when individual resources fail. Orphan descriptors and terrain without
+descriptors are reported as unresolved; neither is counted as a recognized zone.
+
+Normal zone bakes also print the unsupported EQG count. This first slice does not
+convert EQG zones or change WLD terrain/water dispatch. Full dependency resolution,
+source precedence, collision, and regions are tracked in the
+[EQG zone support project plan](docs/eqg-zone-support-project-plan.md).
+
+### Archive inspectors
+
 Read-only WLD/PFS inspectors, for answering "what is actually in this archive?"
 when a bake looks wrong. They are not shipped: the `Containerfile` builds only
 `--bin eqoxide-assets`.
