@@ -4,7 +4,7 @@
 
 **Tracking issue:** [#51 — EQG-only zones are never baked](https://github.com/djhenry/eqoxide_asset_server/issues/51)
 
-**Status:** In progress. The first slice implements EQG inventory and unsupported-format reporting; zone conversion and native source selection remain unimplemented.
+**Status:** In progress. EQG inventory and unsupported-format reporting are implemented. The libeq contribution now includes raw binary ZON parsing; zone conversion and native source selection remain unimplemented.
 
 **Goal:** Bake and serve EQG zones with correct terrain, placements, collision, and region data, beginning with Crescent Reach, while reporting unsupported or incomplete resources explicitly.
 
@@ -94,8 +94,17 @@ as separately reviewable changes. Base contributions on upstream main, excluding
 unrelated changes from the fork's WLD compatibility branch.
 
 Initial upstream contribution: [libeq PR #56](https://github.com/cjab/libeq/pull/56).
-The inventory slice pins the fork revision containing that API; it does not
-change the existing PFS/WLD dependency revisions.
+The contribution includes header identification and checked raw EQGZ v1/v2
+records. The inventory slice pins a fork revision containing header identification;
+it does not change the existing PFS/WLD dependency revisions. Scene importers will
+consume the raw reader as the subsequent M2 work lands.
+
+Raw ZON parsing preserves nullable model references, source transform values,
+v2 extension words, 40-byte region records, 32-byte light records, and trailing
+bytes. Header counts at offsets `0x14` and `0x18` are regions and lights,
+respectively. No coordinate conversion or gameplay interpretation is performed.
+An opt-in libeq corpus test exercises loose and archived binary descriptors
+without distributing game assets; synthetic tests exercise malformed records.
 
 - `src/zone_source.rs`: case-insensitive resource catalog, source selection, dependency resolution, and discovery results.
 - `src/eqg/mod.rs`: importer dispatch over libeq parsed records.
@@ -179,6 +188,14 @@ terrain/door/region dispatch; the complete milestone is not yet accepted.
 **Files:** Add `src/eqg/mod.rs`, `src/eqg/mesh.rs`, `src/eqg/zon.rs`, and `src/zone_scene.rs`; modify `src/convert/mod.rs`, `src/zone.rs`, `src/build.rs`, and `src/lib.rs`; add `tests/eqg_mesh.rs` and `tests/eqg_zone.rs`.
 
 **Dependencies:** M1. Coordinate shared collision/region fields with M3 before fixing the exported contract.
+
+**Raw parser slice:** The libeq reader has been exercised against 200 binary
+descriptors in the inspected installation (34 v1 and 166 v2). Every counted
+record section consumes its input exactly. This count is descriptor files,
+including overlapping loose/internal resources, rather than distinct zones.
+Crescent's descriptor accounts for 176 model references, 2,342 placements,
+58 regions, zero lights, and 646,120 extension words. These checks validate
+record parsing; they do not establish model loading or correct scene rendering.
 
 - [ ] Extract the existing static mesh parser and retain boat regression coverage.
 - [ ] Contribute checked EQGZ and EQGM/EQGT byte readers to `libeq_eqg`; consume those readers through server adapters, with pinned dependency revisions and synthetic library tests.
