@@ -1,6 +1,6 @@
 //! Zone baking: terrain + object placements → world-space meshes, exported as glb.
 use anyhow::Context;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 #[derive(Clone, Debug, Default)]
@@ -103,18 +103,23 @@ pub fn placement_matrix(center: (f32, f32, f32), rot_z_deg: f32, scale: f32) -> 
 pub fn load_object_models(
     obj_s3d: &Path,
     main_s3d: Option<&Path>,
-) -> anyhow::Result<HashMap<String, Vec<ZoneMesh>>> {
+) -> anyhow::Result<BTreeMap<String, Vec<ZoneMesh>>> {
     let obj_file = std::fs::File::open(obj_s3d).with_context(|| format!("open {}", obj_s3d.display()))?;
     let mut obj_pfs = libeq_pfs::PfsReader::open(obj_file)?;
     let obj_names: Vec<String> = obj_pfs.filenames()?;
-    let mut models: HashMap<String, Vec<ZoneMesh>> = HashMap::new();
+    // BTreeMap so callers ([`bake_zone`], [`write_object_models_glb`]) that walk it
+    // emit meshes/materials in a fixed order — the GLB must be byte-stable (#50).
+    let mut models: BTreeMap<String, Vec<ZoneMesh>> = BTreeMap::new();
     for wn in obj_names.iter().filter(|f| f.to_lowercase().ends_with(".wld")) {
         let bytes = match obj_pfs.get(wn) {
             Ok(Some(b)) => b,
             Ok(None) => continue,
             Err(e) => { eprintln!("zone: failed to read {wn}: {e}"); continue; }
         };
-        let wld = match libeq_wld::load(&bytes) { Ok(w) => w, Err(_) => continue };
+        let wld = match libeq_wld::load(&bytes) {
+            Ok(w) => w,
+            Err(e) => { eprintln!("zone: skipping {wn}: {e}"); continue; }
+        };
         for mesh in wld.meshes() {
             let base = match mesh.name() { Some(n) => object_base_name(n), None => continue };
             for zm in zone_meshes_from_mesh(&mesh) {
@@ -241,7 +246,10 @@ pub(crate) fn apply_gltf_v_convention<'a>(
 /// exact/lossless) and rebuilds the index buffer, preserving `texture_name`.
 pub fn weld(mesh: &ZoneMesh) -> ZoneMesh {
     use std::collections::HashMap;
-    // key on the bit patterns of position+normal+uv (exact, lossless)
+    // key on the bit patterns of position+normal+uv (exact, lossless).
+    // HashMap is fine for determinism (#50): it is a pure dedup lookup — the
+    // output vertex order follows first-seen order along `mesh.indices`, and the
+    // rebuilt index buffer follows `mesh.indices`; the map is never iterated.
     let mut map: HashMap<[u32; 8], u32> = HashMap::new();
     let mut positions = Vec::new();
     let mut normals = Vec::new();
@@ -362,10 +370,12 @@ fn load_terrain(main_s3d: &Path, obj_s3d: Option<&Path>) -> anyhow::Result<Vec<Z
 /// Concatenate meshes that share a `texture_name` into one (offsetting indices).
 /// Reduces a zone's terrain from thousands of tiny primitives to one-per-texture.
 fn merge_by_texture(meshes: Vec<ZoneMesh>) -> Vec<ZoneMesh> {
-    use std::collections::HashMap;
     // Group by (texture, alpha_mode): meshes sharing a texture but rendered with
-    // different transparency must stay separate so each gets the right glTF material.
-    let mut groups: HashMap<(Option<String>, crate::convert::AlphaMode), ZoneMesh> = HashMap::new();
+    // different transparency must stay separate so each gets the right glTF
+    // material. A BTreeMap keyed on that pair both groups and orders in one step,
+    // so the merged terrain comes out in the same order every bake (#50) —
+    // `AlphaMode` derives `Ord` for exactly this.
+    let mut groups: BTreeMap<(Option<String>, crate::convert::AlphaMode), ZoneMesh> = BTreeMap::new();
     for m in meshes {
         let key = (m.texture_name.clone(), m.alpha_mode);
         let entry = groups.entry(key).or_insert_with(|| ZoneMesh {
@@ -383,14 +393,7 @@ fn merge_by_texture(meshes: Vec<ZoneMesh>) -> Vec<ZoneMesh> {
         entry.uvs.extend(m.uvs);
         entry.indices.extend(m.indices.iter().map(|&i| i + base));
     }
-    let mut result: Vec<ZoneMesh> = groups.into_values().collect();
-    // Deterministic order: by texture name, then alpha mode.
-    result.sort_by(|a, b| {
-        a.texture_name
-            .cmp(&b.texture_name)
-            .then_with(|| format!("{:?}", a.alpha_mode).cmp(&format!("{:?}", b.alpha_mode)))
-    });
-    result
+    groups.into_values().collect()
 }
 
 /// Collect the zone's SOLID collision geometry from its terrain WLD(s), in world-space libeq
@@ -460,20 +463,31 @@ fn terrain_texture_names(meshes: &[ZoneMesh]) -> HashSet<String> {
 /// (eqoxide#688). So a name the terrain does not reference resolves from the object
 /// archive first. Terrain names stay main-first so each name maps to one glTF image; the
 /// client links meshes to textures by name.
+///
+/// `Ok(None)` means no archive holds the name; `Err` means an archive held it
+/// but it could not be read or decoded — a broken asset, never downgraded to a
+/// missing texture.
 fn resolve_texture(
     pfs_list: &mut [libeq_pfs::PfsReader<std::fs::File>],
     terrain_tex_names: &HashSet<String>,
     name: &str,
     alpha_mode: crate::convert::AlphaMode,
-) -> Option<Vec<u8>> {
+) -> anyhow::Result<Option<Vec<u8>>> {
     let order: Vec<usize> = if terrain_tex_names.contains(name) {
         (0..pfs_list.len()).collect()
     } else {
         (0..pfs_list.len()).rev().collect()
     };
-    order
-        .into_iter()
-        .find_map(|i| crate::convert::load_texture_from_archive(&mut pfs_list[i], name, alpha_mode))
+    let mut broken: Option<anyhow::Error> = None;
+    for i in order {
+        match crate::convert::load_texture_from_archive(&mut pfs_list[i], name, alpha_mode) {
+            Ok(Some(bytes)) => return Ok(Some(bytes)),
+            Ok(None) => {}
+            Err(e) if broken.is_none() => broken = Some(e),
+            Err(_) => {}
+        }
+    }
+    broken.map_or(Ok(None), Err)
 }
 
 /// Bake a zone into a single glb: terrain from `main_s3d` plus placed objects
@@ -500,6 +514,9 @@ pub fn bake_zone(main_s3d: &Path, obj_s3d: Option<&Path>, output_glb: &Path) -> 
 
     let mut materials: Vec<MaterialData> = Vec::new();
     let mut textures: Vec<TextureData> = Vec::new();
+    // name -> index lookups only. The serialized order is the push order of the
+    // `materials` / `textures` Vecs (driven by mesh iteration), so a HashMap here
+    // does not affect bake determinism (#50); it is never iterated.
     let mut tex_map: HashMap<String, usize> = HashMap::new(); // tex name -> texture idx
     let mut mat_map: HashMap<String, usize> = HashMap::new(); // tex name -> material idx
 
@@ -515,47 +532,62 @@ pub fn bake_zone(main_s3d: &Path, obj_s3d: Option<&Path>, output_glb: &Path) -> 
                             tex_map: &mut HashMap<String, usize>,
                             mat_map: &mut HashMap<String, usize>,
                             pfs_list: &mut Vec<libeq_pfs::PfsReader<std::fs::File>>|
-     -> usize {
+     -> anyhow::Result<usize> {
         let tex_key = m.texture_name.clone().unwrap_or_else(|| "untextured".to_string());
         // Material + texture caches key on (texture, alpha_mode): same texture under
         // different transparency needs its own material (and its own decode: masked
         // keys out index 0, blend bakes opacity into alpha).
         let key = format!("{}\0{:?}", tex_key, m.alpha_mode);
         if let Some(&idx) = mat_map.get(&key) {
-            return idx;
+            return Ok(idx);
         }
         // Decode + cache one texture by name (keyed by alpha_mode so masked/blend
-        // decodes don't collide with opaque). Returns its index in `textures`.
+        // decodes don't collide with opaque). `Ok(None)` means no archive has the
+        // name; `Err` means it was there but unreadable.
         let alpha_mode = m.alpha_mode;
         let decode = |name: &str,
                           textures: &mut Vec<TextureData>,
                           tex_map: &mut HashMap<String, usize>,
-                          pfs_list: &mut Vec<libeq_pfs::PfsReader<std::fs::File>>| -> Option<usize> {
+                          pfs_list: &mut Vec<libeq_pfs::PfsReader<std::fs::File>>|
+         -> anyhow::Result<Option<usize>> {
             let lower = name.to_lowercase();
             let cache_key = format!("{}\0{:?}", lower, alpha_mode);
             if let Some(&t) = tex_map.get(&cache_key) {
-                return Some(t);
+                return Ok(Some(t));
             }
-            let png = resolve_texture(pfs_list, &terrain_tex_names, &lower, alpha_mode);
-            png.map(|png_bytes| {
-                let t = textures.len();
-                textures.push(TextureData { name: lower, png_bytes });
-                tex_map.insert(cache_key, t);
-                t
-            })
+            match resolve_texture(pfs_list, &terrain_tex_names, &lower, alpha_mode)? {
+                Some(png_bytes) => {
+                    let t = textures.len();
+                    textures.push(TextureData { name: lower, png_bytes });
+                    tex_map.insert(cache_key, t);
+                    Ok(Some(t))
+                }
+                None => Ok(None),
+            }
         };
 
-        let texture_idx = m.texture_name.as_ref()
-            .and_then(|src| decode(src, textures, tex_map, pfs_list));
+        // A mesh that names a texture must get it: an unresolvable reference fails
+        // the zone bake rather than shipping an untextured surface (issue #50).
+        let texture_idx = match m.texture_name.as_ref() {
+            Some(src) => Some(
+                decode(src, textures, tex_map, pfs_list)?
+                    .with_context(|| format!("zone mesh texture '{src}' is in no archive"))?,
+            ),
+            None => None,
+        };
 
         // Animated texture: decode every frame so all are present as glTF images, and
         // record the (interval, frame names) so the client can cycle them.
-        let anim = m.anim.as_ref().map(|(ms, frames)| {
-            for f in frames {
-                decode(f, textures, tex_map, pfs_list);
+        let anim = match m.anim.as_ref() {
+            Some((ms, frames)) => {
+                for f in frames {
+                    decode(f, textures, tex_map, pfs_list)?
+                        .with_context(|| format!("animated texture frame '{f}' is in no archive"))?;
+                }
+                Some((*ms, frames.clone()))
             }
-            (*ms, frames.clone())
-        });
+            None => None,
+        };
 
         let idx = materials.len();
         materials.push(MaterialData {
@@ -566,7 +598,7 @@ pub fn bake_zone(main_s3d: &Path, obj_s3d: Option<&Path>, output_glb: &Path) -> 
             anim,
         });
         mat_map.insert(key, idx);
-        idx
+        Ok(idx)
     };
 
     // Fold a group of ZoneMeshes (sharing a vertex pool) into one MeshData.
@@ -584,8 +616,8 @@ pub fn bake_zone(main_s3d: &Path, obj_s3d: Option<&Path>, output_glb: &Path) -> 
         &mut HashMap<String, usize>,
         &mut HashMap<String, usize>,
         &mut Vec<libeq_pfs::PfsReader<std::fs::File>>,
-    ) -> usize|
-     -> Option<MeshData> {
+    ) -> anyhow::Result<usize>|
+     -> anyhow::Result<Option<MeshData>> {
         let mut positions: Vec<[f32; 3]> = Vec::new();
         let mut normals: Vec<[f32; 3]> = Vec::new();
         let mut uvs: Vec<[f32; 2]> = Vec::new();
@@ -597,11 +629,11 @@ pub fn bake_zone(main_s3d: &Path, obj_s3d: Option<&Path>, output_glb: &Path) -> 
             normals.extend_from_slice(&m.normals);
             uvs.extend_from_slice(&m.uvs);
             let indices: Vec<u32> = m.indices.iter().map(|&i| i + offset).collect();
-            let material_idx = material_for(m, materials, textures, tex_map, mat_map, pfs_list);
+            let material_idx = material_for(m, materials, textures, tex_map, mat_map, pfs_list)?;
             primitives.push(PrimitiveData { indices, material_idx, extras: None });
         }
-        if primitives.is_empty() { return None; }
-        Some(MeshData { name, positions, normals, uvs, primitives })
+        if primitives.is_empty() { return Ok(None); }
+        Ok(Some(MeshData { name, positions, normals, uvs, primitives }))
     };
 
     let mut meshes: Vec<MeshData> = Vec::new();
@@ -611,7 +643,7 @@ pub fn bake_zone(main_s3d: &Path, obj_s3d: Option<&Path>, output_glb: &Path) -> 
     if let Some(md) = build_mesh(
         "terrain".to_string(), &welded_terrain,
         &mut materials, &mut textures, &mut tex_map, &mut mat_map, &mut pfs_list, &mut material_for,
-    ) {
+    )? {
         let mesh_idx = meshes.len();
         meshes.push(md);
         nodes.push(NodeDef { mesh_idx, matrix: None });
@@ -650,7 +682,7 @@ pub fn bake_zone(main_s3d: &Path, obj_s3d: Option<&Path>, output_glb: &Path) -> 
                     let Some(md) = build_mesh(
                         base.clone(), group,
                         &mut materials, &mut textures, &mut tex_map, &mut mat_map, &mut pfs_list, &mut material_for,
-                    ) else { continue };
+                    )? else { continue };
                     let i = meshes.len();
                     meshes.push(md);
                     base_mesh_idx.insert(base.clone(), i);
@@ -668,13 +700,16 @@ pub fn bake_zone(main_s3d: &Path, obj_s3d: Option<&Path>, output_glb: &Path) -> 
     write_glb_instanced(output_glb, &meshes, &materials, &textures, &nodes)
 }
 
-/// Build material/texture/mesh/node data from a `HashMap<base, Vec<ZoneMesh>>` and
+/// Build material/texture/mesh/node data from a `BTreeMap<base, Vec<ZoneMesh>>` and
 /// write a GLB with one identity-node mesh per object base name (UPPERCASE mesh name),
 /// textures embedded. Returns `Ok(false)` without writing anything when there are no
 /// non-empty meshes. Shared by [`bake_object_models_glb`] (doors) and future callers
 /// (weapons, armor).
+///
+/// The map is a `BTreeMap`: meshes and materials are emitted in key order so the
+/// GLB is byte-identical across bakes (issue #50).
 pub(crate) fn write_object_models_glb(
-    models: HashMap<String, Vec<ZoneMesh>>,
+    models: BTreeMap<String, Vec<ZoneMesh>>,
     pfs: &mut Vec<libeq_pfs::PfsReader<std::fs::File>>,
     out_glb: &Path,
 ) -> anyhow::Result<bool> {
@@ -691,28 +726,43 @@ pub(crate) fn write_object_models_glb(
     let mut nodes: Vec<NodeDef> = Vec::new();
 
     // Resolve a ZoneMesh to a glTF material index, decoding+caching textures once.
+    // A mesh that names a texture must get it: an unresolvable reference or an
+    // undecodable blob fails the bake (issue #50).
     let material_for = |m: &ZoneMesh,
                         materials: &mut Vec<MaterialData>,
                         textures: &mut Vec<TextureData>,
                         tex_map: &mut HashMap<String, usize>,
                         mat_map: &mut HashMap<String, usize>,
                         pfs: &mut Vec<libeq_pfs::PfsReader<std::fs::File>>|
-     -> usize {
+     -> anyhow::Result<usize> {
         let tex_key = m.texture_name.clone().unwrap_or_else(|| "untextured".to_string());
         let key = format!("{}\0{:?}", tex_key, m.alpha_mode);
-        if let Some(&i) = mat_map.get(&key) { return i; }
-        let texture_idx = m.texture_name.as_ref().and_then(|name| {
-            let lower = name.to_lowercase();
-            let ck = format!("{}\0{:?}", lower, m.alpha_mode);
-            if let Some(&t) = tex_map.get(&ck) { return Some(t); }
-            let png = pfs.iter_mut().find_map(|p| load_texture_from_archive(p, &lower, m.alpha_mode));
-            png.map(|b| {
-                let t = textures.len();
-                textures.push(TextureData { name: lower, png_bytes: b });
-                tex_map.insert(ck, t);
-                t
-            })
-        });
+        if let Some(&i) = mat_map.get(&key) { return Ok(i); }
+        let texture_idx = match m.texture_name.as_ref() {
+            Some(name) => {
+                let lower = name.to_lowercase();
+                let ck = format!("{}\0{:?}", lower, m.alpha_mode);
+                if let Some(&t) = tex_map.get(&ck) {
+                    Some(t)
+                } else {
+                    let mut png: Option<Vec<u8>> = None;
+                    for p in pfs.iter_mut() {
+                        if let Some(b) = load_texture_from_archive(p, &lower, m.alpha_mode)
+                            .with_context(|| format!("texture '{lower}'"))?
+                        {
+                            png = Some(b);
+                            break;
+                        }
+                    }
+                    let b = png.with_context(|| format!("object mesh texture '{lower}' is in no archive"))?;
+                    let t = textures.len();
+                    textures.push(TextureData { name: lower, png_bytes: b });
+                    tex_map.insert(ck, t);
+                    Some(t)
+                }
+            }
+            None => None,
+        };
         let idx = materials.len();
         materials.push(MaterialData {
             name: tex_key,
@@ -722,14 +772,12 @@ pub(crate) fn write_object_models_glb(
             anim: m.anim.clone(),
         });
         mat_map.insert(key, idx);
-        idx
+        Ok(idx)
     };
 
-    // Deterministic order for reproducible GLBs.
-    let mut bases: Vec<&String> = models.keys().collect();
-    bases.sort();
-    for base in bases {
-        let group = &models[base];
+    // `models` is a BTreeMap, so iterating it is already key-ordered — the GLB
+    // stays byte-identical across bakes without a separate sort.
+    for (base, group) in &models {
         let mut positions: Vec<[f32; 3]> = Vec::new();
         let mut normals: Vec<[f32; 3]> = Vec::new();
         let mut uvs: Vec<[f32; 2]> = Vec::new();
@@ -741,7 +789,7 @@ pub(crate) fn write_object_models_glb(
             normals.extend_from_slice(&zm.normals);
             uvs.extend_from_slice(&zm.uvs);
             let indices: Vec<u32> = zm.indices.iter().map(|&i| i + offset).collect();
-            let material_idx = material_for(zm, &mut materials, &mut textures, &mut tex_map, &mut mat_map, pfs);
+            let material_idx = material_for(zm, &mut materials, &mut textures, &mut tex_map, &mut mat_map, pfs)?;
             primitives.push(PrimitiveData { indices, material_idx, extras: None });
         }
         if primitives.is_empty() { continue; }
@@ -838,7 +886,8 @@ mod fire_orientation_tests {
         let mut pfs = libeq_pfs::PfsReader::open(std::fs::File::open(&path).unwrap()).unwrap();
         let tex = fire.texture_name.clone().unwrap();
         let png = crate::convert::load_texture_from_archive(&mut pfs, &tex, fire.alpha_mode)
-            .unwrap_or_else(|| panic!("decode {tex} from {archive}"));
+            .unwrap_or_else(|e| panic!("decode {tex} from {archive}: {e}"))
+            .unwrap_or_else(|| panic!("{tex} absent from {archive}"));
         let img = image::load_from_memory(&png).unwrap().to_rgba8();
 
         // Compare texture bands sampled just inside each end of the card (avoid
@@ -1127,7 +1176,9 @@ mod texture_precedence_tests {
         let mut pfs = vec![open_pfs(&main), open_pfs(&obj)];
 
         let terrain: HashSet<String> = ["ground.bmp".to_string()].into_iter().collect();
-        let png = resolve_texture(&mut pfs, &terrain, "foliage.bmp", AlphaMode::Masked).unwrap();
+        let png = resolve_texture(&mut pfs, &terrain, "foliage.bmp", AlphaMode::Masked)
+            .unwrap()
+            .expect("foliage.bmp resolves");
         assert!(
             transparent_texels(&png) > 0,
             "resolved the main archive's opaque copy; a MASK material over it discards nothing"
@@ -1146,7 +1197,9 @@ mod texture_precedence_tests {
         let mut pfs = vec![open_pfs(&main), open_pfs(&obj)];
 
         let terrain: HashSet<String> = ["shared.bmp".to_string()].into_iter().collect();
-        let png = resolve_texture(&mut pfs, &terrain, "shared.bmp", AlphaMode::Masked).unwrap();
+        let png = resolve_texture(&mut pfs, &terrain, "shared.bmp", AlphaMode::Masked)
+            .unwrap()
+            .expect("shared.bmp resolves");
         assert_eq!(transparent_texels(&png), 0, "terrain names must stay main-first");
     }
 
@@ -1161,7 +1214,9 @@ mod texture_precedence_tests {
         let mut pfs = vec![open_pfs(&main), open_pfs(&obj)];
 
         let terrain: HashSet<String> = ["ground.bmp".to_string()].into_iter().collect();
-        let png = resolve_texture(&mut pfs, &terrain, "bpine.bmp", AlphaMode::Masked).unwrap();
+        let png = resolve_texture(&mut pfs, &terrain, "bpine.bmp", AlphaMode::Masked)
+            .unwrap()
+            .expect("bpine.bmp resolves");
         assert!(transparent_texels(&png) > 0);
     }
     /// A terrain material's animated frames must all land in the set. Otherwise frame 0

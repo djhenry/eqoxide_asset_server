@@ -36,7 +36,11 @@ pub(crate) struct TextureData {
 /// Transparency mode derived from the EQ material's `RenderMethod` / `MaterialType`.
 /// Drives both how the source texture is decoded (masked keys out palette index 0)
 /// and which glTF `alphaMode` is emitted.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+///
+/// `Ord` is derived (variant order, then `Blend`'s permille) purely so callers can
+/// key a `BTreeMap` or sort by it for a deterministic bake — it carries no visual
+/// meaning.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
 pub enum AlphaMode {
     #[default]
     Opaque,
@@ -217,7 +221,12 @@ fn convert_s3d_to_glb(input: &Path, output: &Path) -> Result<()> {
                     }
                     None => HashMap::new(),
                 },
-                Err(_) => HashMap::new(),
+                // `libeq_wld::load` already parsed this WLD above; a second parse
+                // failing here means something is genuinely inconsistent — don't
+                // paper over it with an empty (unposed) map.
+                Err(errs) => {
+                    anyhow::bail!("re-parse {wld_name} for bind pose: {errs:?}");
+                }
             };
 
         for mesh in wld.meshes() {
@@ -294,7 +303,7 @@ fn convert_s3d_to_glb(input: &Path, output: &Path) -> Result<()> {
                     &material,
                     texture_source.as_deref(),
                     &mut pfs,
-                );
+                )?;
 
                 merged_primitives.push(PrimitiveData {
                     indices: prim_indices,
@@ -337,6 +346,12 @@ fn convert_s3d_to_glb(input: &Path, output: &Path) -> Result<()> {
     write_glb(output, &all_meshes, &materials, &textures)
 }
 
+/// Append a material for `material`, resolving its texture through `texture_map`
+/// (keyed by source + alpha mode) so identical textures share one buffer entry.
+///
+/// A material with no texture source stays untextured. A material that *names* a
+/// texture which cannot be read, decoded, or found in the archive is a hard
+/// error — never a silently untextured primitive (issue #50).
 fn get_or_create_material(
     materials: &mut Vec<MaterialData>,
     texture_map: &mut HashMap<String, usize>,
@@ -344,7 +359,7 @@ fn get_or_create_material(
     material: &libeq_wld::Material<'_>,
     texture_source: Option<&str>,
     pfs: &mut libeq_pfs::PfsReader<fs::File>,
-) -> usize {
+) -> Result<usize> {
     let mat_name = material.name().unwrap_or("unnamed").to_string();
     let alpha_mode = alpha_mode_from_render(material.render_method());
 
@@ -357,18 +372,18 @@ fn get_or_create_material(
             Some(idx)
         } else {
             let tex_name = src.to_lowercase();
-            match load_texture_from_archive(pfs, &tex_name, alpha_mode) {
-                Some(png_bytes) => {
-                    let idx = textures.len();
-                    textures.push(TextureData {
-                        name: tex_name,
-                        png_bytes,
-                    });
-                    texture_map.insert(cache_key, idx);
-                    Some(idx)
-                }
-                None => None,
-            }
+            let png_bytes = load_texture_from_archive(pfs, &tex_name, alpha_mode)
+                .with_context(|| format!("material '{mat_name}' texture '{tex_name}'"))?
+                .with_context(|| {
+                    format!("material '{mat_name}' references texture '{tex_name}', which is in no archive")
+                })?;
+            let idx = textures.len();
+            textures.push(TextureData {
+                name: tex_name,
+                png_bytes,
+            });
+            texture_map.insert(cache_key, idx);
+            Some(idx)
         }
     } else {
         None
@@ -382,7 +397,7 @@ fn get_or_create_material(
         alpha_mode,
         anim: None, // character/weapon model textures: keep first frame only
     });
-    idx
+    Ok(idx)
 }
 
 /// Map an EQ material's `RenderMethod` to our [`AlphaMode`]. Foliage and other
@@ -454,27 +469,29 @@ fn head_region_from_material_name(name: &str) -> Option<u8> {
 }
 
 /// Load a texture by filename from the PFS archive, caching in `texture_map` to
-/// avoid duplicate buffer entries. Returns the texture index in `textures`, or
-/// `None` if the file is absent in the archive.
+/// avoid duplicate buffer entries. `Ok(Some(idx))` is the index in `textures`;
+/// `Ok(None)` means the file is genuinely absent from this archive (the caller
+/// decides whether that is fatal — a speculative face-variant probe skips it, a
+/// named region requires it); `Err` means it was present but unreadable.
 fn load_or_cache_texture(
     pfs: &mut libeq_pfs::PfsReader<fs::File>,
     name: &str,
     alpha_mode: AlphaMode,
     textures: &mut Vec<TextureData>,
     texture_map: &mut HashMap<String, usize>,
-) -> Option<usize> {
+) -> Result<Option<usize>> {
     let cache_key = format!("{}\0{:?}", name, alpha_mode);
     if let Some(&idx) = texture_map.get(&cache_key) {
-        return Some(idx);
+        return Ok(Some(idx));
     }
-    match load_texture_from_archive(pfs, name, alpha_mode) {
+    match load_texture_from_archive(pfs, name, alpha_mode)? {
         Some(png_bytes) => {
             let idx = textures.len();
             textures.push(TextureData { name: name.to_string(), png_bytes });
             texture_map.insert(cache_key, idx);
-            Some(idx)
+            Ok(Some(idx))
         }
-        None => None,
+        None => Ok(None),
     }
 }
 
@@ -498,46 +515,69 @@ fn race_code_from_archive(path: &Path) -> Option<String> {
     Some(code.to_string())
 }
 
+/// Resolve `name` to a PNG blob from `pfs`, trying the name as referenced and
+/// then the stem with each texture extension EQ is known to ship (`.dds`,
+/// `.bmp`, `.png`) — WLD material references routinely name the wrong one.
+///
+/// `Ok(None)` means no candidate exists in this archive; the caller is free to
+/// try another archive. `Err` means a candidate *was* present but could not be
+/// read or decoded — a broken asset, never silently downgraded to "no texture".
 pub(crate) fn load_texture_from_archive(
     pfs: &mut libeq_pfs::PfsReader<fs::File>,
     name: &str,
     alpha_mode: AlphaMode,
-) -> Option<Vec<u8>> {
+) -> Result<Option<Vec<u8>>> {
     let lower = name.to_lowercase();
+    let stem = lower
+        .strip_suffix(".dds")
+        .or_else(|| lower.strip_suffix(".bmp"))
+        .or_else(|| lower.strip_suffix(".png"))
+        .unwrap_or(&lower);
 
-    // Try the name as-is first
-    if let Some(data) = try_load_image(pfs, &lower, alpha_mode) {
-        return Some(data);
-    }
-
-    // Try stripping extension and trying common ones
-    let stem = if lower.ends_with(".dds") || lower.ends_with(".bmp") || lower.ends_with(".png") {
-        &lower[..lower.len() - 4]
-    } else {
-        &lower
-    };
-
-    for ext in &[".dds", ".bmp", ".png"] {
-        let filename = format!("{}{}", stem, ext);
-        if let Some(data) = try_load_image(pfs, &filename, alpha_mode) {
-            return Some(data);
+    // A present-but-undecodable candidate is a broken asset: keep looking for a
+    // good sibling, but if none turns up, surface that failure rather than
+    // `Ok(None)` (which the caller reads as "texture genuinely absent").
+    let mut broken: Option<anyhow::Error> = None;
+    let candidates = std::iter::once(lower.clone())
+        .chain([".dds", ".bmp", ".png"].into_iter().map(|ext| format!("{stem}{ext}")));
+    for filename in candidates {
+        match try_load_image(pfs, &filename, alpha_mode) {
+            Ok(Some(png)) => return Ok(Some(png)),
+            Ok(None) => {}
+            Err(e) if broken.is_none() => broken = Some(e),
+            Err(_) => {}
         }
     }
-    None
+    broken.map_or(Ok(None), Err)
 }
 
-fn try_load_image(pfs: &mut libeq_pfs::PfsReader<fs::File>, filename: &str, alpha_mode: AlphaMode) -> Option<Vec<u8>> {
-    let data = pfs.get(filename).ok()??;
+/// Decode a texture blob and re-encode it as a PNG, honoring EQ's per-material
+/// alpha conventions (masked keys out palette index 0; blended bakes opacity into
+/// the alpha channel).
+///
+/// Every decode or encode failure is an `Err`: a blob that is present in an
+/// archive but cannot be turned into a texture is a broken asset, not a
+/// texture-less material. The old `try_load_image` funnelled every one of these
+/// through `.ok()?`, so a corrupt DDS silently became an untextured primitive
+/// and the resulting `.glb` still baked (issue #50 asked for the opposite).
+fn encode_texture_png(data: &[u8], alpha_mode: AlphaMode, name: &str) -> Result<Vec<u8>> {
     // For masked materials, recover EQ's keyed transparency: in 8-bit paletted BMPs
     // palette index 0 is the transparent key. The `image` crate's to_rgba8() would
     // make it opaque, so decode the palette ourselves when we can.
     let mut rgba = if alpha_mode == AlphaMode::Masked {
-        decode_bmp_keyed(&data).unwrap_or_else(|| image::load_from_memory(&data).ok().map(|i| i.to_rgba8()).unwrap_or_default())
+        match decode_bmp_keyed(data) {
+            Some(img) => img,
+            None => image::load_from_memory(data)
+                .with_context(|| format!("decode masked texture {name}"))?
+                .to_rgba8(),
+        }
     } else {
-        image::load_from_memory(&data).ok()?.to_rgba8()
+        image::load_from_memory(data)
+            .with_context(|| format!("decode texture {name}"))?
+            .to_rgba8()
     };
     if rgba.is_empty() {
-        return None;
+        anyhow::bail!("texture {name} decoded to a zero-pixel image");
     }
     // Bake per-material opacity into the alpha channel for blended materials so the
     // client can blend straight from the texture (no per-draw opacity uniform).
@@ -548,8 +588,27 @@ fn try_load_image(pfs: &mut libeq_pfs::PfsReader<fs::File>, filename: &str, alph
         }
     }
     let mut png_buf = Cursor::new(Vec::new());
-    rgba.write_to(&mut png_buf, image::ImageFormat::Png).ok()?;
-    Some(png_buf.into_inner())
+    rgba.write_to(&mut png_buf, image::ImageFormat::Png)
+        .with_context(|| format!("re-encode texture {name} as png"))?;
+    Ok(png_buf.into_inner())
+}
+
+/// Read `filename` from `pfs` and re-encode it as a PNG. `Ok(None)` means the
+/// file is simply not in this archive — a normal miss the caller retries with a
+/// different extension or a different archive. `Err` means the file *is* present
+/// but could not be read or decoded.
+fn try_load_image(
+    pfs: &mut libeq_pfs::PfsReader<fs::File>,
+    filename: &str,
+    alpha_mode: AlphaMode,
+) -> Result<Option<Vec<u8>>> {
+    let Some(data) = pfs
+        .get(filename)
+        .with_context(|| format!("read {filename} from archive"))?
+    else {
+        return Ok(None);
+    };
+    encode_texture_png(&data, alpha_mode, filename).map(Some)
 }
 
 /// Decode an 8-bit paletted BMP, treating palette index 0 as fully transparent
@@ -1566,7 +1625,11 @@ fn convert_s3d_to_glb_skinned(input: &Path, output: &Path, model_code: Option<&s
                         let mut emitted = 0u8;
                         for f in 0u8..=7 {
                             let tex_name = format!("{}hesk{}{}", race_code, f, n);
-                            let tex_idx = match load_or_cache_texture(&mut pfs, &tex_name, AlphaMode::Opaque, &mut textures, &mut texture_map) {
+                            // Speculative probe: not every race ships all 8 face
+                            // variants, so a genuine absence (`Ok(None)`) just
+                            // skips that variant. A present-but-broken texture
+                            // (`Err`) still aborts the conversion.
+                            let tex_idx = match load_or_cache_texture(&mut pfs, &tex_name, AlphaMode::Opaque, &mut textures, &mut texture_map)? {
                                 Some(t) => t,
                                 None => {
                                     eprintln!("  head region N={} face F={}: texture '{}' not found in archive", n, f, tex_name);
@@ -1608,12 +1671,16 @@ fn convert_s3d_to_glb_skinned(input: &Path, output: &Path, model_code: Option<&s
                     }
                     Some(n) => {
                         // Fixed head region: emit once with {race}hesk0{N}.dds.
+                        // This region is always part of the head — its texture is
+                        // required, so a miss is a hard error, not an untextured
+                        // face.
                         let tex_name = format!("{}hesk0{}", race_code, n);
-                        let tex_idx = load_or_cache_texture(&mut pfs, &tex_name, AlphaMode::Opaque, &mut textures, &mut texture_map);
+                        let tex_idx = load_or_cache_texture(&mut pfs, &tex_name, AlphaMode::Opaque, &mut textures, &mut texture_map)?
+                            .with_context(|| format!("fixed head region N={n} requires texture '{tex_name}', absent from archive"))?;
                         let mat_idx = materials.len();
                         materials.push(MaterialData {
                             name: tex_name.clone(),
-                            texture_idx: tex_idx,
+                            texture_idx: Some(tex_idx),
                             base_color: [1.0, 1.0, 1.0, 1.0],
                             alpha_mode: AlphaMode::Opaque,
                             anim: None,
@@ -1643,7 +1710,7 @@ fn convert_s3d_to_glb_skinned(input: &Path, output: &Path, model_code: Option<&s
                             &material,
                             tex.as_deref(),
                             &mut pfs,
-                        );
+                        )?;
                         prims.push(PrimitiveData {
                             indices: idxs,
                             material_idx: midx,
@@ -2158,250 +2225,27 @@ pub fn analyze_anims(input: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Write `meshes` to a GLB with one implicit identity node per mesh (node `i`
+/// references mesh `i`, no transform). A thin wrapper over [`write_glb_instanced`]
+/// — the shared writer does all buffer/accessor/mesh work; this only supplies the
+/// default node list. Used by the single-model bakes (character and EQG archives).
 pub(crate) fn write_glb(
     output: &Path,
     meshes: &[MeshData],
     materials: &[MaterialData],
     textures: &[TextureData],
 ) -> Result<()> {
-    let mut buffer_data: Vec<u8> = Vec::new();
-    let mut buffer_views: Vec<serde_json::Value> = Vec::new();
-    let mut accessors: Vec<serde_json::Value> = Vec::new();
-    let mut images: Vec<serde_json::Value> = Vec::new();
-    let mut gltf_textures: Vec<serde_json::Value> = Vec::new();
-    let mut gltf_materials: Vec<serde_json::Value> = Vec::new();
-    let mut gltf_meshes: Vec<serde_json::Value> = Vec::new();
-    let mut nodes: Vec<serde_json::Value> = Vec::new();
-
-    // Add textures as images
-    for tex in textures {
-        let view_idx = buffer_views.len();
-        let byte_offset = buffer_data.len() as u32;
-        buffer_data.extend_from_slice(&tex.png_bytes);
-        while buffer_data.len() % 4 != 0 {
-            buffer_data.push(0);
-        }
-        buffer_views.push(serde_json::json!({
-            "buffer": 0,
-            "byteOffset": byte_offset,
-            "byteLength": tex.png_bytes.len(),
-        }));
-        images.push(serde_json::json!({
-            "bufferView": view_idx,
-            "mimeType": "image/png",
-            "name": tex.name,
-        }));
-        gltf_textures.push(serde_json::json!({
-            "source": images.len() - 1,
-        }));
-    }
-
-    // Add materials
-    for mat in materials {
-        gltf_materials.push(material_to_gltf(mat));
-    }
-
-    // Add meshes — each MeshData becomes one glTF mesh with shared vertices
-    // and multiple primitives (one per material group).
-    for mesh in meshes {
-        let mut attributes = serde_json::Map::new();
-
-        // Positions (shared across all primitives)
-        let pos_offset = buffer_data.len() as u32;
-        for p in &mesh.positions {
-            buffer_data.extend_from_slice(&p[0].to_le_bytes());
-            buffer_data.extend_from_slice(&p[1].to_le_bytes());
-            buffer_data.extend_from_slice(&p[2].to_le_bytes());
-        }
-        let pos_byte_len = (mesh.positions.len() * 12) as u32;
-        let pos_view_idx = buffer_views.len();
-        buffer_views.push(serde_json::json!({
-            "buffer": 0,
-            "byteOffset": pos_offset,
-            "byteLength": pos_byte_len,
-            "target": 34962,
-        }));
-        let (pos_min, pos_max) = compute_bounds_f32x3(&mesh.positions);
-        let pos_acc_idx = accessors.len();
-        accessors.push(serde_json::json!({
-            "bufferView": pos_view_idx,
-            "componentType": 5126,
-            "count": mesh.positions.len(),
-            "type": "VEC3",
-            "min": pos_min,
-            "max": pos_max,
-        }));
-        attributes.insert("POSITION".to_string(), serde_json::json!(pos_acc_idx));
-
-        // Normals (shared across all primitives)
-        let norm_offset = buffer_data.len() as u32;
-        for n in &mesh.normals {
-            buffer_data.extend_from_slice(&n[0].to_le_bytes());
-            buffer_data.extend_from_slice(&n[1].to_le_bytes());
-            buffer_data.extend_from_slice(&n[2].to_le_bytes());
-        }
-        let norm_byte_len = (mesh.normals.len() * 12) as u32;
-        let norm_view_idx = buffer_views.len();
-        buffer_views.push(serde_json::json!({
-            "buffer": 0,
-            "byteOffset": norm_offset,
-            "byteLength": norm_byte_len,
-            "target": 34962,
-        }));
-        let norm_acc_idx = accessors.len();
-        accessors.push(serde_json::json!({
-            "bufferView": norm_view_idx,
-            "componentType": 5126,
-            "count": mesh.normals.len(),
-            "type": "VEC3",
-        }));
-        attributes.insert("NORMAL".to_string(), serde_json::json!(norm_acc_idx));
-
-        // UVs (shared across all primitives)
-        let uv_offset = buffer_data.len() as u32;
-        for u in &mesh.uvs {
-            buffer_data.extend_from_slice(&u[0].to_le_bytes());
-            buffer_data.extend_from_slice(&u[1].to_le_bytes());
-        }
-        let uv_byte_len = (mesh.uvs.len() * 8) as u32;
-        let uv_view_idx = buffer_views.len();
-        buffer_views.push(serde_json::json!({
-            "buffer": 0,
-            "byteOffset": uv_offset,
-            "byteLength": uv_byte_len,
-            "target": 34962,
-        }));
-        let uv_acc_idx = accessors.len();
-        accessors.push(serde_json::json!({
-            "bufferView": uv_view_idx,
-            "componentType": 5126,
-            "count": mesh.uvs.len(),
-            "type": "VEC2",
-        }));
-        attributes.insert("TEXCOORD_0".to_string(), serde_json::json!(uv_acc_idx));
-
-        // One glTF primitive per material group, each with its own index buffer.
-        // Use u32 indices (componentType 5125) when the mesh has >65535 vertices;
-        // u16 (5123) silently wraps for large meshes and corrupts geometry.
-        let use_u32_indices = mesh.positions.len() > 65535;
-        let mut gltf_primitives = Vec::new();
-        for prim in &mesh.primitives {
-            let idx_offset = buffer_data.len() as u32;
-            if use_u32_indices {
-                for &i in &prim.indices {
-                    buffer_data.extend_from_slice(&i.to_le_bytes());
-                }
-            } else {
-                for &i in &prim.indices {
-                    buffer_data.extend_from_slice(&(i as u16).to_le_bytes());
-                }
-            }
-            while buffer_data.len() % 4 != 0 {
-                buffer_data.push(0);
-            }
-            let idx_byte_len = prim.indices.len() * if use_u32_indices { 4 } else { 2 };
-            let idx_component_type = if use_u32_indices { 5125u32 } else { 5123u32 };
-            let idx_view_idx = buffer_views.len();
-            buffer_views.push(serde_json::json!({
-                "buffer": 0,
-                "byteOffset": idx_offset,
-                "byteLength": idx_byte_len,
-                "target": 34963,
-            }));
-            let idx_acc_idx = accessors.len();
-            accessors.push(serde_json::json!({
-                "bufferView": idx_view_idx,
-                "componentType": idx_component_type,
-                "count": prim.indices.len(),
-                "type": "SCALAR",
-            }));
-
-            let mut prim_json = serde_json::json!({
-                "attributes": attributes,
-                "indices": idx_acc_idx,
-                "material": prim.material_idx,
-            });
-            if let Some(extras) = &prim.extras {
-                prim_json["extras"] = extras.clone();
-            }
-            gltf_primitives.push(prim_json);
-        }
-
-        gltf_meshes.push(serde_json::json!({
-            "name": mesh.name,
-            "primitives": gltf_primitives,
-        }));
-
-        let node_idx = nodes.len();
-        nodes.push(serde_json::json!({
-            "mesh": node_idx,
-        }));
-    }
-
-    // Pad buffer to 4 bytes
-    while buffer_data.len() % 4 != 0 {
-        buffer_data.push(0);
-    }
-
-    let gltf = serde_json::json!({
-        "asset": {
-            "version": "2.0",
-            "generator": "s3d_to_gltf",
-        },
-        "scene": 0,
-        "scenes": [{
-            "name": "scene",
-            "nodes": (0..nodes.len()).collect::<Vec<_>>(),
-        }],
-        "nodes": nodes,
-        "meshes": gltf_meshes,
-        "accessors": accessors,
-        "bufferViews": buffer_views,
-        "buffers": [{
-            "byteLength": buffer_data.len(),
-        }],
-        "materials": gltf_materials,
-        "images": images,
-        "textures": gltf_textures,
-    });
-
-    let json_str = serde_json::to_string(&gltf)?;
-    let json_bytes = json_str.as_bytes();
-    let json_padded_len = (json_bytes.len() + 3) & !3;
-
-    let bin_padded_len = buffer_data.len();
-    let total_len = 12 + 8 + json_padded_len + 8 + bin_padded_len;
-
-    let mut out = fs::File::create(output)
-        .with_context(|| format!("failed to create {}", output.display()))?;
-
-    // GLB header
-    out.write_all(&0x46546C67u32.to_le_bytes())?;
-    out.write_all(&2u32.to_le_bytes())?;
-    out.write_all(&(total_len as u32).to_le_bytes())?;
-
-    // JSON chunk
-    out.write_all(&(json_padded_len as u32).to_le_bytes())?;
-    out.write_all(&0x4E4F534Au32.to_le_bytes())?;
-    out.write_all(json_bytes)?;
-    for _ in json_bytes.len()..json_padded_len {
-        out.write_all(b" ")?;
-    }
-
-    // Binary chunk
-    out.write_all(&(bin_padded_len as u32).to_le_bytes())?;
-    out.write_all(&0x004E4942u32.to_le_bytes())?;
-    out.write_all(&buffer_data)?;
-
-    eprintln!("  wrote {} bytes to {}", total_len, output.display());
-    Ok(())
+    let nodes: Vec<NodeDef> = (0..meshes.len())
+        .map(|mesh_idx| NodeDef { mesh_idx, matrix: None })
+        .collect();
+    write_glb_instanced(output, meshes, materials, textures, &nodes)
 }
 
-/// Like [`write_glb`], but decouples nodes from meshes so a single mesh can be
-/// instanced by many nodes. Emits `meshes[]` exactly as `write_glb` does, then
-/// `nodes[]` from the supplied [`NodeDef`] list (each node references a mesh by
-/// index and carries an optional column-major 4x4 `matrix`). Used by zone baking
-/// to share one welded mesh per object model across all placement nodes.
+/// Write `meshes`, `materials`, and `textures` to a binary glTF (GLB) file, with
+/// `nodes[]` built from the supplied [`NodeDef`] list — each node references a
+/// mesh by index and carries an optional column-major 4x4 `matrix` (identity when
+/// `None`). Decoupling nodes from meshes lets a single welded mesh be instanced by
+/// many placement nodes, which is how zone baking shares one mesh per object model.
 pub(crate) fn write_glb_instanced(
     output: &Path,
     meshes: &[MeshData],
@@ -2628,17 +2472,38 @@ pub(crate) fn bake_weapons_glb(
     archives: &[&str],
     out_glb: &Path,
 ) -> anyhow::Result<bool> {
-    use std::collections::HashMap;
-    let mut models: HashMap<String, Vec<crate::zone::ZoneMesh>> = HashMap::new();
+    use std::collections::BTreeMap;
+    // BTreeMap, not HashMap: `write_object_models_glb` walks this in key order and
+    // the GLB must be byte-identical across bakes (issue #50).
+    let mut models: BTreeMap<String, Vec<crate::zone::ZoneMesh>> = BTreeMap::new();
     let mut pfs_for_tex: Vec<libeq_pfs::PfsReader<std::fs::File>> = Vec::new();
     for arch in archives {
         let p = raw_dir.join(arch);
-        let Ok(file) = std::fs::File::open(&p) else { continue };
-        let Ok(mut pfs) = libeq_pfs::PfsReader::open(file) else { continue };
-        let Ok(names) = pfs.filenames() else { continue };
+        // A gequip archive that simply isn't installed is fine to skip; one that
+        // exists but can't be opened or parsed is a broken input, not a skip.
+        let file = match std::fs::File::open(&p) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).with_context(|| format!("open {}", p.display())),
+        };
+        let mut pfs = libeq_pfs::PfsReader::open(file)
+            .with_context(|| format!("parse PFS {}", p.display()))?;
+        let names = pfs.filenames().with_context(|| format!("list {}", p.display()))?;
         for wn in names.iter().filter(|f| f.to_lowercase().ends_with(".wld")) {
-            let Ok(Some(bytes)) = pfs.get(wn) else { continue };
-            let Ok(wld) = libeq_wld::load(&bytes) else { continue };
+            let bytes = match pfs.get(wn).with_context(|| format!("read {wn} from {}", p.display()))? {
+                Some(b) => b,
+                None => continue,
+            };
+            let wld = match libeq_wld::load(&bytes) {
+                Ok(w) => w,
+                // Tolerant, like `convert_s3d_to_glb`: a weapons archive holds many
+                // WLDs and an odd one that won't parse shouldn't sink the rest — but
+                // say so rather than dropping it silently.
+                Err(e) => {
+                    eprintln!("  warning: skipping {wn} in {}: {e}", p.display());
+                    continue;
+                }
+            };
             for mesh in wld.meshes() {
                 let Some(name) = mesh.name() else { continue };
                 let base = crate::zone::object_base_name(name);
@@ -2650,11 +2515,10 @@ pub(crate) fn bake_weapons_glb(
             }
         }
         // Reopen the archive for the texture-decode pass.
-        if let Ok(f) = std::fs::File::open(&p) {
-            if let Ok(r) = libeq_pfs::PfsReader::open(f) {
-                pfs_for_tex.push(r);
-            }
-        }
+        let f = std::fs::File::open(&p).with_context(|| format!("reopen {}", p.display()))?;
+        pfs_for_tex.push(
+            libeq_pfs::PfsReader::open(f).with_context(|| format!("reparse PFS {}", p.display()))?,
+        );
     }
     if models.is_empty() {
         return Ok(false);
@@ -2761,6 +2625,23 @@ fn parse_eqg_model(b: &[u8]) -> Result<EqgMesh> {
     Ok(EqgMesh { positions, normals, uvs, tris, mat_textures })
 }
 
+/// Group `(v0, v1, v2, material_index)` triangles into one [`PrimitiveData`] per
+/// material, ordered by ascending material index with each material's triangle
+/// indices kept in encounter order. Uses a `BTreeMap` so the output order depends
+/// only on the input, never on the hasher's per-run seed — without this the EQG
+/// `.glb` (and the `common` set built from it) got a fresh CAS digest every bake
+/// (issue #50).
+fn primitives_by_material(tris: &[(u32, u32, u32, usize)]) -> Vec<PrimitiveData> {
+    let mut by_mat: std::collections::BTreeMap<usize, Vec<u32>> = std::collections::BTreeMap::new();
+    for &(a, b, c, mat) in tris {
+        by_mat.entry(mat).or_default().extend_from_slice(&[a, b, c]);
+    }
+    by_mat
+        .into_iter()
+        .map(|(material_idx, indices)| PrimitiveData { indices, material_idx, extras: None })
+        .collect()
+}
+
 /// Convert an EQG boat/ship archive (`row.eqg`, `shi.eqg`, …) to a static `.glb`. Picks the visual
 /// mesh — the shortest-named `.mod`/`.ter` that isn't a `col_` collision hull — parses it, rotates
 /// EQ Z-up → glTF Y-up (as the S3D path does), and reuses [`write_glb`]. #194.
@@ -2797,13 +2678,22 @@ pub fn eqg_to_glb_model(input_eqg: &Path, output_glb: &Path) -> Result<()> {
             Some(name) if !name.is_empty() => {
                 if let Some(&i) = tex_idx.get(name) {
                     Some(i)
-                } else if let Some(png) = try_load_image(&mut pfs, name, AlphaMode::Opaque) {
+                } else {
+                    // A material that names a texture must get that texture: a
+                    // read/decode failure or an absent file is a hard error, not
+                    // a silently untextured primitive (issue #50).
+                    let png = try_load_image(&mut pfs, name, AlphaMode::Opaque)
+                        .with_context(|| format!("mat{mi} texture '{name}'"))?
+                        .with_context(|| {
+                            format!(
+                                "mat{mi} references texture '{name}', absent from {}",
+                                input_eqg.display()
+                            )
+                        })?;
                     let i = textures.len();
                     textures.push(TextureData { name: name.clone(), png_bytes: png });
                     tex_idx.insert(name.clone(), i);
                     Some(i)
-                } else {
-                    None
                 }
             }
             _ => None,
@@ -2817,15 +2707,8 @@ pub fn eqg_to_glb_model(input_eqg: &Path, output_glb: &Path) -> Result<()> {
         });
     }
 
-    // Group triangles into one primitive per material.
-    let mut by_mat: HashMap<usize, Vec<u32>> = HashMap::new();
-    for (a, b_, c, mat) in &model.tris {
-        let e = by_mat.entry(*mat).or_default();
-        e.extend_from_slice(&[*a, *b_, *c]);
-    }
-    let primitives: Vec<PrimitiveData> = by_mat.into_iter()
-        .map(|(material_idx, indices)| PrimitiveData { indices, material_idx, extras: None })
-        .collect();
+    // Group triangles into one primitive per material (deterministic order — #50).
+    let primitives = primitives_by_material(&model.tris);
 
     let mesh = MeshData { name: mesh_name, positions, normals, uvs: model.uvs, primitives };
     write_glb(output_glb, &[mesh], &materials, &textures)
@@ -2920,6 +2803,68 @@ mod tests {
         assert_eq!(&img.get_pixel(1, 0).0[..3], &[0, 200, 0]);
     }
 
+    /// A texture blob that is present in an archive but cannot be decoded must be
+    /// an error, not a silent `None` that the caller turns into an untextured
+    /// material. (Old `try_load_image` swallowed every decode failure via `.ok()?`.)
+    #[test]
+    fn encode_texture_png_errors_on_undecodable_blob() {
+        assert!(encode_texture_png(b"not an image at all", AlphaMode::Opaque, "junk.bmp").is_err());
+    }
+
+    #[test]
+    fn encode_texture_png_reencodes_bmp_as_png() {
+        let bmp = make_bmp_8bpp(2, &[[10, 20, 30], [40, 50, 60]], &[0, 1]);
+        let png = encode_texture_png(&bmp, AlphaMode::Opaque, "t.bmp").expect("bmp re-encodes");
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "output must be a PNG");
+    }
+
+    /// #50 DRY: `write_glb` is a thin wrapper over `write_glb_instanced` that
+    /// supplies one identity node per mesh. Pin that the wrapper emits
+    /// byte-identical output to calling the instanced writer directly with
+    /// identity `NodeDef`s, so folding the two writers together cannot quietly
+    /// change a model bake.
+    #[test]
+    fn write_glb_equals_instanced_with_identity_nodes() {
+        fn mesh(name: &str, base: f32) -> MeshData {
+            MeshData {
+                name: name.into(),
+                positions: vec![[base, 0.0, 0.0], [base + 1.0, 0.0, 0.0], [base, 1.0, 0.0]],
+                normals: vec![[0.0, 0.0, 1.0]; 3],
+                uvs: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+                primitives: vec![PrimitiveData {
+                    indices: vec![0, 1, 2],
+                    material_idx: 0,
+                    extras: None,
+                }],
+            }
+        }
+        // Two meshes so node count and ordering actually matter.
+        let meshes = vec![mesh("alpha", 0.0), mesh("beta", 10.0)];
+        let materials = vec![MaterialData {
+            name: "m".into(),
+            texture_idx: Some(0),
+            base_color: [1.0, 1.0, 1.0, 1.0],
+            alpha_mode: AlphaMode::Opaque,
+            anim: None,
+        }];
+        let textures = vec![TextureData { name: "t".into(), png_bytes: vec![1, 2, 3, 4, 5] }];
+
+        let dir = std::env::temp_dir();
+        let direct = dir.join("eqoxide_wraptest_direct.glb");
+        let via_nodes = dir.join("eqoxide_wraptest_instanced.glb");
+        write_glb(&direct, &meshes, &materials, &textures).unwrap();
+        let nodes: Vec<NodeDef> = (0..meshes.len())
+            .map(|mesh_idx| NodeDef { mesh_idx, matrix: None })
+            .collect();
+        write_glb_instanced(&via_nodes, &meshes, &materials, &textures, &nodes).unwrap();
+
+        assert_eq!(
+            std::fs::read(&direct).unwrap(),
+            std::fs::read(&via_nodes).unwrap(),
+            "write_glb must be byte-identical to write_glb_instanced with identity nodes"
+        );
+    }
+
     #[test]
     fn alpha_mode_maps_material_types() {
         let masked = RenderMethod::UserDefined { material_type: MaterialType::TransparentMasked };
@@ -3005,6 +2950,60 @@ mod tests {
         }
         assert!(nverts > 100, "rowboat should have a real mesh, got {nverts} verts");
         assert!((maxx - minx) > (maxy - miny), "a boat is longer than it is tall: {}x{}", maxx - minx, maxy - miny);
+    }
+
+    /// issue #50 end-to-end: converting the same EQG archive twice must produce a
+    /// byte-identical GLB, or the content-addressed store re-publishes `common`
+    /// (and every client re-syncs it) on every unchanged bake.
+    #[test]
+    #[ignore = "requires ~/eq_assets/everquest_rof2/row.eqg"]
+    fn eqg_conversion_is_byte_deterministic() {
+        let home = std::env::var("HOME").unwrap();
+        let inp = std::path::PathBuf::from(format!("{home}/eq_assets/everquest_rof2/row.eqg"));
+        if !inp.exists() { eprintln!("skip: {inp:?} missing"); return; }
+        let dir = std::env::temp_dir();
+        let a = dir.join("eqoxide_test_row_det_a.glb");
+        let b = dir.join("eqoxide_test_row_det_b.glb");
+        super::eqg_to_glb_model(&inp, &a).unwrap();
+        super::eqg_to_glb_model(&inp, &b).unwrap();
+        assert_eq!(
+            std::fs::read(&a).unwrap(),
+            std::fs::read(&b).unwrap(),
+            "re-converting an unchanged archive must be byte-for-byte stable"
+        );
+    }
+
+    /// issue #50: grouping EQG triangles into per-material primitives must be
+    /// deterministic — primitives ordered by ascending material index, each
+    /// gathering its triangles in encounter order — so re-converting an unchanged
+    /// archive yields a byte-identical GLB and the CAS store treats it as a no-op.
+    /// The old `HashMap` grouping emitted primitives in hash-seed order, giving
+    /// `common` a fresh digest on every bake.
+    #[test]
+    fn eqg_primitives_group_by_material_in_ascending_index_order() {
+        // Triangles reference materials 5,4,3,2,1,0 (descending), and material 2
+        // twice, so a hash-order regression has ~1/720 odds of passing by luck.
+        let tris: Vec<(u32, u32, u32, usize)> = vec![
+            (0, 1, 2, 5),
+            (3, 4, 5, 4),
+            (6, 7, 8, 3),
+            (9, 10, 11, 2),
+            (12, 13, 14, 1),
+            (15, 16, 17, 0),
+            (18, 19, 20, 2),
+        ];
+        let prims = primitives_by_material(&tris);
+        assert_eq!(
+            prims.iter().map(|p| p.material_idx).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 4, 5],
+            "primitives must be ordered by material index"
+        );
+        let m2 = prims.iter().find(|p| p.material_idx == 2).unwrap();
+        assert_eq!(
+            m2.indices,
+            vec![9, 10, 11, 18, 19, 20],
+            "a material's triangles stay in encounter order"
+        );
     }
 
     #[test]
