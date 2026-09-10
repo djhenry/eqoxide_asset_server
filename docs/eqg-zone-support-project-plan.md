@@ -4,7 +4,7 @@
 
 **Tracking issue:** [#51 — EQG-only zones are never baked](https://github.com/djhenry/eqoxide_asset_server/issues/51)
 
-**Status:** In progress. EQG inventory and unsupported-format reporting are implemented. The libeq contribution now includes raw binary ZON parsing; zone conversion and native source selection remain unimplemented.
+**Status:** In progress. EQG inventory and unsupported-format reporting are implemented. The libeq contribution now includes raw binary ZON and mesh parsing; zone conversion and native source selection remain unimplemented.
 
 **Goal:** Bake and serve EQG zones with correct terrain, placements, collision, and region data, beginning with Crescent Reach, while reporting unsupported or incomplete resources explicitly.
 
@@ -94,8 +94,8 @@ as separately reviewable changes. Base contributions on upstream main, excluding
 unrelated changes from the fork's WLD compatibility branch.
 
 Initial upstream contribution: [libeq PR #56](https://github.com/cjab/libeq/pull/56).
-The contribution includes header identification and checked raw EQGZ v1/v2
-records. The inventory slice pins a fork revision containing header identification;
+The contribution includes header identification, checked raw EQGZ v1/v2
+records, and EQGT/EQGM geometry at versions 1, 2, and 3. The inventory slice pins a fork revision containing header identification;
 it does not change the existing PFS/WLD dependency revisions. Scene importers will
 consume the raw reader as the subsequent M2 work lands.
 
@@ -197,12 +197,22 @@ Crescent's descriptor accounts for 176 model references, 2,342 placements,
 58 regions, zero lights, and 646,120 extension words. These checks validate
 record parsing; they do not establish model loading or correct scene rendering.
 
+The mesh reader has been exercised against all 206 terrain members in the
+inspected installation (one v1, 33 v2, 172 v3), plus 597 models from six fixture
+archives (eight v1, 213 v2, 376 v3). Terrain records consumed their inputs exactly;
+model skeletal suffixes remain explicitly opaque. The run includes 16 terrain
+files with separate version-2 UV data. Independent fixture counts and vertex bit
+patterns check section boundaries and attribute offsets. Version 1 and 2 vertices
+use 32 bytes; version 3 uses 44 bytes. Version 2's post-triangle UV marker is
+retained, including the terrain/model distinction for marker 2. These are raw
+geometry checks, not evidence of texture, collision, or scene correctness.
+
 - [ ] Extract the existing static mesh parser and retain boat regression coverage.
 - [ ] Contribute checked EQGZ and EQGM/EQGT byte readers to `libeq_eqg`; consume those readers through server adapters, with pinned dependency revisions and synthetic library tests.
-- [ ] Establish vertex layouts for the observed EQGT v1/v2/v3 and supported EQGM versions; reject other layouts explicitly.
-- [ ] Add synthetic truncation, count-overflow, invalid-index, invalid-string, and material-reference tests before implementing checked parsing.
+- [x] Establish vertex layouts for EQGT/EQGM v1/v2/v3; reject other layouts explicitly in the library reader.
+- [x] Add synthetic truncation, excessive-count, invalid-index, invalid-string, and raw material-reference tests for the library readers.
 - [ ] Parse ZON v1/v2 model tables, placements, lights, and region records, retaining unsupported semantic data in diagnostics rather than silently dropping it.
-- [ ] Test multiple v2 placement records with nonempty trailing arrays so an incorrect fixed stride fails deterministically.
+- [x] Test multiple v2 placement records with nonempty trailing arrays so an incorrect fixed stride fails deterministically.
 - [ ] Resolve models by descriptor references; retain material properties, flags, and vertex colors in the scene.
 - [ ] Establish rotations, scale, winding, and coordinate conversion using independent fixtures; compose placement transforms before export.
 - [ ] Bake Crescent, Guild Hall, and a v1 fixture in staging. Account for every placement record as emitted, intentionally nonvisual, or rejected with a reason.
