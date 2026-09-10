@@ -59,3 +59,22 @@ when a bake looks wrong. They are not shipped: the `Containerfile` builds only
     cargo run --bin skelmeshes -- <archive.s3d> <wld> <skeleton>         # attached-mesh list + per-mesh bbox/scale/skin groups
 
 This is an **addon**: it does not modify the EQEmu source tree.
+
+### EQG static model conversion
+
+`convert --archive /path/to/model.eqg --out model.glb` uses the checked
+`libeq_eqg` reader for EQGM/EQGT versions 1, 2, and 3. The converter exports
+static geometry with primary UVs and diffuse textures, including the geometry
+portion of skeletal boat models. It does not export animation, vertex colors,
+secondary UVs, or terrain material effects. Unsupported triangle material
+references, malformed records, non-finite rendered attributes, and invalid text
+used for texture lookup produce errors rather than guessed output.
+
+This command retains its single-model selection heuristic; it does not assemble
+zone descriptors. Optional native regressions verify rowboat and ship geometry,
+textures, bounds, and deterministic output, plus a version-2 model from Anguish,
+without bundling game data:
+
+```sh
+LIBEQ_TEST_RAW_DIR=/path/to/client cargo test --test eqg_conversion -- --ignored
+```

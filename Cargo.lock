@@ -1109,7 +1109,7 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 [[package]]
 name = "libeq_eqg"
 version = "0.5.0"
-source = "git+https://github.com/djhenry/libeq?rev=86430747764a57e7f0f620ec0a4c71245a3c3af4#86430747764a57e7f0f620ec0a4c71245a3c3af4"
+source = "git+https://github.com/djhenry/libeq?rev=4017525f23312b32f62e6c377e09a6f465f85666#4017525f23312b32f62e6c377e09a6f465f85666"
 dependencies = [
  "thiserror 2.0.18",
 ]

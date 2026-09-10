@@ -2636,10 +2636,6 @@ pub(crate) fn bake_weapons_glb(
 // as S3D) holding an EQGM `.mod` mesh, NOT WLD. Parse the static mesh + its diffuse textures and reuse
 // the shared glTF writer. Byte layouts verified against the RoF2 files.
 
-#[inline] fn eqg_u32(b: &[u8], o: usize) -> u32 { u32::from_le_bytes([b[o], b[o+1], b[o+2], b[o+3]]) }
-#[inline] fn eqg_i32(b: &[u8], o: usize) -> i32 { i32::from_le_bytes([b[o], b[o+1], b[o+2], b[o+3]]) }
-#[inline] fn eqg_f32(b: &[u8], o: usize) -> f32 { f32::from_le_bytes([b[o], b[o+1], b[o+2], b[o+3]]) }
-
 struct EqgMesh {
     positions: Vec<[f32; 3]>,
     normals:   Vec<[f32; 3]>,
@@ -2650,79 +2646,70 @@ struct EqgMesh {
     mat_textures: Vec<Option<String>>,
 }
 
-/// Parse an `EQGM`(mesh)/`EQGT`(terrain) `.mod`/`.ter` blob into a static mesh. Branches vertex stride
-/// on the `version` field (v1 = 32B pos/normal/uv, v3 = 44B with a packed vertex-color u32 before the
-/// uv). A skinned model (bone_count > 0) is read as its static bind pose (bone/weight tables after the
-/// triangles are ignored — enough for a stationary boat).
+/// Adapt raw EQGM/EQGT geometry to the static, diffuse-only glTF path.
+/// Bone suffixes remain uninterpreted, preserving the existing boat bind pose.
+/// Vertex colors and secondary UVs are not used by this converter yet.
 fn parse_eqg_model(b: &[u8]) -> Result<EqgMesh> {
-    if b.len() < 24 { anyhow::bail!("eqg model too small ({} bytes)", b.len()); }
-    let is_mesh = &b[0..4] == b"EQGM";
-    if !is_mesh && &b[0..4] != b"EQGT" {
-        anyhow::bail!("not an EQGM/EQGT model (magic {:?})", &b[0..4]);
-    }
-    let version    = eqg_u32(b, 4);
-    let str_len    = eqg_u32(b, 8) as usize;
-    let mat_count  = eqg_u32(b, 12) as usize;
-    let vert_count = eqg_u32(b, 16) as usize;
-    let poly_count = eqg_u32(b, 20) as usize;
-    // EQGM carries a bone_count u32 at offset 24; EQGT does not (24-byte vs 28-byte header).
-    let header_len = if is_mesh { 28 } else { 24 };
-    let str_end = header_len + str_len;
-    if str_end > b.len() { anyhow::bail!("eqg string table overruns file"); }
-    let strings = &b[header_len..str_end];
-    let getstr = |off: usize| -> String {
-        if off >= strings.len() { return String::new(); }
-        let end = strings[off..].iter().position(|&c| c == 0).map(|p| off + p).unwrap_or(strings.len());
-        String::from_utf8_lossy(&strings[off..end]).into_owned()
-    };
-
-    // Materials: index,name_off,shader_off,prop_count (16B) then prop_count × (name_off,type,val) (12B).
-    let mut o = str_end;
-    let mut mat_textures = Vec::with_capacity(mat_count);
-    for _ in 0..mat_count {
-        if o + 16 > b.len() { anyhow::bail!("eqg materials overrun"); }
-        let prop_count = eqg_u32(b, o + 12) as usize;
-        o += 16;
+    let raw = libeq_eqg::mesh::parse(b).context("parsing EQG static geometry")?;
+    let mut mat_textures = Vec::with_capacity(raw.materials.len());
+    for (material_index, material) in raw.materials.iter().enumerate() {
         let mut diffuse = None;
-        for _ in 0..prop_count {
-            if o + 12 > b.len() { anyhow::bail!("eqg material props overrun"); }
-            let pname = getstr(eqg_u32(b, o) as usize).to_lowercase();
-            let ptype = eqg_u32(b, o + 4);
-            let pval  = eqg_u32(b, o + 8);
-            o += 12;
-            // prop_type 2 = string (texture filename). Only the diffuse map is needed to render.
-            if ptype == 2 && pname.contains("texturediffuse0") {
-                diffuse = Some(getstr(pval as usize).to_lowercase());
+        for property in &material.properties {
+            let name = std::str::from_utf8(raw.string(property.name_offset)?)
+                .with_context(|| {
+                    format!("EQG material {material_index} property name is not UTF-8")
+                })?
+                .to_lowercase();
+            if property.kind == 2 && name.contains("texturediffuse0") {
+                let texture =
+                    std::str::from_utf8(raw.string(property.value)?).with_context(|| {
+                        format!("EQG material {material_index} diffuse texture is not UTF-8")
+                    })?;
+                diffuse = Some(texture.to_lowercase());
             }
         }
         mat_textures.push(diffuse);
     }
 
-    // Vertices.
-    let vstride = if version == 1 { 32 } else { 44 };
-    if o + vstride * vert_count > b.len() { anyhow::bail!("eqg vertices overrun"); }
-    let (mut positions, mut normals, mut uvs) =
-        (Vec::with_capacity(vert_count), Vec::with_capacity(vert_count), Vec::with_capacity(vert_count));
-    for _ in 0..vert_count {
-        positions.push([eqg_f32(b, o), eqg_f32(b, o + 4), eqg_f32(b, o + 8)]);
-        normals.push([eqg_f32(b, o + 12), eqg_f32(b, o + 16), eqg_f32(b, o + 20)]);
-        // v1 uv at +24; v3 has a packed color u32 at +24, so uv is at +28.
-        let uvo = if version == 1 { o + 24 } else { o + 28 };
-        uvs.push([eqg_f32(b, uvo), eqg_f32(b, uvo + 4)]);
-        o += vstride;
+    let mut positions = Vec::with_capacity(raw.vertices.len());
+    let mut normals = Vec::with_capacity(raw.vertices.len());
+    let mut uvs = Vec::with_capacity(raw.vertices.len());
+    for (index, vertex) in raw.vertices.iter().enumerate() {
+        for (name, values) in [
+            ("position", vertex.position.as_slice()),
+            ("normal", vertex.normal.as_slice()),
+            ("primary UV", vertex.uv0.as_slice()),
+        ] {
+            if !values.iter().all(|value| value.is_finite()) {
+                anyhow::bail!("EQG vertex {index} has non-finite {name}");
+            }
+        }
+        positions.push(vertex.position);
+        normals.push(vertex.normal);
+        uvs.push(vertex.uv0);
     }
 
-    // Triangles: v0,v1,v2 (i32), material_index (i32), flag (i32) = 20 bytes.
-    if o + 20 * poly_count > b.len() { anyhow::bail!("eqg triangles overrun"); }
-    let mut tris = Vec::with_capacity(poly_count);
-    for _ in 0..poly_count {
-        let (v0, v1, v2) = (eqg_i32(b, o) as u32, eqg_i32(b, o + 4) as u32, eqg_i32(b, o + 8) as u32);
-        let mat = eqg_i32(b, o + 12);
-        o += 20;
-        let mi = if mat >= 0 && (mat as usize) < mat_count { mat as usize } else { 0 };
-        tris.push((v0, v1, v2, mi));
+    let mut tris = Vec::with_capacity(raw.triangles.len());
+    for (index, triangle) in raw.triangles.iter().enumerate() {
+        let material = usize::try_from(triangle.material_index)
+            .context("EQG triangle material index does not fit this platform")?;
+        if material >= mat_textures.len() {
+            anyhow::bail!(
+                "EQG triangle {index} material {} is unsupported by static conversion ({} materials)",
+                triangle.material_index,
+                mat_textures.len()
+            );
+        }
+        let [v0, v1, v2] = triangle.vertex_indices;
+        tris.push((v0, v1, v2, material));
     }
-    Ok(EqgMesh { positions, normals, uvs, tris, mat_textures })
+    Ok(EqgMesh {
+        positions,
+        normals,
+        uvs,
+        tris,
+        mat_textures,
+    })
 }
 
 /// Group `(v0, v1, v2, material_index)` triangles into one [`PrimitiveData`] per
@@ -3772,3 +3759,6 @@ mod equip_tex_tests {
              matches only 4/25 of its bones, so any clip here would be garbage; got {clips25:?}");
     }
 }
+
+#[cfg(test)]
+mod eqg_tests;

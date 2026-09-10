@@ -4,7 +4,7 @@
 
 **Tracking issue:** [#51 — EQG-only zones are never baked](https://github.com/djhenry/eqoxide_asset_server/issues/51)
 
-**Status:** In progress. EQG inventory and unsupported-format reporting are implemented. The libeq contribution now includes raw binary ZON and mesh parsing; zone conversion and native source selection remain unimplemented.
+**Status:** In progress. EQG inventory and unsupported-format reporting are implemented. The libeq contribution now includes raw binary ZON and mesh parsing; the static model converter consumes the mesh reader. Zone conversion and native source selection remain unimplemented.
 
 **Goal:** Bake and serve EQG zones with correct terrain, placements, collision, and region data, beginning with Crescent Reach, while reporting unsupported or incomplete resources explicitly.
 
@@ -66,12 +66,12 @@ General EQG character skinning, skeletal animation, equipment coverage, and comp
 | `src/build.rs::build_gamedata_from_raw` | Reuses discovery for WLD BSP water generation | Dispatch region generation independently of filename extension |
 | `src/build.rs::build_zonedoors_from_raw` | Reads a sibling `_obj.s3d` | Resolve EQG door models through the zone dependency catalog |
 | `src/zone.rs` | WLD terrain, object instances, materials, dedicated terrain collision | Preserve the WLD frontend and extract reusable scene/export responsibilities |
-| `src/convert/mod.rs::parse_eqg_model` | Parses EQGM/EQGT static geometry | Extract a checked, version-specific parser that retains semantic fields |
+| `src/convert/mod.rs::parse_eqg_model` | Adapts checked libeq geometry to the static diffuse model contract | Add a separate zone adapter retaining all scene-relevant fields |
 | `src/convert/mod.rs::eqg_to_glb_model` | Chooses one visual mesh and produces a static model | Keep boat behavior covered; do not use its mesh-selection heuristic for zones |
 | `src/convert/mod.rs::write_glb_instanced` | Writes reusable meshes and placement nodes | Reuse and extend only where the agreed asset contract requires it |
 | `src/bsp_regions.rs` | Converts WLD BSP regions into water maps | Keep format-specific decoding separate from region serialization |
 
-The existing EQG parser discards triangle flags and vertex colors, retains only diffuse texture properties, substitutes material zero for invalid material references, and treats only version 1 as the smaller vertex layout. These assumptions must be checked against each supported terrain/model version before reuse. The current converter also emits opaque materials and selects one mesh by shortest filename.
+The shared libeq reader retains triangle flags, vertex colors, UV sets, and raw material properties with explicit version gates. The current static converter exports primary UVs and diffuse textures, emits opaque materials, and selects one mesh by shortest filename. It rejects unsupported triangle material references instead of assigning material zero. Do not use this limited adapter as the zone scene representation: zones need the retained semantic fields and descriptor-driven model selection.
 
 ### Proposed module boundaries
 
@@ -95,9 +95,10 @@ unrelated changes from the fork's WLD compatibility branch.
 
 Initial upstream contribution: [libeq PR #56](https://github.com/cjab/libeq/pull/56).
 The contribution includes header identification, checked raw EQGZ v1/v2
-records, and EQGT/EQGM geometry at versions 1, 2, and 3. The inventory slice pins a fork revision containing header identification;
-it does not change the existing PFS/WLD dependency revisions. Scene importers will
-consume the raw reader as the subsequent M2 work lands.
+records, and EQGT/EQGM geometry at versions 1, 2, and 3. The asset server pins the reviewed fork revision containing all three APIs;
+it does not change the existing PFS/WLD dependency revisions. Static model
+conversion now consumes the mesh reader. Scene importers will consume the raw
+records as subsequent M2 work lands.
 
 Raw ZON parsing preserves nullable model references, source transform values,
 v2 extension words, 40-byte region records, 32-byte light records, and trailing
@@ -207,7 +208,7 @@ use 32 bytes; version 3 uses 44 bytes. Version 2's post-triangle UV marker is
 retained, including the terrain/model distinction for marker 2. These are raw
 geometry checks, not evidence of texture, collision, or scene correctness.
 
-- [ ] Extract the existing static mesh parser and retain boat regression coverage.
+- [x] Replace the embedded static mesh byte reader with a checked libeq adapter and retain rowboat/ship regression coverage.
 - [ ] Contribute checked EQGZ and EQGM/EQGT byte readers to `libeq_eqg`; consume those readers through server adapters, with pinned dependency revisions and synthetic library tests.
 - [x] Establish vertex layouts for EQGT/EQGM v1/v2/v3; reject other layouts explicitly in the library reader.
 - [x] Add synthetic truncation, excessive-count, invalid-index, invalid-string, and raw material-reference tests for the library readers.
