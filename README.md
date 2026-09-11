@@ -78,3 +78,33 @@ without bundling game data:
 ```sh
 LIBEQ_TEST_RAW_DIR=/path/to/client cargo test --test eqg_conversion -- --ignored
 ```
+
+### Binary EQG zone source inspection
+
+Resolve a selected binary descriptor's model table and print source-level JSON:
+
+```sh
+cargo run --bin eqoxide-assets -- inspect-eqg-zone --archive /path/to/crescent.eqg --descriptor /path/to/crescent.zon
+cargo run --bin eqoxide-assets -- inspect-eqg-zone --archive /path/to/anguish.eqg --member anguish.zon
+```
+
+Choose exactly one descriptor provider. The command resolves names within the
+specified archive, preserving exact archive spelling for reads and rejecting
+missing or ambiguous dependencies. Repeated model references share one loaded
+mesh. The report records model-table mappings, selected members, geometry counts,
+placement-record counts, and opaque data sizes. The in-memory source scene
+preserves materials, flags, colors, UVs, and extension words for subsequent
+processing; the JSON report contains counts and dependency mappings.
+
+Placement transforms, mesh positions/normals, and primary UVs must be finite.
+Secondary UV bit patterns are retained and non-finite values are counted in the
+report: some source models contain them even when primary UVs are valid.
+
+This command does not choose native source precedence, resolve textures, apply
+world transforms, interpret placement roles or collision/region/lighting data,
+or publish assets. In particular, placement counts are not rendered-object
+counts. Optional native acceptance covers Crescent, Guild Hall, and Anguish:
+
+```sh
+LIBEQ_TEST_RAW_DIR=/path/to/client cargo test --test native_eqg_zone -- --ignored
+```

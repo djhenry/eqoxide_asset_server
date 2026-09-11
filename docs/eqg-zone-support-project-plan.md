@@ -4,7 +4,7 @@
 
 **Tracking issue:** [#51 — EQG-only zones are never baked](https://github.com/djhenry/eqoxide_asset_server/issues/51)
 
-**Status:** In progress. EQG inventory and unsupported-format reporting are implemented. The libeq contribution now includes raw binary ZON and mesh parsing; the static model converter consumes the mesh reader. Zone conversion and native source selection remain unimplemented.
+**Status:** In progress. EQG inventory and unsupported-format reporting are implemented. The libeq contribution now includes raw binary ZON and mesh parsing; the static model converter consumes the mesh reader. Explicit binary source assembly and inspection are implemented. World-space zone conversion and native source selection remain unimplemented.
 
 **Goal:** Bake and serve EQG zones with correct terrain, placements, collision, and region data, beginning with Crescent Reach, while reporting unsupported or incomplete resources explicitly.
 
@@ -208,13 +208,25 @@ use 32 bytes; version 3 uses 44 bytes. Version 2's post-triangle UV marker is
 retained, including the terrain/model distinction for marker 2. These are raw
 geometry checks, not evidence of texture, collision, or scene correctness.
 
+**Source assembly slice:** `inspect-eqg-zone` takes an explicitly selected archive
+and loose or internal binary descriptor. It preserves model-table slots while
+deduplicating geometry, checks requested-name ambiguity, and reports exact selected
+members. Crescent resolves 176 slots to 176 meshes (169,552 vertices); Guild Hall
+resolves 51 to 51 (53,223 vertices); Anguish resolves 215 to 214 (345,165 vertices).
+These vertex totals count each loaded mesh once, before placement instancing.
+The assembler retains all placement, region, light, and extension records.
+Five vertices in Crescent models contain non-finite secondary UV values; these
+bits remain intact and are reported, rather than replaced or used for rendering.
+No texture resolution, placement-role interpretation, world transformation, or
+publication is implied by successful source assembly.
+
 - [x] Replace the embedded static mesh byte reader with a checked libeq adapter and retain rowboat/ship regression coverage.
-- [ ] Contribute checked EQGZ and EQGM/EQGT byte readers to `libeq_eqg`; consume those readers through server adapters, with pinned dependency revisions and synthetic library tests.
+- [x] Contribute checked EQGZ and EQGM/EQGT byte readers to `libeq_eqg`; consume those readers through server adapters, with pinned dependency revisions and synthetic library tests.
 - [x] Establish vertex layouts for EQGT/EQGM v1/v2/v3; reject other layouts explicitly in the library reader.
 - [x] Add synthetic truncation, excessive-count, invalid-index, invalid-string, and raw material-reference tests for the library readers.
-- [ ] Parse ZON v1/v2 model tables, placements, lights, and region records, retaining unsupported semantic data in diagnostics rather than silently dropping it.
+- [x] Parse ZON v1/v2 model tables, placements, lights, and region records, retaining uninterpreted source data and reporting its counts.
 - [x] Test multiple v2 placement records with nonempty trailing arrays so an incorrect fixed stride fails deterministically.
-- [ ] Resolve models by descriptor references; retain material properties, flags, and vertex colors in the scene.
+- [x] Resolve models by descriptor references; retain material properties, flags, and vertex colors in the source scene.
 - [ ] Establish rotations, scale, winding, and coordinate conversion using independent fixtures; compose placement transforms before export.
 - [ ] Bake Crescent, Guild Hall, and a v1 fixture in staging. Account for every placement record as emitted, intentionally nonvisual, or rejected with a reason.
 - [ ] Verify geometry, textures, bounds, instancing, and deterministic output. Rendering-only previews must not be published as gameplay-complete before M3.

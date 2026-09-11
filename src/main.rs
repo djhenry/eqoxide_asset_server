@@ -26,6 +26,16 @@ enum Cmd {
         /// Print a deterministic machine-readable report.
         #[arg(long)] json: bool,
     },
+    /// Resolve binary EQG zone source records and print JSON diagnostics; no bake.
+    InspectEqgZone {
+        #[arg(long)] archive: PathBuf,
+        /// Explicit loose binary zone descriptor.
+        #[arg(long, conflicts_with = "member", required_unless_present = "member")]
+        descriptor: Option<PathBuf>,
+        /// Explicit descriptor member in the selected archive.
+        #[arg(long, conflicts_with = "descriptor", required_unless_present = "descriptor")]
+        member: Option<String>,
+    },
     /// Chunk a directory of derived assets into the CAS + a manifest.
     Build {
         #[arg(long)] set: Option<String>,
@@ -105,6 +115,18 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     match Cli::parse().cmd {
+        Cmd::InspectEqgZone { archive, descriptor, member } => {
+            use eqoxide_asset_server::eqg::{load_binary_zone, DescriptorSource};
+            let source = match (&descriptor, &member) {
+                (Some(path), None) => DescriptorSource::Loose(path),
+                (None, Some(name)) => DescriptorSource::Archive(name),
+                _ => anyhow::bail!("select exactly one descriptor provider"),
+            };
+            let scene = load_binary_zone(&archive, source)?;
+            let report = eqoxide_asset_server::eqg::report::summary(&scene);
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
         Cmd::InventoryZones { raw, json } => {
             let report = eqoxide_asset_server::zone_source::inventory_zones(&raw)?;
             if json {
