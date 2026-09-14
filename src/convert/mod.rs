@@ -1,4 +1,5 @@
 #![allow(dead_code, unused_imports)]
+mod dds;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{Cursor, Write};
@@ -636,11 +637,14 @@ pub(crate) fn load_texture_from_archive(
 /// texture-less material. The old `try_load_image` funnelled every one of these
 /// through `.ok()?`, so a corrupt DDS silently became an untextured primitive
 /// and the resulting `.glb` still baked (issue #50 asked for the opposite).
-fn encode_texture_png(data: &[u8], alpha_mode: AlphaMode, name: &str) -> Result<Vec<u8>> {
+pub(crate) fn encode_texture_png(data: &[u8], alpha_mode: AlphaMode, name: &str) -> Result<Vec<u8>> {
     // For masked materials, recover EQ's keyed transparency: in 8-bit paletted BMPs
     // palette index 0 is the transparent key. The `image` crate's to_rgba8() would
     // make it opaque, so decode the palette ourselves when we can.
-    let mut rgba = if alpha_mode == AlphaMode::Masked {
+    let decoded_dds = dds::decode(data).with_context(|| format!("decode texture {name}"))?;
+    let mut rgba = if let Some(rgba) = decoded_dds {
+        rgba
+    } else if alpha_mode == AlphaMode::Masked {
         match decode_bmp_keyed(data) {
             Some(img) => img,
             None => image::load_from_memory(data)

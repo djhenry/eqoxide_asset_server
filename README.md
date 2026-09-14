@@ -41,7 +41,7 @@ diagnostics and a nonzero inventory-command exit status. JSON output remains
 available when individual resources fail. Orphan descriptors and terrain without
 descriptors are reported as unresolved; neither is counted as a recognized zone.
 
-Normal zone bakes also print the unsupported EQG count. This first slice does not
+Normal zone bakes also print the unsupported EQG count. Normal bakes do not yet
 convert EQG zones or change WLD terrain/water dispatch. Full dependency resolution,
 source precedence, collision, and regions are tracked in the
 [EQG zone support project plan](docs/eqg-zone-support-project-plan.md).
@@ -107,4 +107,34 @@ counts. Optional native acceptance covers Crescent, Guild Hall, and Anguish:
 
 ```sh
 LIBEQ_TEST_RAW_DIR=/path/to/client cargo test --test native_eqg_zone -- --ignored
+```
+
+### Binary EQG render previews
+
+Export a selected binary zone to a standalone GLB and print a JSON export report:
+
+```sh
+cargo run --bin eqoxide-assets -- export-eqg-preview --archive /path/to/crescent.eqg --descriptor /path/to/crescent.zon --out /tmp/crescent-preview.glb
+cargo run --bin eqoxide-assets -- export-eqg-preview --archive /path/to/anguish.eqg --member anguish.zon --out /tmp/anguish-preview.glb
+```
+
+The exporter shares object geometry across placements, emits terrain once at
+identity, and converts source coordinates to glTF's Y-up basis. It requires one
+unambiguous terrain member and positive uniform object scales. Every placement
+is emitted or reported as skipped with a reason. Only referenced diffuse textures
+are resolved; missing, ambiguous, or undecodable textures fail the export. Texture
+decoding includes uncompressed 32-bit RGB DDS with byte-channel masks and optional
+alpha. The output directory must exist; failures preserve an existing output file.
+
+These are opaque render previews. The report lists omitted triangles and material
+approximations. Vertex colors, secondary UVs, terrain effects, animation, lighting,
+collision, water regions, and source-provider precedence are not implemented by
+this exporter. No CAS assets or zone manifests are published, and these previews
+have not been validated for gameplay.
+
+Optional acceptance exports and imports Crescent, Guild Hall, and Anguish without
+bundling game data:
+
+```sh
+LIBEQ_TEST_RAW_DIR=/path/to/client cargo test --test native_eqg_preview -- --ignored
 ```

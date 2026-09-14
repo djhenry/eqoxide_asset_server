@@ -41,7 +41,6 @@ gltf = { version = "1", features = ["import", "extras"] }
 glam = "0.29"
 rayon = "1"
 
-[dev-dependencies]
 tempfile = "3"
 
 # TEMP: build against the forked libeq branch that tolerates later-era zone WLDs

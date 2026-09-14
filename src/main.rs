@@ -36,6 +36,16 @@ enum Cmd {
         #[arg(long, conflicts_with = "descriptor", required_unless_present = "descriptor")]
         member: Option<String>,
     },
+    /// Export a render-only EQG zone GLB for inspection; no gameplay assets are published.
+    ExportEqgPreview {
+        #[arg(long)] archive: PathBuf,
+        #[arg(long, conflicts_with = "member", required_unless_present = "member")]
+        descriptor: Option<PathBuf>,
+        #[arg(long, conflicts_with = "descriptor", required_unless_present = "descriptor")]
+        member: Option<String>,
+        /// Staging GLB path. Replaced only after successful conversion.
+        #[arg(long)] out: PathBuf,
+    },
     /// Chunk a directory of derived assets into the CAS + a manifest.
     Build {
         #[arg(long)] set: Option<String>,
@@ -115,6 +125,18 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     match Cli::parse().cmd {
+        Cmd::ExportEqgPreview { archive, descriptor, member, out } => {
+            use eqoxide_asset_server::eqg::{load_binary_zone, DescriptorSource};
+            let source = match (&descriptor, &member) {
+                (Some(path), None) => DescriptorSource::Loose(path),
+                (None, Some(name)) => DescriptorSource::Archive(name),
+                _ => anyhow::bail!("select exactly one descriptor provider"),
+            };
+            let scene = load_binary_zone(&archive, source)?;
+            let report = eqoxide_asset_server::eqg::export::export_preview(&scene, &out)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
         Cmd::InspectEqgZone { archive, descriptor, member } => {
             use eqoxide_asset_server::eqg::{load_binary_zone, DescriptorSource};
             let source = match (&descriptor, &member) {

@@ -4,7 +4,7 @@
 
 **Tracking issue:** [#51 — EQG-only zones are never baked](https://github.com/djhenry/eqoxide_asset_server/issues/51)
 
-**Status:** In progress. EQG inventory and unsupported-format reporting are implemented. The libeq contribution now includes raw binary ZON and mesh parsing; the static model converter consumes the mesh reader. Explicit binary source assembly and inspection are implemented. World-space zone conversion and native source selection remain unimplemented.
+**Status:** In progress. EQG inventory and unsupported-format reporting are implemented. The libeq contribution now includes raw binary ZON and mesh parsing; the static model converter consumes the mesh reader. Explicit binary source assembly and inspection are implemented. Explicit binary render previews now export transformed instances and diffuse textures to standalone GLBs. Production zone publication, gameplay semantics, and native source selection remain unimplemented.
 
 **Goal:** Bake and serve EQG zones with correct terrain, placements, collision, and region data, beginning with Crescent Reach, while reporting unsupported or incomplete resources explicitly.
 
@@ -227,7 +227,25 @@ publication is implied by successful source assembly.
 - [x] Parse ZON v1/v2 model tables, placements, lights, and region records, retaining uninterpreted source data and reporting its counts.
 - [x] Test multiple v2 placement records with nonempty trailing arrays so an incorrect fixed stride fails deterministically.
 - [x] Resolve models by descriptor references; retain material properties, flags, and vertex colors in the source scene.
-- [ ] Establish rotations, scale, winding, and coordinate conversion using independent fixtures; compose placement transforms before export.
+**Render-preview slice:** `export-eqg-preview` exports shared geometry and
+transformed instances with primary UVs and referenced diffuse textures. Terrain
+is emitted once at identity; the v2 first placement is reported as a terrain
+lighting record. Source rotations compose as `Rz * Ry * Rx`, followed by the
+source-to-glTF basis `(x, y, z) -> (x, z, -y)`. Positive uniform scales are
+supported. Synthetic tests check individual axes, combined rotations, texture
+selection, deterministic output, and preservation of prior output on failure.
+
+Native export/import acceptance covers Crescent (176 meshes, 2,341 object
+instances, 122 textures), Guild Hall (51, 86, 58), and Anguish (214, 695, 89),
+plus one terrain node each. Every placement is accounted for. Uncompressed RGB32
+DDS decoding enables Anguish's water texture. Previews remain opaque and report
+omitted triangles, absent diffuse properties, and unsupported material effects.
+These artifact checks do not establish collision, native material fidelity, or
+live-client compatibility.
+
+- [x] Compose placement transforms and export deterministic standalone render previews with shared geometry and explicit omissions.
+- [x] Exercise Crescent, Guild Hall, and a v1 Anguish preview with native export/import acceptance.
+- [ ] Establish rotations, scale, winding, and coordinate conversion using independent fixtures; compose placement transforms before production export.
 - [ ] Bake Crescent, Guild Hall, and a v1 fixture in staging. Account for every placement record as emitted, intentionally nonvisual, or rejected with a reason.
 - [ ] Verify geometry, textures, bounds, instancing, and deterministic output. Rendering-only previews must not be published as gameplay-complete before M3.
 
