@@ -138,3 +138,17 @@ bundling game data:
 ```sh
 LIBEQ_TEST_RAW_DIR=/path/to/client cargo test --test native_eqg_preview -- --ignored
 ```
+
+### EQG material and surface diagnostics
+
+`inspect-eqg-zone` includes `material_details`, raw `triangle_surface_groups`,
+and `surface_assessments` per mesh. Names and shader/property strings include
+original bytes and optional UTF-8; property values retain their exact bits.
+Surface assessments distinguish material references, the hidden sentinel, and
+out-of-range references independently of default collision-query participation.
+Flag `0x1` excludes a triangle from that default query; `0x2` records a separate
+query-dependent filter. Upper bits and unclassified lower bits remain visible.
+
+These assessments do not emit collision geometry or establish shader fidelity.
+Object hulls, dynamic doors, winding, the client collision contract, and exact
+material blend/alpha-test states still need validation before gameplay export.

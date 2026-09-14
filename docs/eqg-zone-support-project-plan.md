@@ -4,7 +4,7 @@
 
 **Tracking issue:** [#51 — EQG-only zones are never baked](https://github.com/djhenry/eqoxide_asset_server/issues/51)
 
-**Status:** In progress. EQG inventory and unsupported-format reporting are implemented. The libeq contribution now includes raw binary ZON and mesh parsing; the static model converter consumes the mesh reader. Explicit binary source assembly and inspection are implemented. Explicit binary render previews now export transformed instances and diffuse textures to standalone GLBs. Production zone publication, gameplay semantics, and native source selection remain unimplemented.
+**Status:** In progress. EQG inventory and unsupported-format reporting are implemented. The libeq contribution now includes raw binary ZON and mesh parsing; the static model converter consumes the mesh reader. Explicit binary source assembly and inspection are implemented. Explicit binary render previews now export transformed instances and diffuse textures to standalone GLBs. Lossless material diagnostics and default-query triangle collision assessment are implemented. Production collision geometry, gameplay publication, and native source selection remain unimplemented.
 
 **Goal:** Bake and serve EQG zones with correct terrain, placements, collision, and region data, beginning with Crescent Reach, while reporting unsupported or incomplete resources explicitly.
 
@@ -257,7 +257,47 @@ live-client compatibility.
 
 **Dependencies:** M1; binary acceptance uses M2. Contract design can proceed alongside M2.
 
-- [ ] Establish face flags and collision-hull semantics before assigning render/passable/solid roles.
+**Surface semantics slice:** The inspection report now exposes each material's
+name, shader, and properties as raw bytes plus optional UTF-8, retaining scalar
+value bits rather than converting non-finite floats into JSON nulls. Triangle
+counts are grouped by the complete raw material index and flags. This supports
+material research without conflating shader names with verified render states.
+For example, a shader containing `AddAlpha` can have an `Opaque_` prefix; selecting
+opacity solely from that prefix is unsafe. Exact blend factors, alpha-test
+thresholds, coverage maps, vertex color treatment, and culling remain pending.
+
+The binary collision path consumes the lower 16 triangle flag bits independently
+of material membership. Its default query excludes `0x1`; `0x2` is excluded only
+by a particular query option and remains a default-query candidate. The report
+keeps that distinction, unclassified lower bits, and the original upper bits.
+An all-ones material reference is separately reported as a render sentinel;
+other out-of-table indices are reported as out of range. Neither is automatically
+removed from collision assessment. These are source triangle candidates, not a
+claim that every candidate must become gameplay collision.
+
+Independent byte-level survey totals, counting each descriptor-selected mesh
+once before placement instancing:
+
+| Fixture | Source triangles | Default-query candidates | Excluded by `0x1` | Hidden sentinel candidates |
+| --- | ---: | ---: | ---: | ---: |
+| Crescent | 122,800 | 99,701 | 23,099 | 1,854 |
+| Guild Hall | 29,187 | 29,147 | 40 | 160 |
+| Anguish | 224,266 | 203,562 | 20,704 | 480 |
+
+All 480 Anguish sentinel triangles have `0x2`, demonstrating why that flag must
+not be treated as universally non-solid. Native collision construction reverses
+triangle order to `[0, 2, 1]`; export must validate winding against the destination
+query conventions rather than copying render indices blindly.
+
+The existing client prefers dedicated terrain collision but always adds expanded
+object geometry. A complete EQG collision mesh cannot reuse that contract without
+risking duplicated object collision. Before publishing, define a versioned
+complete-static-collision contract and establish coordinate conversion, instance
+selection, collision hulls, and dynamic-door exclusions. No collision geometry or
+new manifests are emitted by this assessment slice.
+
+- [x] Establish and test default-query triangle flag filtering independently of material visibility; retain special-query and unknown flags explicitly.
+- [ ] Establish collision-hull selection, query options, and object-level exclusions before assigning complete gameplay collision roles.
 - [ ] Define versioned complete-static-collision metadata and preserve legacy terrain-plus-object fallback only for legacy assets.
 - [ ] Test visible-passable faces, invisible-solid boundaries, collision-only hulls, and absence of duplicate object collision.
 - [ ] Define region export after establishing water-volume and zone-line semantics; test known-dry, unavailable, malformed, and supported region data as different outcomes.

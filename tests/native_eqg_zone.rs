@@ -68,3 +68,47 @@ fn native_binary_zones_resolve_their_model_tables() {
         );
     }
 }
+
+#[test]
+#[ignore = "requires LIBEQ_TEST_RAW_DIR containing Crescent, Guild Hall, and Anguish assets"]
+fn native_surface_candidates_keep_hidden_faces_and_exclude_passable_faces() {
+    use eqoxide_asset_server::eqg::surface::{RenderReference, assess};
+    let root = std::env::var_os("LIBEQ_TEST_RAW_DIR").expect("set LIBEQ_TEST_RAW_DIR");
+    let root = std::path::Path::new(&root);
+    // Counts come from a separate byte-level survey of descriptor-selected meshes.
+    // Each mesh is counted once; these are not world-space collision totals.
+    for (name, expected) in [
+        ("crescent", [122800, 99701, 23099, 1854, 0]),
+        ("guildhall", [29187, 29147, 40, 160, 0]),
+        ("anguish", [224266, 203562, 20704, 480, 480]),
+    ] {
+        let loose = root.join(format!("{name}.zon"));
+        let source = if name == "anguish" {
+            DescriptorSource::Archive("anguish.zon")
+        } else {
+            DescriptorSource::Loose(&loose)
+        };
+        let scene = load_binary_zone(&root.join(format!("{name}.eqg")), source).unwrap();
+        let mut counts = [0; 5];
+        for mesh in &scene.meshes {
+            for triangle in &mesh.triangles {
+                let a = assess(
+                    triangle.material_index,
+                    mesh.materials.len(),
+                    triangle.flags,
+                );
+                counts[0] += 1;
+                counts[1] += usize::from(a.default_collision_query_candidate);
+                counts[2] += usize::from(!a.default_collision_query_candidate);
+                counts[3] += usize::from(
+                    a.render_reference == RenderReference::Sentinel
+                        && a.default_collision_query_candidate,
+                );
+                counts[4] += usize::from(a.excluded_by_flag2_query);
+                assert_eq!(a.unclassified_low_flags, 0, "{name}");
+                assert_ne!(a.render_reference, RenderReference::OutOfRange, "{name}");
+            }
+        }
+        assert_eq!(counts, expected, "{name}");
+    }
+}

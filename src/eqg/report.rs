@@ -1,11 +1,58 @@
 //! Deterministic source-assembly diagnostics. These are not bake-readiness results.
 use super::BinaryZoneScene;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
+
+// Raw bytes are authoritative; UTF-8 is only a convenience for readable names.
+fn string_details(table: &[u8], offset: u32) -> Value {
+    let bytes = table.get(offset as usize..).and_then(|tail| {
+        tail.iter()
+            .position(|&byte| byte == 0)
+            .map(|end| &tail[..end])
+    });
+    json!({
+        "bytes": bytes,
+        "utf8": bytes.and_then(|bytes| std::str::from_utf8(bytes).ok()),
+    })
+}
 
 pub fn summary(scene: &BinaryZoneScene) -> Value {
     let meshes: Vec<_> = scene.meshes.iter().map(|mesh| {
+        let material_details: Vec<_> = mesh.materials.iter().enumerate().map(|(ordinal, material)| {
+            let properties: Vec<_> = material.properties.iter().map(|property| {
+                json!({
+                    "name": string_details(&mesh.string_table, property.name_offset),
+                    "kind": property.kind,
+                    "value_bits": property.value,
+                    "string_value": (property.kind == 2)
+                        .then(|| string_details(&mesh.string_table, property.value)),
+                })
+            }).collect();
+            json!({
+                "ordinal": ordinal,
+                "index": material.index,
+                "name": string_details(&mesh.string_table, material.name_offset),
+                "shader": string_details(&mesh.string_table, material.shader_offset),
+                "properties": properties,
+            })
+        }).collect();
+        let mut groups = BTreeMap::new();
+        for triangle in &mesh.triangles {
+            *groups.entry((triangle.material_index, triangle.flags)).or_insert(0usize) += 1;
+        }
+        let triangle_surface_groups: Vec<_> = groups.into_iter().map(|((material_index, flags), triangles)| {
+            json!({"material_index": material_index, "flags": flags, "triangles": triangles})
+        }).collect();
         json!({
             "member": mesh.source_name,
+            "material_details": material_details,
+            "triangle_surface_groups": triangle_surface_groups,
+            "surface_assessments": mesh.triangles.iter().map(|triangle| {
+                (triangle.material_index, triangle.flags)
+            }).collect::<std::collections::BTreeSet<_>>().into_iter().map(|(material_index, flags)| {
+                json!({"material_index": material_index, "flags": flags,
+                    "assessment": super::surface::assess(material_index, mesh.materials.len(), flags)})
+            }).collect::<Vec<_>>(),
             "format": match mesh.kind {
                 libeq_eqg::mesh::MeshKind::Terrain => "eqgt",
                 libeq_eqg::mesh::MeshKind::Model => "eqgm",
