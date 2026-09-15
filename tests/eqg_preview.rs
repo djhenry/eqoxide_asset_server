@@ -230,3 +230,47 @@ fn preview_rejects_unsupported_source_states_before_replacing_output() {
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
     }
 }
+
+#[test]
+fn verified_simple_cutouts_use_native_threshold_without_changing_other_materials() {
+    use eqoxide_asset_server::eqg::{DescriptorSource, export::export_preview, load_binary_zone};
+    for (shader, expected_mode) in [
+        ("Chroma_MPLBasicAT.fx", gltf::material::AlphaMode::Opaque),
+        ("Chroma_MaxC1.fx", gltf::material::AlphaMode::Mask),
+        ("Chroma_MPLBumpAT.fx", gltf::material::AlphaMode::Opaque),
+        (
+            "Unverified_Chroma_MPLBasicAT.fx",
+            gltf::material::AlphaMode::Opaque,
+        ),
+    ] {
+        let (dir, archive) = fixture(2, true, false, false);
+        let mut scene = load_binary_zone(&archive, DescriptorSource::Archive("ZONE.ZON")).unwrap();
+        let object = scene
+            .meshes
+            .iter_mut()
+            .find(|m| m.source_name == "Object.Mod")
+            .unwrap();
+        let offset = string(&mut object.string_table, shader);
+        object.materials[0].shader_offset = offset;
+        let out = dir.path().join("cutout.glb");
+        let report = export_preview(&scene, &out).unwrap();
+        assert_eq!(
+            report.cutout_materials.len(),
+            usize::from(expected_mode == gltf::material::AlphaMode::Mask)
+        );
+        let (document, _, _) = gltf::import(&out).unwrap();
+        let object = document
+            .materials()
+            .find(|m| m.name() == Some("Object.Mod:material"))
+            .unwrap();
+        assert_eq!(object.alpha_mode(), expected_mode, "{shader}");
+        if expected_mode == gltf::material::AlphaMode::Mask {
+            assert!((object.alpha_cutoff().unwrap() - 192. / 255.).abs() < 1e-7);
+        }
+        let terrain = document
+            .materials()
+            .find(|m| m.name() == Some("TERRAIN.TER:material"))
+            .unwrap();
+        assert_eq!(terrain.alpha_mode(), gltf::material::AlphaMode::Opaque);
+    }
+}

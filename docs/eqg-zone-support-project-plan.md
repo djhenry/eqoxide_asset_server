@@ -238,7 +238,7 @@ selection, deterministic output, and preservation of prior output on failure.
 Native export/import acceptance covers Crescent (176 meshes, 2,341 object
 instances, 122 textures), Guild Hall (51, 86, 58), and Anguish (214, 695, 89),
 plus one terrain node each. Every placement is accounted for. Uncompressed RGB32
-DDS decoding enables Anguish's water texture. Previews remain opaque and report
+DDS decoding enables Anguish's water texture. Except for verified `Chroma_MaxC1.fx` cutouts, previews remain opaque and report
 omitted triangles, absent diffuse properties, and unsupported material effects.
 These artifact checks do not establish collision, native material fidelity, or
 live-client compatibility.
@@ -263,8 +263,17 @@ value bits rather than converting non-finite floats into JSON nulls. Triangle
 counts are grouped by the complete raw material index and flags. This supports
 material research without conflating shader names with verified render states.
 For example, a shader containing `AddAlpha` can have an `Opaque_` prefix; selecting
-opacity solely from that prefix is unsafe. Exact blend factors, alpha-test
-thresholds, coverage maps, vertex color treatment, and culling remain pending.
+opacity solely from that prefix is unsafe. The `Chroma_MaxC1.fx` static path is now verified and exported as texture-alpha
+cutout with threshold 192/255 (greater-or-equal). Guild Hall's chandelier chain
+uses this path: its 64-by-64 diffuse image contains 1,124 pixels below threshold
+and two exactly at threshold. Export/import acceptance checks the material mode,
+threshold, and retained alpha values. Existing WLD masking remains unchanged.
+
+`Chroma_MPLBasicAT` is not equivalent: its native path modulates texture alpha
+with vertex alpha, so it remains outside this first cutout mapping. Other blend
+factors, coverage maps, vertex color treatment, and native culling remain pending.
+All preview materials are still double-sided; no live native-client image
+comparison or gameplay compatibility is claimed by these artifact checks.
 
 The binary collision path consumes the lower 16 triangle flag bits independently
 of material membership. Its default query excludes `0x1`; `0x2` is excluded only

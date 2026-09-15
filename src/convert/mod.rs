@@ -34,7 +34,7 @@ pub(crate) struct TextureData {
     pub(crate) png_bytes: Vec<u8>,
 }
 
-/// Transparency mode derived from the EQ material's `RenderMethod` / `MaterialType`.
+/// Transparency mode for WLD render methods and verified EQG material adapters.
 /// Drives both how the source texture is decoded (masked keys out palette index 0)
 /// and which glTF `alphaMode` is emitted.
 ///
@@ -47,6 +47,8 @@ pub enum AlphaMode {
     Opaque,
     /// Cutout: palette index 0 becomes transparent; glTF `alphaMode: MASK`.
     Masked,
+    /// Texture-alpha cutout with an explicit normalized byte threshold.
+    Cutout(u8),
     /// Semi-transparent blend; opacity in permille (1000 = opaque). glTF `alphaMode: BLEND`.
     Blend(u16),
     /// Additive blend (EQ glow/fire). glTF `alphaMode: BLEND` + `extras.eqAdditive`.
@@ -94,6 +96,10 @@ fn material_to_gltf(mat: &MaterialData) -> serde_json::Value {
     let mut extras = serde_json::Map::new();
     match mat.alpha_mode {
         AlphaMode::Opaque => {}
+        AlphaMode::Cutout(threshold) => {
+            m["alphaMode"] = serde_json::json!("MASK");
+            m["alphaCutoff"] = serde_json::json!(f32::from(threshold) / 255.0);
+        }
         AlphaMode::Masked => {
             m["alphaMode"] = serde_json::json!("MASK");
             m["alphaCutoff"] = serde_json::json!(0.5);
@@ -3766,3 +3772,6 @@ mod equip_tex_tests {
 
 #[cfg(test)]
 mod eqg_tests;
+
+#[cfg(test)]
+mod cutout_tests;

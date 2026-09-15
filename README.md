@@ -126,7 +126,8 @@ are resolved; missing, ambiguous, or undecodable textures fail the export. Textu
 decoding includes uncompressed 32-bit RGB DDS with byte-channel masks and optional
 alpha. The output directory must exist; failures preserve an existing output file.
 
-These are opaque render previews. The report lists omitted triangles and material
+These are render previews with a verified diffuse-alpha cutout path for
+`Chroma_MaxC1.fx` (alpha cutoff 192/255); other shader variants remain opaque. The report lists omitted triangles and material
 approximations. Vertex colors, secondary UVs, terrain effects, animation, lighting,
 collision, water regions, and source-provider precedence are not implemented by
 this exporter. No CAS assets or zone manifests are published, and these previews
@@ -152,3 +153,9 @@ query-dependent filter. Upper bits and unclassified lower bits remain visible.
 These assessments do not emit collision geometry or establish shader fidelity.
 Object hulls, dynamic doors, winding, the client collision contract, and exact
 material blend/alpha-test states still need validation before gameplay export.
+
+The cutout path preserves texture alpha and reports affected materials in
+`cutout_materials`. It deliberately does not classify every `Chroma` shader as
+texture-only cutout: `Chroma_MPLBasicAT` also modulates alpha with vertex data.
+Native culling and dynamic fades are not reproduced; preview materials remain
+double-sided. Existing WLD cutout behavior retains its original threshold.

@@ -47,6 +47,43 @@ fn native_binary_zones_export_shared_geometry_and_resolved_textures() {
         assert_eq!(document.meshes().len(), meshes, "{name}");
         assert_eq!(document.nodes().len(), instances + 1, "{name}");
         assert_eq!(document.materials().len(), materials, "{name}");
+        let masked: Vec<_> = document
+            .materials()
+            .filter(|m| m.alpha_mode() == gltf::material::AlphaMode::Mask)
+            .collect();
+        assert_eq!(masked.len(), usize::from(name == "guildhall"), "{name}");
+        assert_eq!(report.cutout_materials.len(), masked.len());
+        if name == "guildhall" {
+            assert_eq!(masked[0].name(), Some("obj_chandelier.mod:dark_chain"));
+            assert!((masked[0].alpha_cutoff().unwrap() - 192. / 255.).abs() < 1e-7);
+            let chain = document
+                .images()
+                .find(|i| i.name() == Some("dark_chain_c.dds"))
+                .unwrap();
+            let chain = &images[chain.index()];
+            assert_eq!((chain.width, chain.height), (64, 64));
+            assert_eq!(chain.format, gltf::image::Format::R8G8B8A8);
+            assert_eq!(
+                chain
+                    .pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .filter(|p| p[3] < 192)
+                    .count(),
+                1124
+            );
+            assert_eq!(
+                chain
+                    .pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .filter(|p| p[3] == 192)
+                    .count(),
+                2
+            );
+        }
         assert_eq!(images.len(), textures, "{name}");
         let unique_vertices: usize = document
             .meshes()

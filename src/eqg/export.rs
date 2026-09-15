@@ -26,6 +26,7 @@ pub struct ExportReport {
     pub meshes: usize,
     pub materials: usize,
     pub textures: usize,
+    pub cutout_materials: Vec<String>,
     pub terrain_nodes: usize,
     pub instance_nodes: usize,
     /// Counted once per considered source mesh, not once per placement.
@@ -132,6 +133,7 @@ pub fn export_preview(scene: &BinaryZoneScene, out: &Path) -> Result<ExportRepor
         meshes: 0,
         materials: 0,
         textures: 0,
+        cutout_materials: vec![],
         terrain_nodes: 0,
         instance_nodes: 0,
         omitted_triangles: 0,
@@ -141,7 +143,8 @@ pub fn export_preview(scene: &BinaryZoneScene, out: &Path) -> Result<ExportRepor
         approximations: vec![
             "Render preview only; no collision or manifest publication",
             "Vertex colors, secondary UVs, normal maps, triangle flags, and shader properties are omitted",
-            "All materials are opaque; native alpha and blending are not reproduced",
+            "Only Chroma_MaxC1.fx diffuse cutouts use the native alpha threshold; other materials remain opaque",
+            "Materials remain double-sided; native culling, blending, and dynamic fades are not reproduced",
             "Native lighting, regions, skeletal animation, and placement extension data are omitted",
         ],
     };
@@ -264,12 +267,22 @@ pub fn export_preview(scene: &BinaryZoneScene, out: &Path) -> Result<ExportRepor
                 report.untextured_materials.push(name.clone());
                 None
             };
+            // This verified shader selects diffuse texture alpha directly. Other
+            // Chroma variants can multiply vertex alpha or use coverage textures.
+            let alpha_mode = if string(source, material.shader_offset)? == "Chroma_MaxC1.fx"
+                && texture_idx.is_some()
+            {
+                report.cutout_materials.push(name.clone());
+                AlphaMode::Cutout(192)
+            } else {
+                AlphaMode::Opaque
+            };
             let material_idx = materials.len();
             materials.push(MaterialData {
                 name,
                 texture_idx,
                 base_color: [1.; 4],
-                alpha_mode: AlphaMode::Opaque,
+                alpha_mode,
                 anim: None,
             });
             primitives.push(PrimitiveData {
