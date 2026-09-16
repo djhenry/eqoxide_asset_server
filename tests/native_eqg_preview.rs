@@ -51,7 +51,39 @@ fn native_binary_zones_export_shared_geometry_and_resolved_textures() {
             .materials()
             .filter(|m| m.alpha_mode() == gltf::material::AlphaMode::Mask)
             .collect();
-        assert_eq!(masked.len(), usize::from(name == "guildhall"), "{name}");
+        assert_eq!(
+            masked.len(),
+            if name == "crescent" {
+                24
+            } else {
+                usize::from(name == "guildhall")
+            },
+            "{name}"
+        );
+        assert_eq!(
+            report.vertex_alpha_materials.len(),
+            if name == "crescent" { 24 } else { 0 }
+        );
+        if name == "crescent" {
+            let mut colored_primitives = 0;
+            for mesh in document.meshes() {
+                for primitive in mesh.primitives() {
+                    let reader = primitive.reader(|b| Some(&buffers[b.index()].0));
+                    if let Some(colors) = reader.read_colors(0) {
+                        colored_primitives += 1;
+                        assert!(
+                            (primitive.material().alpha_cutoff().unwrap() - 96. / 255.).abs()
+                                < 1e-7
+                        );
+                        let colors: Vec<_> = colors.into_rgba_u8().collect();
+                        for index in reader.read_indices().unwrap().into_u32() {
+                            assert_eq!(colors[index as usize], [255; 4]);
+                        }
+                    }
+                }
+            }
+            assert_eq!(colored_primitives, 24);
+        }
         assert_eq!(report.cutout_materials.len(), masked.len());
         if name == "guildhall" {
             assert_eq!(masked[0].name(), Some("obj_chandelier.mod:dark_chain"));

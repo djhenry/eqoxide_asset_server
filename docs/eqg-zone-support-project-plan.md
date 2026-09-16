@@ -238,7 +238,7 @@ selection, deterministic output, and preservation of prior output on failure.
 Native export/import acceptance covers Crescent (176 meshes, 2,341 object
 instances, 122 textures), Guild Hall (51, 86, 58), and Anguish (214, 695, 89),
 plus one terrain node each. Every placement is accounted for. Uncompressed RGB32
-DDS decoding enables Anguish's water texture. Except for verified `Chroma_MaxC1.fx` cutouts, previews remain opaque and report
+DDS decoding enables Anguish's water texture. Except for verified `Chroma_MaxC1.fx` and version-3 `Chroma_MPLBasicAT.fx` cutouts, previews remain opaque and report
 omitted triangles, absent diffuse properties, and unsupported material effects.
 These artifact checks do not establish collision, native material fidelity, or
 live-client compatibility.
@@ -269,8 +269,16 @@ uses this path: its 64-by-64 diffuse image contains 1,124 pixels below threshold
 and two exactly at threshold. Export/import acceptance checks the material mode,
 threshold, and retained alpha values. Existing WLD masking remains unchanged.
 
-`Chroma_MPLBasicAT` is not equivalent: its native path modulates texture alpha
-with vertex alpha, so it remains outside this first cutout mapping. Other blend
+Version-3 `Chroma_MPLBasicAT` now retains raw vertex alpha per primitive with
+neutral white RGB and cutoff 96/255. This represents the doubled-alpha test under
+the explicitly scoped static tint alpha of one. Raw color is separate from the
+lighting channel; the adapter does not claim complete placement-lighting behavior.
+Uncolored primitives, including `Chroma_MaxC1`, retain their own alpha behavior.
+Crescent acceptance covers 24 used materials across 20 meshes; the independently
+surveyed referenced vertices have full source alpha. Synthetic fixtures exercise
+varying alpha and mixed shader primitives. Missing vertex colors or older mesh
+versions retain the opaque fallback. Guild Hall's output remains byte-identical
+to the prior commit, independently of the writer-wrapper test. Other blend
 factors, coverage maps, vertex color treatment, and native culling remain pending.
 All preview materials are still double-sided; no live native-client image
 comparison or gameplay compatibility is claimed by these artifact checks.

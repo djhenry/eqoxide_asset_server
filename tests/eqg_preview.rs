@@ -274,3 +274,58 @@ fn verified_simple_cutouts_use_native_threshold_without_changing_other_materials
         assert_eq!(terrain.alpha_mode(), gltf::material::AlphaMode::Opaque);
     }
 }
+
+#[test]
+fn vertex_alpha_cutouts_do_not_modulate_neighboring_texture_only_materials() {
+    use eqoxide_asset_server::eqg::{DescriptorSource, export::export_preview, load_binary_zone};
+    let (dir, archive) = fixture(2, true, false, false);
+    let mut scene = load_binary_zone(&archive, DescriptorSource::Archive("ZONE.ZON")).unwrap();
+    let object = scene
+        .meshes
+        .iter_mut()
+        .find(|m| m.source_name == "Object.Mod")
+        .unwrap();
+    object.version = 3;
+    for (v, alpha) in object.vertices.iter_mut().zip([0u32, 127, 255]) {
+        v.color = Some((alpha << 24) | 0x123456);
+    }
+    object.materials[0].shader_offset = string(&mut object.string_table, "Chroma_MPLBasicAT.fx");
+    object.materials[1].shader_offset = string(&mut object.string_table, "Chroma_MaxC1.fx");
+    object.materials[1].properties[0].value = object.materials[0].properties[0].value;
+    object.triangles[1].material_index = 1;
+    let out = dir.path().join("vertex-alpha.glb");
+    export_preview(&scene, &out).unwrap();
+    let (document, buffers, _) = gltf::import(&out).unwrap();
+    let object = document
+        .meshes()
+        .find(|m| m.name() == Some("Object.Mod"))
+        .unwrap();
+    let primitives: Vec<_> = object.primitives().collect();
+    assert_eq!(primitives.len(), 2);
+    assert_eq!(
+        primitives[0].material().alpha_mode(),
+        gltf::material::AlphaMode::Mask
+    );
+    assert!((primitives[0].material().alpha_cutoff().unwrap() - 96. / 255.).abs() < 1e-7);
+    let colors = primitives[0]
+        .reader(|buffer| Some(&buffers[buffer.index()].0))
+        .read_colors(0)
+        .expect("vertex-alpha cutout requires COLOR_0")
+        .into_rgba_u8()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        colors,
+        vec![
+            [255, 255, 255, 0],
+            [255, 255, 255, 127],
+            [255, 255, 255, 255]
+        ]
+    );
+    assert!((primitives[1].material().alpha_cutoff().unwrap() - 192. / 255.).abs() < 1e-7);
+    assert!(
+        primitives[1]
+            .reader(|buffer| Some(&buffers[buffer.index()].0))
+            .read_colors(0)
+            .is_none()
+    );
+}

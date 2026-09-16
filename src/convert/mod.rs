@@ -2363,6 +2363,32 @@ pub(crate) fn write_glb_instanced(
     textures: &[TextureData],
     nodes_in: &[NodeDef],
 ) -> Result<()> {
+    write_glb_instanced_with_vertex_alpha(
+        output, meshes, materials, textures, nodes_in, &std::collections::BTreeMap::new(),
+    )
+}
+
+/// Write optional per-primitive alpha as normalized white RGBA vertex colors.
+/// Keys are (mesh index, primitive index); each array covers the mesh's full
+/// vertex pool. Unspecified primitives remain uncolored. Validate all bindings
+/// before creating the output so invalid bindings cannot replace an existing file.
+pub(crate) fn write_glb_instanced_with_vertex_alpha(
+    output: &Path,
+    meshes: &[MeshData],
+    materials: &[MaterialData],
+    textures: &[TextureData],
+    nodes_in: &[NodeDef],
+    vertex_alpha: &std::collections::BTreeMap<(usize, usize), Vec<u8>>,
+) -> Result<()> {
+    for (&(mesh_idx, prim_idx), alpha) in vertex_alpha {
+        let mesh = meshes.get(mesh_idx)
+            .with_context(|| format!("vertex alpha references missing mesh {mesh_idx}"))?;
+        anyhow::ensure!(prim_idx < mesh.primitives.len(),
+            "vertex alpha references missing primitive {prim_idx} in mesh {mesh_idx}");
+        anyhow::ensure!(alpha.len() == mesh.positions.len(),
+            "vertex alpha count {} differs from vertex count {} in mesh {mesh_idx} primitive {prim_idx}",
+            alpha.len(), mesh.positions.len());
+    }
     let mut buffer_data: Vec<u8> = Vec::new();
     let mut buffer_views: Vec<serde_json::Value> = Vec::new();
     let mut accessors: Vec<serde_json::Value> = Vec::new();
@@ -2398,7 +2424,7 @@ pub(crate) fn write_glb_instanced(
     }
 
     // Meshes (no implicit per-mesh node here — nodes come from `nodes_in`).
-    for mesh in meshes {
+    for (mesh_idx, mesh) in meshes.iter().enumerate() {
         let mut attributes = serde_json::Map::new();
 
         let pos_offset = buffer_data.len() as u32;
@@ -2459,7 +2485,7 @@ pub(crate) fn write_glb_instanced(
         // u16 (5123) silently wraps for large merged terrain meshes and corrupts geometry.
         let use_u32_indices = mesh.positions.len() > 65535;
         let mut gltf_primitives = Vec::new();
-        for prim in &mesh.primitives {
+        for (prim_idx, prim) in mesh.primitives.iter().enumerate() {
             let idx_offset = buffer_data.len() as u32;
             if use_u32_indices {
                 for &i in &prim.indices {
@@ -2490,6 +2516,23 @@ pub(crate) fn write_glb_instanced(
                 "indices": idx_acc_idx,
                 "material": prim.material_idx,
             });
+            if let Some(alpha) = vertex_alpha.get(&(mesh_idx, prim_idx)) {
+                let color_offset = buffer_data.len();
+                for &a in alpha {
+                    buffer_data.extend_from_slice(&[255, 255, 255, a]);
+                }
+                let color_view_idx = buffer_views.len();
+                buffer_views.push(serde_json::json!({
+                    "buffer": 0, "byteOffset": color_offset,
+                    "byteLength": alpha.len() * 4, "target": 34962,
+                }));
+                let color_acc_idx = accessors.len();
+                accessors.push(serde_json::json!({
+                    "bufferView": color_view_idx, "componentType": 5121,
+                    "count": alpha.len(), "type": "VEC4", "normalized": true,
+                }));
+                prim_json["attributes"]["COLOR_0"] = serde_json::json!(color_acc_idx);
+            }
             if let Some(extras) = &prim.extras {
                 prim_json["extras"] = extras.clone();
             }
@@ -3775,3 +3818,6 @@ mod eqg_tests;
 
 #[cfg(test)]
 mod cutout_tests;
+
+#[cfg(test)]
+mod vertex_alpha_tests;

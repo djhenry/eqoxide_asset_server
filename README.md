@@ -127,8 +127,9 @@ decoding includes uncompressed 32-bit RGB DDS with byte-channel masks and option
 alpha. The output directory must exist; failures preserve an existing output file.
 
 These are render previews with a verified diffuse-alpha cutout path for
-`Chroma_MaxC1.fx` (alpha cutoff 192/255); other shader variants remain opaque. The report lists omitted triangles and material
-approximations. Vertex colors, secondary UVs, terrain effects, animation, lighting,
+`Chroma_MaxC1.fx` (alpha cutoff 192/255) and version-3 `Chroma_MPLBasicAT.fx`
+(vertex-alpha cutout); other shader variants remain opaque. The report lists omitted triangles and material
+approximations. Vertex RGB, secondary UVs, terrain effects, animation, lighting,
 collision, water regions, and source-provider precedence are not implemented by
 this exporter. No CAS assets or zone manifests are published, and these previews
 have not been validated for gameplay.
@@ -155,7 +156,11 @@ Object hulls, dynamic doors, winding, the client collision contract, and exact
 material blend/alpha-test states still need validation before gameplay export.
 
 The cutout path preserves texture alpha and reports affected materials in
-`cutout_materials`. It deliberately does not classify every `Chroma` shader as
-texture-only cutout: `Chroma_MPLBasicAT` also modulates alpha with vertex data.
+`cutout_materials`. Version-3 `Chroma_MPLBasicAT` uses raw vertex alpha in per-primitive `COLOR_0`
+with neutral white RGB and cutoff 96/255. With static tint alpha one, this is
+equivalent to its native doubled-alpha test. The report lists these materials in
+`vertex_alpha_materials`. Texture-only cutouts on neighboring primitives remain
+uncolored. Older meshes without verified vertex colors and other Chroma variants
+remain opaque.
 Native culling and dynamic fades are not reproduced; preview materials remain
 double-sided. Existing WLD cutout behavior retains its original threshold.

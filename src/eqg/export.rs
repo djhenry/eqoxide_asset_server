@@ -6,7 +6,7 @@ use glam::{Mat4, Vec3};
 mod tests;
 use crate::convert::{
     AlphaMode, MaterialData, MeshData, NodeDef, PrimitiveData, TextureData, encode_texture_png,
-    write_glb_instanced,
+    write_glb_instanced_with_vertex_alpha,
 };
 use libeq_eqg::mesh::MeshKind;
 use serde::Serialize;
@@ -27,6 +27,7 @@ pub struct ExportReport {
     pub materials: usize,
     pub textures: usize,
     pub cutout_materials: Vec<String>,
+    pub vertex_alpha_materials: Vec<String>,
     pub terrain_nodes: usize,
     pub instance_nodes: usize,
     /// Counted once per considered source mesh, not once per placement.
@@ -134,6 +135,7 @@ pub fn export_preview(scene: &BinaryZoneScene, out: &Path) -> Result<ExportRepor
         materials: 0,
         textures: 0,
         cutout_materials: vec![],
+        vertex_alpha_materials: vec![],
         terrain_nodes: 0,
         instance_nodes: 0,
         omitted_triangles: 0,
@@ -142,8 +144,9 @@ pub fn export_preview(scene: &BinaryZoneScene, out: &Path) -> Result<ExportRepor
         omitted_meshes: vec![],
         approximations: vec![
             "Render preview only; no collision or manifest publication",
-            "Vertex colors, secondary UVs, normal maps, triangle flags, and shader properties are omitted",
-            "Only Chroma_MaxC1.fx diffuse cutouts use the native alpha threshold; other materials remain opaque",
+            "Vertex RGB, secondary UVs, normal maps, triangle flags, and other shader properties are omitted",
+            "Chroma_MaxC1.fx and version-3 Chroma_MPLBasicAT.fx cutouts are supported; other materials remain opaque",
+            "Vertex-alpha cutouts assume static tint alpha one; runtime tint, fade, and lighting fidelity are not established",
             "Materials remain double-sided; native culling, blending, and dynamic fades are not reproduced",
             "Native lighting, regions, skeletal animation, and placement extension data are omitted",
         ],
@@ -191,6 +194,7 @@ pub fn export_preview(scene: &BinaryZoneScene, out: &Path) -> Result<ExportRepor
     let mut textures = Vec::new();
     let mut texture_indices = BTreeMap::new();
     let mut mesh_indices = BTreeMap::new();
+    let mut vertex_alpha = BTreeMap::new();
     for source_index in used {
         let source = &scene.meshes[source_index];
         let mut groups: BTreeMap<usize, Vec<u32>> = BTreeMap::new();
@@ -267,13 +271,26 @@ pub fn export_preview(scene: &BinaryZoneScene, out: &Path) -> Result<ExportRepor
                 report.untextured_materials.push(name.clone());
                 None
             };
-            // This verified shader selects diffuse texture alpha directly. Other
-            // Chroma variants can multiply vertex alpha or use coverage textures.
-            let alpha_mode = if string(source, material.shader_offset)? == "Chroma_MaxC1.fx"
-                && texture_idx.is_some()
-            {
+            let shader = string(source, material.shader_offset)?;
+            let alpha_mode = if shader == "Chroma_MaxC1.fx" && texture_idx.is_some() {
                 report.cutout_materials.push(name.clone());
                 AlphaMode::Cutout(192)
+            } else if shader == "Chroma_MPLBasicAT.fx"
+                && texture_idx.is_some()
+                && source.version == 3
+                && source.vertices.iter().all(|v| v.color.is_some())
+            {
+                // With static tint alpha one, the native doubled-alpha test is
+                // equivalent to texture alpha * vertex alpha >= 96/255.
+                let alpha = source
+                    .vertices
+                    .iter()
+                    .map(|v| (v.color.unwrap() >> 24) as u8)
+                    .collect();
+                vertex_alpha.insert((meshes.len(), primitives.len()), alpha);
+                report.cutout_materials.push(name.clone());
+                report.vertex_alpha_materials.push(name.clone());
+                AlphaMode::Cutout(96)
             } else {
                 AlphaMode::Opaque
             };
@@ -356,7 +373,14 @@ pub fn export_preview(scene: &BinaryZoneScene, out: &Path) -> Result<ExportRepor
         .unwrap_or(Path::new("."));
     let temp =
         tempfile::NamedTempFile::new_in(parent).context("create sibling preview staging file")?;
-    write_glb_instanced(temp.path(), &meshes, &materials, &textures, &nodes)?;
+    write_glb_instanced_with_vertex_alpha(
+        temp.path(),
+        &meshes,
+        &materials,
+        &textures,
+        &nodes,
+        &vertex_alpha,
+    )?;
     temp.persist(out)
         .map_err(|e| e.error)
         .context("publish preview file")?;
