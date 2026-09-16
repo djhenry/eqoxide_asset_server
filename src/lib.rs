@@ -12,6 +12,8 @@ pub mod manifest;
 pub mod server;
 pub mod sync_client;
 pub mod bsp_regions;
+pub mod zone_source;
+pub mod eqg;
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
