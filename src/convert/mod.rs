@@ -2380,6 +2380,28 @@ pub(crate) fn write_glb_instanced_with_vertex_alpha(
     nodes_in: &[NodeDef],
     vertex_alpha: &std::collections::BTreeMap<(usize, usize), Vec<u8>>,
 ) -> Result<()> {
+    write_glb_instanced_metadata(output, meshes, materials, textures, nodes_in, vertex_alpha, None)
+}
+
+/// Optional document extras and explicit node names for isolated staging artifacts.
+#[derive(Default)]
+pub(crate) struct GlbMetadata {
+    pub extras: Option<serde_json::Value>,
+    pub node_names: std::collections::BTreeMap<usize, String>,
+}
+
+pub(crate) fn write_glb_instanced_metadata(
+    output: &Path,
+    meshes: &[MeshData],
+    materials: &[MaterialData],
+    textures: &[TextureData],
+    nodes_in: &[NodeDef],
+    vertex_alpha: &std::collections::BTreeMap<(usize, usize), Vec<u8>>,
+    metadata: Option<&GlbMetadata>,
+) -> Result<()> {
+    if let Some(metadata) = metadata {
+        anyhow::ensure!(metadata.node_names.keys().all(|&i| i < nodes_in.len()), "node name references missing node");
+    }
     for (&(mesh_idx, prim_idx), alpha) in vertex_alpha {
         let mesh = meshes.get(mesh_idx)
             .with_context(|| format!("vertex alpha references missing mesh {mesh_idx}"))?;
@@ -2547,9 +2569,12 @@ pub(crate) fn write_glb_instanced_with_vertex_alpha(
 
     // Nodes: one per NodeDef, referencing a mesh + optional column-major matrix.
     let mut nodes: Vec<serde_json::Value> = Vec::with_capacity(nodes_in.len());
-    for nd in nodes_in {
+    for (node_index, nd) in nodes_in.iter().enumerate() {
         let mut node = serde_json::Map::new();
         node.insert("mesh".to_string(), serde_json::json!(nd.mesh_idx));
+        if let Some(name) = metadata.and_then(|m| m.node_names.get(&node_index)) {
+            node.insert("name".to_string(), serde_json::json!(name));
+        }
         if let Some(m) = nd.matrix {
             // glTF `matrix` is a flat 16-element column-major array.
             let flat: Vec<f32> = m.iter().flat_map(|col| col.iter().copied()).collect();
@@ -2562,7 +2587,7 @@ pub(crate) fn write_glb_instanced_with_vertex_alpha(
         buffer_data.push(0);
     }
 
-    let gltf = serde_json::json!({
+    let mut gltf = serde_json::json!({
         "asset": { "version": "2.0", "generator": "s3d_to_gltf" },
         "scene": 0,
         "scenes": [{ "name": "scene", "nodes": (0..nodes.len()).collect::<Vec<_>>() }],
@@ -2575,6 +2600,10 @@ pub(crate) fn write_glb_instanced_with_vertex_alpha(
         "images": images,
         "textures": gltf_textures,
     });
+
+    if let Some(extras) = metadata.and_then(|m| m.extras.as_ref()) {
+        gltf["extras"] = extras.clone();
+    }
 
     let json_str = serde_json::to_string(&gltf)?;
     let json_bytes = json_str.as_bytes();

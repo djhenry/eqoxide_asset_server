@@ -6,3 +6,5 @@ pub use zon::{BinaryZoneScene, DescriptorSource, ZoneMesh, ZonePlacement, load_b
 pub mod export;
 
 pub mod surface;
+
+pub mod collision;
