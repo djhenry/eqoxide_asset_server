@@ -20,6 +20,9 @@ impl ReaderRequirements {
         ensure!(self.reader_version > 0, "invalid reader version");
         ensure!(self.capabilities.len() <= 128, "too many capabilities");
         ensure!(self.capabilities.iter().all(|s| token(s)), "invalid capability token");
+        let unique: BTreeSet<_> = self.capabilities.iter().map(String::as_str).collect();
+        let header_len = unique.iter().map(|s| s.len()).sum::<usize>() + unique.len().saturating_sub(1);
+        ensure!(header_len <= 4096, "required capabilities exceed advertisement limit");
         Ok(())
     }
     pub fn check_supported(&self) -> Result<()> {
@@ -69,6 +72,23 @@ impl Advertisement {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn requirements_fit_canonical_capability_advertisement() {
+        let mut capabilities: Vec<_> = (0..31).map(|i| format!("c{i:02}{}", "a".repeat(125))).collect();
+        capabilities.push("z".repeat(97));
+        let mut requirements = ReaderRequirements { reader_version: 1, capabilities };
+        let header = requirements.capabilities.join(",");
+        assert_eq!(header.len(), 4096);
+        requirements.validate().unwrap();
+        assert!(Advertisement::parse(Some("1"), Some(&header)).unwrap().unwrap().supports(&requirements));
+        requirements.capabilities.push(requirements.capabilities[0].clone());
+        requirements.validate().unwrap(); // duplicate tokens need only one advertisement
+        requirements.capabilities[31].push('z');
+        assert!(requirements.validate().is_err()); // canonical header now needs 4097 bytes
+        requirements.capabilities[31] = "z".repeat(128);
+        assert!(requirements.validate().is_err()); // 32 distinct 128-byte tokens need 4127 bytes
+    }
+
     #[test]
     fn advertisement_is_explicit_bounded_and_not_minimum_version() {
         assert!(Advertisement::parse(None, None).unwrap().is_none());
