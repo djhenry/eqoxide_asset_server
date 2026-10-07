@@ -73,9 +73,9 @@ enum Cmd {
         /// login flow. Do NOT enable on a public/production server.
         #[arg(long)] no_auth_required: bool,
     },
-    /// Migrate an existing store from the legacy version-keyed manifests to the content-digest
+    /// Migrate an existing store from the legacy manifests to the reader-versioned
     /// store (idempotent). Reuses existing chunks — no re-derivation. Run once when cutting a
-    /// deployment over to the digest protocol.
+    /// deployment over to reader envelopes and revision-based ETags.
     Migrate {
         #[arg(long)] data: PathBuf,
     },
@@ -181,7 +181,7 @@ async fn main() -> anyhow::Result<()> {
                     None => skipped += 1,
                 }
             }
-            println!("migrate: {migrated} migrated, {skipped} already digest-keyed");
+            println!("migrate: {migrated} migrated, {skipped} already reader-versioned");
             Ok(())
         }
     }

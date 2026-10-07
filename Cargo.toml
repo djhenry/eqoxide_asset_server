@@ -40,8 +40,9 @@ gltf = { version = "1", features = ["import", "extras"] }
 glam = "0.29"
 rayon = "1"
 
-[dev-dependencies]
 tempfile = "3"
+
+[dev-dependencies]
 
 # TEMP: build against the forked libeq branch that tolerates later-era zone WLDs
 # (djhenry/libeq#fix/tolerant-zone-wld-parsing). Remove this patch and bump the
@@ -49,3 +50,5 @@ tempfile = "3"
 [patch."https://github.com/cjab/libeq"]
 libeq_pfs = { git = "https://github.com/djhenry/libeq", branch = "fix/tolerant-zone-wld-parsing", package = "libeq_pfs" }
 libeq_wld = { git = "https://github.com/djhenry/libeq", branch = "fix/tolerant-zone-wld-parsing", package = "libeq_wld" }
+
+[workspace]

@@ -14,7 +14,7 @@ async fn spawn() -> (SocketAddr, tempfile::TempDir) {
     let store = ManifestStore::new(dir.path());
     // seed one set with one file
     store
-        .build_and_write(&cas, "common", &[("humanoid.glb".into(), vec![3u8; 100_000])])
+        .build_and_write(&cas, "common", &[("humanoid.glb".into(), vec![3u8; 100_000])], eqoxide_asset_server::compatibility::ReaderRequirements::legacy())
         .unwrap();
 
     let mut creds = HashMap::new();
@@ -69,6 +69,8 @@ async fn auth_then_fetch_manifest_and_chunk() {
     let m = http
         .get(format!("{base}/manifest/common"))
         .bearer_auth(&token)
+        .header("X-Eqoxide-Asset-Readers", "1")
+        .header("X-Eqoxide-Asset-Capabilities", "legacy-assets-v1")
         .send().await.unwrap();
     assert_eq!(m.status(), 200);
     let manifest = m.json::<serde_json::Value>().await.unwrap();
@@ -78,6 +80,8 @@ async fn auth_then_fetch_manifest_and_chunk() {
     let c = http
         .get(format!("{base}/chunk/{chunk_hash}"))
         .bearer_auth(&token)
+        .header("X-Eqoxide-Asset-Readers", "1")
+        .header("X-Eqoxide-Asset-Capabilities", "legacy-assets-v1")
         .send().await.unwrap();
     assert_eq!(c.status(), 200);
     assert!(!c.bytes().await.unwrap().is_empty());
@@ -86,6 +90,8 @@ async fn auth_then_fetch_manifest_and_chunk() {
     let nf = http
         .get(format!("{base}/chunk/deadbeef"))
         .bearer_auth(&token)
+        .header("X-Eqoxide-Asset-Readers", "1")
+        .header("X-Eqoxide-Asset-Capabilities", "legacy-assets-v1")
         .send().await.unwrap();
     assert_eq!(nf.status(), 404);
 }

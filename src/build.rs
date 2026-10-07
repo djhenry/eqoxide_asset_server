@@ -233,13 +233,13 @@ pub fn build_from_raw(
             // per-race on-demand set, named by the client's model key (the file basename, e.g.
             // "race_hum" → set "charmodel/race_hum").
             let key = out_name.strip_suffix(".glb").unwrap_or(out_name);
-            let m = store.build_and_write(cas, &format!("charmodel/{key}"), &[(out_name.to_string(), bytes)])?;
+            let m = store.build_and_write(cas, &format!("charmodel/{key}"), &[(out_name.to_string(), bytes)], crate::compatibility::ReaderRequirements::legacy())?;
             manifests.push(m);
         } else {
             common_files.push((out_name.to_string(), bytes));
         }
     }
-    let common = store.build_and_write(cas, "common", &common_files)?;
+    let common = store.build_and_write(cas, "common", &common_files, crate::compatibility::ReaderRequirements::legacy())?;
     manifests.push(common);
     Ok(RawBuildReport {
         manifests,
@@ -300,7 +300,7 @@ pub fn build_zonedoors_from_raw(cas: &Cas, store: &ManifestStore, raw_dir: &Path
     let bytes = std::fs::read(&tmp)?;
     let _ = std::fs::remove_file(&tmp);
     let files = vec![(format!("{short}_doors.glb"), bytes)];
-    Ok(Some(store.build_and_write(cas, &format!("zonedoors/{short}"), &files)?))
+    Ok(Some(store.build_and_write(cas, &format!("zonedoors/{short}"), &files, crate::compatibility::ReaderRequirements::legacy())?))
 }
 
 pub fn build_zones_from_raw(
@@ -424,7 +424,7 @@ pub fn build_gameequip_from_raw(
         files.push(("weapons.glb".to_string(), std::fs::read(&wtmp)?));
         let _ = std::fs::remove_file(&wtmp);
     }
-    store.build_and_write(cas, "gameequip", &files)
+    store.build_and_write(cas, "gameequip", &files, crate::compatibility::ReaderRequirements::legacy())
 }
 
 /// Build the "gamedata" set: the runtime TEXT game data the client needs but shouldn't read from
@@ -501,7 +501,7 @@ pub fn build_gamedata_from_raw(
         }
     }
     tracing::info!("gamedata: generated {generated} water maps from zone geometry");
-    store.build_and_write(cas, "gamedata", &files)
+    store.build_and_write(cas, "gamedata", &files, crate::compatibility::ReaderRequirements::legacy())
 }
 
 /// Build the zone-audio sets (issue #32):
@@ -554,7 +554,7 @@ pub fn build_audio_from_raw(
         if missing > 0 {
             tracing::warn!("sound/{zone}: {missing} referenced wav(s) not found in sounds/ or snd*.pfs");
         }
-        store.build_and_write(cas, &format!("sound/{zone}"), &files)?;
+        store.build_and_write(cas, &format!("sound/{zone}"), &files, crate::compatibility::ReaderRequirements::legacy())?;
         sound_sets += 1;
     }
 
@@ -573,7 +573,7 @@ pub fn build_audio_from_raw(
     let mut music_sets = 0usize;
     for (name, mut files) in music {
         files.sort_by(|a, b| a.0.cmp(&b.0));
-        store.build_and_write(cas, &format!("music/{name}"), &files)?;
+        store.build_and_write(cas, &format!("music/{name}"), &files, crate::compatibility::ReaderRequirements::legacy())?;
         music_sets += 1;
     }
 
@@ -612,7 +612,7 @@ pub fn ingest_dir(
         let bytes = std::fs::read(&p)?;
         files.push((rel, bytes));
     }
-    store.build_and_write(cas, set, &files)
+    store.build_and_write(cas, set, &files, crate::compatibility::ReaderRequirements::legacy())
 }
 
 #[cfg(test)]
