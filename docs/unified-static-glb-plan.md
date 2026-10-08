@@ -41,29 +41,29 @@ pub fn write_static_visual(scene: &StaticScene, bake_revision: &str, output: &st
     -> anyhow::Result<crate::compatibility::ReaderRequirements>;
 ```
 
-- [ ] Add focused failing tests for asymmetric coordinate and transform conversion, vertex color isolation, material factor preservation, and malformed scene rejection with last-good output unchanged.
-- [ ] Validate before output creation: nonempty renderable scene; finite equal-length vertex attributes; nonzero unit normals; valid triangle/material/texture/node references; index counts divisible by three; nonempty referenced meshes/primitives; normalized material/color factors and cutoffs; valid PNG bytes with bounded decoding; positive proper uniform affine transforms; finite transformed world bounds; lowercase 64-digit bake revision.
-- [ ] Apply the fixed signed permutation to positions/normals and conjugate each instance matrix. Preserve instance mesh references and input triangle winding.
-- [ ] Derive the explicit required capability set from scene features. No caller may remove required capabilities.
+- [x] Add focused failing tests for asymmetric coordinate and transform conversion, vertex color isolation, material factor preservation, and malformed scene rejection with last-good output unchanged.
+- [x] Validate before output creation: nonempty renderable scene; finite equal-length vertex attributes; nonzero unit normals; valid triangle/material/texture/node references; index counts divisible by three; nonempty referenced meshes/primitives; normalized material/color factors and cutoffs; valid PNG bytes with bounded decoding; positive proper uniform affine transforms; finite transformed world bounds; lowercase 64-digit bake revision.
+- [x] Apply the fixed signed permutation to positions/normals and conjugate each instance matrix. Preserve instance mesh references and input triangle winding.
+- [x] Derive the explicit required capability set from scene features. No caller may remove required capabilities.
 
 ## Task 2: Shared serialization and atomic artifact writer
 
 **Owner:** same worker. Modify `src/convert/mod.rs` only at the static instanced writer boundary. Create `tests/static_scene.rs` for public API conformance.
 
-- [ ] Extract a private serialization core that accepts prepared material JSON and typed RGBA bindings. Build normalized JSON in the typed scene layer. Avoid arbitrary material JSON in the public API.
-- [ ] Keep existing wrappers converting alpha bytes into white RGBA using the original byte encoding and material helper; prove old empty/alpha paths retain their prior behavior. Do not change `material_to_gltf` globally.
-- [ ] Serialize generic full RGBA for normalized artifacts and attach `extras.eqoxideAsset` with schema, visual role, fixed coordinate profile/unit scale, bake revision and reader requirements. Use standard glTF alpha/color fields.
-- [ ] Write via a temporary file in the destination directory and persist only after successful serialization. Reopen the actual GLB in tests and assert header, geometry, transforms, materials and color values.
-- [ ] Test equivalent authored scenes without provenance-specific behavior and test a legacy-style fixture enhanced with nonwhite RGB and a nondefault mask cutoff.
+- [x] Extract a private serialization core that accepts prepared material JSON and typed RGBA bindings. Build normalized JSON in the typed scene layer. Avoid arbitrary material JSON in the public API.
+- [x] Keep existing wrappers converting alpha bytes into white RGBA using the original byte encoding and material helper; prove old empty/alpha paths retain their prior behavior. Do not change `material_to_gltf` globally.
+- [x] Serialize generic full RGBA for normalized artifacts and attach `extras.eqoxideAsset` with schema, visual role, fixed coordinate profile/unit scale, bake revision and reader requirements. Use standard glTF alpha/color fields.
+- [x] Write via a temporary file in the destination directory and persist only after successful serialization. Reopen the actual GLB in tests and assert header, geometry, transforms, materials and color values.
+- [x] Test equivalent authored scenes without provenance-specific behavior and test a legacy-style fixture enhanced with nonwhite RGB and a nondefault mask cutoff.
 
 ## Task 3: Acceptance and review request
 
 **Owner:** orchestrator plus independent reviewer.
 
-- [ ] Provide a small example that invokes the real public writer and produces an inspectable GLB without native assets.
-- [ ] Run new conformance tests, existing color/writer and EQG preview tests, then the server suite serially. Demonstrate a meaningful mapping/material/color mutation failing and restored tests passing.
+- [x] Provide a small example that invokes the real public writer and produces an inspectable GLB without native assets.
+- [x] Run new conformance tests, existing color/writer and EQG preview tests, then the server suite serially. Demonstrate a meaningful mapping/material/color mutation failing and restored tests passing.
 - [ ] Independently review the code and public references, repeat relevant tests, and inspect the generated example artifact through the GLB reader. This writer-only milestone has no gameplay behavior to validate; actual artifact decode is its observable boundary.
-- [ ] Document limits and reserved requirements. Existing clients do not implement reader 2. Do not migrate a production store or change support advertisements.
+- [x] Document limits and reserved requirements. Existing clients do not implement reader 2. Do not migrate a production store or change support advertisements.
 - [ ] Publish a PR linked to #59; leave it ready for human review and do not merge.
 
 ## Next units
