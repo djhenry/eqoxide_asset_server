@@ -271,6 +271,7 @@ impl ManifestStore {
         }
         let mut manifest = Manifest { schema_version: 1, revision: String::new(), requirements: ReaderRequirements::legacy(), set: set.into(), digest, files: legacy.files };
         manifest.revision = manifest.canonical_revision()?;
+        // Validate references before reading CAS; publish also validates the publication boundary.
         manifest.validate(set)?;
         let cas = Cas::new(&self.root);
         for file in &manifest.files {

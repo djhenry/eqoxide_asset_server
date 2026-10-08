@@ -27,9 +27,9 @@ async fn compatibility_gate_precedes_etag_and_no_auth_does_not_bypass_it() {
     assert_eq!(request().header("X-Eqoxide-Asset-Readers","2").header("X-Eqoxide-Asset-Capabilities","legacy-assets-v1").send().await.unwrap().status(),200);
     let path=dir.path().join(format!("manifests/common/{}.json",next.revision));
     std::fs::write(&path,b"broken").unwrap();
-    assert_ne!(compatible().header("If-None-Match",&next.revision).send().await.unwrap().status(),304);
+    assert_eq!(compatible().header("If-None-Match",&next.revision).send().await.unwrap().status(),500);
     std::fs::remove_file(&path).unwrap();
-    assert_ne!(compatible().header("If-None-Match",&next.revision).send().await.unwrap().status(),304);
+    assert_eq!(compatible().header("If-None-Match",&next.revision).send().await.unwrap().status(),500);
 }
 #[tokio::test]
 async fn sync_client_rejects_incompatible_success_response_before_chunks() {
