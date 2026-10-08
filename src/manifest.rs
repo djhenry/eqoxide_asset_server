@@ -1,4 +1,8 @@
 use crate::cas::Cas;
+use crate::compatibility::{ReaderRequirements, valid_hash, valid_path};
+use anyhow::ensure;
+use std::collections::BTreeSet;
+use std::io::Write;
 use crate::chunker::chunk_into;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -13,12 +17,42 @@ pub struct FileEntry {
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 pub struct Manifest {
+    pub schema_version: u32,
+    pub revision: String,
+    pub requirements: ReaderRequirements,
     pub set: String,
     /// Content identity of the set: blake3 over the sorted (path, file-blake3) list. Same content
     /// yields the same digest on any server, so the client can skip an unchanged set and never
     /// cross-contaminate between servers with diverging custom assets.
     pub digest: String,
     pub files: Vec<FileEntry>,
+}
+
+impl Manifest {
+    pub fn canonical_revision(&self) -> anyhow::Result<String> {
+        let capabilities: BTreeSet<_> = self.requirements.capabilities.iter().collect();
+        let mut files: Vec<_> = self.files.iter().collect();
+        files.sort_by(|a,b| a.path.cmp(&b.path));
+        let files: Vec<_> = files.iter().map(|f| (&f.path, f.size, &f.blake3, &f.chunks)).collect();
+        let bytes = serde_json::to_vec(&(self.schema_version, &self.set, &self.digest,
+            self.requirements.reader_version, capabilities, files))?;
+        let mut h = blake3::Hasher::new();
+        h.update(b"eqoxide-manifest-v1\0"); h.update(&bytes);
+        Ok(h.finalize().to_hex().to_string())
+    }
+    pub fn validate(&self, set: &str) -> anyhow::Result<()> {
+        ensure!(self.schema_version == 1, "unsupported manifest schema");
+        ensure!(valid_path(&self.set) && self.set == set, "invalid or mismatched manifest set");
+        self.requirements.validate()?;
+        let mut paths = BTreeSet::new();
+        for f in &self.files {
+            ensure!(valid_path(&f.path) && paths.insert(&f.path), "invalid or duplicate file path");
+            ensure!(valid_hash(&f.blake3) && f.chunks.iter().all(|s| valid_hash(s)), "invalid content reference");
+        }
+        ensure!(valid_hash(&self.digest) && self.digest == ManifestStore::set_digest(&self.files), "manifest content digest mismatch");
+        ensure!(valid_hash(&self.revision) && self.revision == self.canonical_revision()?, "manifest revision mismatch");
+        Ok(())
+    }
 }
 
 pub struct ManifestStore {
@@ -60,7 +94,9 @@ impl ManifestStore {
         h.finalize().to_hex().to_string()
     }
 
+    /// Current immutable manifest revision (historical method name retained).
     pub fn latest_digest(&self, set: &str) -> Option<String> {
+        if !valid_path(set) { return None; }
         let p = self.set_dir(set).join("latest");
         std::fs::read_to_string(p).ok().map(|s| s.trim().to_string())
     }
@@ -108,7 +144,12 @@ impl ManifestStore {
         cas: &Cas,
         set: &str,
         files: &[(String, Vec<u8>)],
+        requirements: ReaderRequirements,
     ) -> anyhow::Result<Manifest> {
+        requirements.validate()?;
+        ensure!(valid_path(set), "invalid set path");
+        let mut paths = BTreeSet::new();
+        ensure!(files.iter().all(|(path,_)| valid_path(path) && paths.insert(path)), "invalid or duplicate file path");
         // Guard the one place `latest` repoints. A set that loses files between bakes is
         // almost always a degraded build (a skipped conversion, an unreadable archive); the
         // store is append-only so the old manifest survives, but `latest` is what the client
@@ -132,22 +173,36 @@ impl ManifestStore {
         }
         let digest = Self::set_digest(&entries);
 
-        let manifest = Manifest { set: set.to_string(), digest: digest.clone(), files: entries };
-
-        // Content-addressed store: identical content overwrites the same `<digest>.json` (no-op,
-        // no counter churn); changed content writes a new digest and `latest` repoints.
-        let dir = self.set_dir(set);
-        std::fs::create_dir_all(&dir)?;
-        let json = serde_json::to_vec_pretty(&manifest)?;
-        std::fs::write(dir.join(format!("{digest}.json")), json)?;
-        std::fs::write(dir.join("latest"), &digest)?;
+        let mut manifest = Manifest { schema_version: 1, revision: String::new(), requirements,
+            set: set.to_string(), digest, files: entries };
+        manifest.revision = manifest.canonical_revision()?;
+        self.publish(&manifest)?;
         Ok(manifest)
     }
 
+    fn publish(&self, manifest: &Manifest) -> anyhow::Result<()> {
+        manifest.validate(&manifest.set)?;
+        let dir = self.set_dir(&manifest.set);
+        std::fs::create_dir_all(&dir)?;
+        fn atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+            let mut temp = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
+            temp.write_all(bytes)?; temp.as_file().sync_all()?;
+            temp.persist(path).map_err(|e| e.error)?;
+            Ok(())
+        }
+        atomic(&dir.join(format!("{}.json", manifest.revision)), &serde_json::to_vec_pretty(manifest)?)?;
+        atomic(&dir.join("latest"), manifest.revision.as_bytes())?;
+        Ok(())
+    }
+
     pub fn load(&self, set: &str, digest: &str) -> anyhow::Result<Manifest> {
+        ensure!(valid_path(set) && valid_hash(digest), "invalid manifest reference");
         let p = self.set_dir(set).join(format!("{digest}.json"));
         let bytes = std::fs::read(p)?;
-        Ok(serde_json::from_slice(&bytes)?)
+        let manifest: Manifest = serde_json::from_slice(&bytes)?;
+        manifest.validate(set)?;
+        ensure!(manifest.revision == digest, "stored revision mismatch");
+        Ok(manifest)
     }
 
     pub fn load_latest(&self, set: &str) -> anyhow::Result<Manifest> {
@@ -183,32 +238,56 @@ impl ManifestStore {
         sets
     }
 
-    /// Migrate a set's `latest` manifest from the legacy version-keyed format (`<version>.json`,
-    /// `latest`=version) to the content-digest store (`<digest>.json`, `latest`=digest). Idempotent:
-    /// returns `Ok(None)` when `latest` is already a digest. Reuses the existing chunks (the file
-    /// list is unchanged) — no re-derivation, so clients with the content cached re-download nothing.
+    /// Upgrade numeric or content-digest manifests to validated reader envelopes.
+    /// Reuse verified chunks and preserve previous manifests for rollback.
     pub fn migrate_to_digest(&self, set: &str) -> anyhow::Result<Option<String>> {
+        ensure!(valid_path(set), "invalid set path");
         let dir = self.set_dir(set);
         let latest = std::fs::read_to_string(dir.join("latest"))?.trim().to_string();
-        if latest.len() == 64 && latest.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Ok(None); // already content-addressed
+        ensure!(valid_hash(&latest) || (!latest.is_empty() && latest.bytes().all(|c| c.is_ascii_digit())), "invalid legacy manifest reference");
+        let bytes = std::fs::read(dir.join(format!("{latest}.json")))?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+        if value.get("schema_version").is_some() {
+            self.load(set, &latest)?;
+            return Ok(None);
         }
-        // Legacy manifest: read it ignoring its `version` field (serde skips unknown fields).
+        ensure!(value.get("requirements").is_none() && value.get("revision").is_none(), "partial manifest envelope");
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct Legacy {
-            #[serde(default)]
-            set: String,
+            #[serde(default)] set: String,
+            #[serde(default)] digest: Option<String>,
+            #[serde(default)] version: Option<u64>,
             files: Vec<FileEntry>,
         }
-        let bytes = std::fs::read(dir.join(format!("{latest}.json")))?;
         let legacy: Legacy = serde_json::from_slice(&bytes)?;
-        let set_name = if legacy.set.is_empty() { set.to_string() } else { legacy.set };
+        ensure!(legacy.set.is_empty() || legacy.set == set, "legacy set mismatch");
         let digest = Self::set_digest(&legacy.files);
-        let manifest = Manifest { set: set_name, digest: digest.clone(), files: legacy.files };
-        std::fs::write(dir.join(format!("{digest}.json")), serde_json::to_vec_pretty(&manifest)?)?;
-        std::fs::write(dir.join("latest"), &digest)?;
-        Ok(Some(digest))
+        if valid_hash(&latest) {
+            ensure!(legacy.digest.as_deref() == Some(digest.as_str()) && latest == digest, "legacy digest mismatch");
+        } else {
+            ensure!(legacy.version == Some(latest.parse()?), "legacy version mismatch");
+            ensure!(legacy.digest.as_ref().is_none_or(|d| d == &digest), "legacy digest mismatch");
+        }
+        let mut manifest = Manifest { schema_version: 1, revision: String::new(), requirements: ReaderRequirements::legacy(), set: set.into(), digest, files: legacy.files };
+        manifest.revision = manifest.canonical_revision()?;
+        // Validate references before reading CAS; publish also validates the publication boundary.
+        manifest.validate(set)?;
+        let cas = Cas::new(&self.root);
+        for file in &manifest.files {
+            let mut hash = blake3::Hasher::new(); let mut size = 0u64;
+            for chunk in &file.chunks {
+                let bytes = cas.get(chunk)?;
+                ensure!(Cas::hash(&bytes) == *chunk, "corrupt migration chunk");
+                size = size.checked_add(bytes.len() as u64).ok_or_else(|| anyhow::anyhow!("file size overflow"))?;
+                hash.update(&bytes);
+            }
+            ensure!(size == file.size && hash.finalize().to_hex().as_str() == file.blake3, "migration file mismatch");
+        }
+        self.publish(&manifest)?;
+        Ok(Some(manifest.revision))
     }
+
 }
 
 #[cfg(test)]
@@ -247,16 +326,16 @@ mod tests {
         let cas = Cas::new(dir.path());
         let store = ManifestStore::new(dir.path());
 
-        let m = store.build_and_write(&cas, "common", &files()).unwrap();
+        let m = store.build_and_write(&cas, "common", &files(), crate::compatibility::ReaderRequirements::legacy()).unwrap();
         assert_eq!(m.set, "common");
         assert_eq!(m.files.len(), 2);
-        assert_eq!(m.digest.len(), 64);
-        assert!(store.set_dir("common").join(format!("{}.json", m.digest)).exists());
+        assert_eq!(m.revision.len(), 64);
+        assert!(store.set_dir("common").join(format!("{}.json", m.revision)).exists());
         assert_eq!(
             std::fs::read_to_string(store.set_dir("common").join("latest")).unwrap(),
-            m.digest
+            m.revision
         );
-        assert_eq!(store.latest_digest("common").as_deref(), Some(m.digest.as_str()));
+        assert_eq!(store.latest_digest("common").as_deref(), Some(m.revision.as_str()));
     }
 
     #[test]
@@ -264,9 +343,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cas = Cas::new(dir.path());
         let store = ManifestStore::new(dir.path());
-        let m1 = store.build_and_write(&cas, "common", &files()).unwrap();
+        let m1 = store.build_and_write(&cas, "common", &files(), crate::compatibility::ReaderRequirements::legacy()).unwrap();
         let count1 = std::fs::read_dir(store.set_dir("common")).unwrap().count();
-        let m2 = store.build_and_write(&cas, "common", &files()).unwrap();
+        let m2 = store.build_and_write(&cas, "common", &files(), crate::compatibility::ReaderRequirements::legacy()).unwrap();
         let count2 = std::fs::read_dir(store.set_dir("common")).unwrap().count();
         assert_eq!(m1.digest, m2.digest);
         assert_eq!(count1, count2); // <digest>.json + latest, no churn
@@ -276,7 +355,8 @@ mod tests {
     fn migrate_legacy_to_digest_idempotent_and_loadable() {
         let dir = tempfile::tempdir().unwrap();
         let store = ManifestStore::new(dir.path());
-        let entries = vec![fe("b.bin", "22"), fe("a.bin", "11")];
+        let cas = Cas::new(dir.path());
+        let entries = vec![fe("b.bin", &cas.put(b"b").unwrap()), fe("a.bin", &cas.put(b"a").unwrap())];
         // hand-write a legacy version-keyed manifest
         let sd = store.set_dir("common");
         std::fs::create_dir_all(&sd).unwrap();
@@ -285,11 +365,11 @@ mod tests {
         std::fs::write(sd.join("latest"), "7").unwrap();
 
         let d = store.migrate_to_digest("common").unwrap().unwrap();
-        assert_eq!(d, ManifestStore::set_digest(&entries));
+        assert_ne!(d, ManifestStore::set_digest(&entries));
         assert_eq!(store.latest_digest("common").as_deref(), Some(d.as_str()));
         // the new loader can now read it
         let m = store.load_latest("common").unwrap();
-        assert_eq!(m.digest, d);
+        assert_eq!(m.revision, d);
         assert_eq!(m.files.len(), 2);
         // idempotent + discoverable
         assert!(store.migrate_to_digest("common").unwrap().is_none());
@@ -302,7 +382,7 @@ mod tests {
         let cas = Cas::new(dir.path());
         let store = ManifestStore::new(dir.path());
         let input = files();
-        let m = store.build_and_write(&cas, "common", &input).unwrap();
+        let m = store.build_and_write(&cas, "common", &input, crate::compatibility::ReaderRequirements::legacy()).unwrap();
         let entry = m.files.iter().find(|f| f.path == "humanoid.glb").unwrap();
         let reassembled: Vec<u8> =
             entry.chunks.iter().flat_map(|h| cas.get(h).unwrap()).collect();
@@ -316,7 +396,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cas = Cas::new(dir.path());
         let store = ManifestStore::new(dir.path());
-        let written = store.build_and_write(&cas, "zone/qeynos", &files()).unwrap();
+        let written = store.build_and_write(&cas, "zone/qeynos", &files(), crate::compatibility::ReaderRequirements::legacy()).unwrap();
         let loaded = store.load_latest("zone/qeynos").unwrap();
         assert_eq!(written, loaded);
     }
@@ -326,8 +406,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cas = Cas::new(dir.path());
         let store = ManifestStore::new(dir.path());
-        let m1 = store.build_and_write(&cas, "common", &files()).unwrap();
-        let m2 = store.build_and_write(&cas, "common", &files()).unwrap();
+        let m1 = store.build_and_write(&cas, "common", &files(), crate::compatibility::ReaderRequirements::legacy()).unwrap();
+        let m2 = store.build_and_write(&cas, "common", &files(), crate::compatibility::ReaderRequirements::legacy()).unwrap();
         // identical inputs => identical chunk hash lists (content-addressed dedup)
         assert_eq!(m1.files[0].chunks, m2.files[0].chunks);
     }
@@ -344,16 +424,16 @@ mod tests {
             ("a.glb".to_string(), vec![1u8; 1000]),
             ("b.glb".to_string(), vec![2u8; 1000]),
         ];
-        let before = store.build_and_write(&cas, "common", &two).unwrap();
+        let before = store.build_and_write(&cas, "common", &two, crate::compatibility::ReaderRequirements::legacy()).unwrap();
 
         let one = vec![("a.glb".to_string(), vec![1u8; 1000])];
-        let err = store.build_and_write(&cas, "common", &one).unwrap_err();
+        let err = store.build_and_write(&cas, "common", &one, crate::compatibility::ReaderRequirements::legacy()).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("refusing to publish"), "unexpected error: {msg}");
         assert!(msg.contains("--allow-shrink"), "error should name the escape hatch: {msg}");
 
         // and `latest` still points at the full set
-        assert_eq!(store.latest_digest("common").unwrap(), before.digest);
+        assert_eq!(store.latest_digest("common").unwrap(), before.revision);
     }
 
     /// Intentional removals opt in — eqoxide#704's -22 classic `ske*` textures are a real one.
@@ -367,12 +447,12 @@ mod tests {
             ("a.glb".to_string(), vec![1u8; 1000]),
             ("b.glb".to_string(), vec![2u8; 1000]),
         ];
-        store.build_and_write(&cas, "common", &two).unwrap();
+        store.build_and_write(&cas, "common", &two, crate::compatibility::ReaderRequirements::legacy()).unwrap();
 
         let one = vec![("a.glb".to_string(), vec![1u8; 1000])];
-        let after = store.build_and_write(&cas, "common", &one).unwrap();
+        let after = store.build_and_write(&cas, "common", &one, crate::compatibility::ReaderRequirements::legacy()).unwrap();
         assert_eq!(after.files.len(), 1);
-        assert_eq!(store.latest_digest("common").unwrap(), after.digest);
+        assert_eq!(store.latest_digest("common").unwrap(), after.revision);
     }
 
     /// Growing and same-size republishes are ordinary and must not be blocked.
@@ -383,19 +463,19 @@ mod tests {
         let store = ManifestStore::new(dir.path());
 
         let one = vec![("a.glb".to_string(), vec![1u8; 1000])];
-        store.build_and_write(&cas, "common", &one).unwrap();
+        store.build_and_write(&cas, "common", &one, crate::compatibility::ReaderRequirements::legacy()).unwrap();
 
         // same count, changed content
         let changed = vec![("a.glb".to_string(), vec![9u8; 1000])];
-        store.build_and_write(&cas, "common", &changed).unwrap();
+        store.build_and_write(&cas, "common", &changed, crate::compatibility::ReaderRequirements::legacy()).unwrap();
 
         let two = vec![
             ("a.glb".to_string(), vec![9u8; 1000]),
             ("b.glb".to_string(), vec![2u8; 1000]),
         ];
-        let grown = store.build_and_write(&cas, "common", &two).unwrap();
+        let grown = store.build_and_write(&cas, "common", &two, crate::compatibility::ReaderRequirements::legacy()).unwrap();
         assert_eq!(grown.files.len(), 2);
-        assert_eq!(store.latest_digest("common").unwrap(), grown.digest);
+        assert_eq!(store.latest_digest("common").unwrap(), grown.revision);
     }
 
     fn cas_chunk_count(dir: &std::path::Path) -> usize {
@@ -414,11 +494,11 @@ mod tests {
             ("a.glb".to_string(), vec![1u8; 4096]),
             ("b.glb".to_string(), vec![2u8; 4096]),
         ];
-        store.build_and_write(&cas, "common", &two).unwrap();
+        store.build_and_write(&cas, "common", &two, crate::compatibility::ReaderRequirements::legacy()).unwrap();
         let before = cas_chunk_count(dir.path());
 
         let one = vec![("c.glb".to_string(), vec![3u8; 4096])];
-        store.build_and_write(&cas, "common", &one).unwrap_err();
+        store.build_and_write(&cas, "common", &one, crate::compatibility::ReaderRequirements::legacy()).unwrap_err();
 
         assert_eq!(
             cas_chunk_count(dir.path()),
@@ -440,20 +520,20 @@ mod tests {
             ("a.glb".to_string(), vec![1u8; 1000]),
             ("b.glb".to_string(), vec![2u8; 1000]),
         ];
-        let before = store.build_and_write(&cas, "common", &two).unwrap();
+        let before = store.build_and_write(&cas, "common", &two, crate::compatibility::ReaderRequirements::legacy()).unwrap();
         std::fs::remove_file(
-            dir.path().join(format!("manifests/common/{}.json", before.digest)),
+            dir.path().join(format!("manifests/common/{}.json", before.revision)),
         )
         .unwrap();
 
         let one = vec![("a.glb".to_string(), vec![1u8; 1000])];
-        let err = store.build_and_write(&cas, "common", &one).unwrap_err();
+        let err = store.build_and_write(&cas, "common", &one, crate::compatibility::ReaderRequirements::legacy()).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("refusing to publish"), "unexpected error: {msg}");
         assert!(msg.contains("could not be loaded"), "unexpected error: {msg}");
         assert_eq!(
             store.latest_digest("common").unwrap(),
-            before.digest,
+            before.revision,
             "the damaged set's latest must not be repointed"
         );
     }
@@ -469,15 +549,15 @@ mod tests {
             ("a.glb".to_string(), vec![1u8; 1000]),
             ("b.glb".to_string(), vec![2u8; 1000]),
         ];
-        let before = store.build_and_write(&cas, "common", &two).unwrap();
+        let before = store.build_and_write(&cas, "common", &two, crate::compatibility::ReaderRequirements::legacy()).unwrap();
         std::fs::write(
-            dir.path().join(format!("manifests/common/{}.json", before.digest)),
+            dir.path().join(format!("manifests/common/{}.json", before.revision)),
             b"{ truncated",
         )
         .unwrap();
 
         let one = vec![("a.glb".to_string(), vec![1u8; 1000])];
-        let err = store.build_and_write(&cas, "common", &one).unwrap_err();
+        let err = store.build_and_write(&cas, "common", &one, crate::compatibility::ReaderRequirements::legacy()).unwrap_err();
         assert!(
             err.to_string().contains("refusing to publish"),
             "unexpected error: {err}"
@@ -496,15 +576,15 @@ mod tests {
             ("a.glb".to_string(), vec![1u8; 1000]),
             ("b.glb".to_string(), vec![2u8; 1000]),
         ];
-        let before = store.build_and_write(&cas, "common", &two).unwrap();
+        let before = store.build_and_write(&cas, "common", &two, crate::compatibility::ReaderRequirements::legacy()).unwrap();
         std::fs::remove_file(
-            dir.path().join(format!("manifests/common/{}.json", before.digest)),
+            dir.path().join(format!("manifests/common/{}.json", before.revision)),
         )
         .unwrap();
 
         let one = vec![("a.glb".to_string(), vec![1u8; 1000])];
-        let after = store.build_and_write(&cas, "common", &one).unwrap();
-        assert_eq!(store.latest_digest("common").unwrap(), after.digest);
+        let after = store.build_and_write(&cas, "common", &one, crate::compatibility::ReaderRequirements::legacy()).unwrap();
+        assert_eq!(store.latest_digest("common").unwrap(), after.revision);
     }
 
 }

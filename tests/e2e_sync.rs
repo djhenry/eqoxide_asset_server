@@ -32,7 +32,7 @@ async fn cold_then_warm_resync_transfers_only_changed_chunks() {
     // initial asset set
     server_store
         .build_and_write(&server_cas, "zone/qeynos",
-            &[("qeynos.glb".into(), vec![1u8; 300_000])])
+            &[("qeynos.glb".into(), vec![1u8; 300_000])], eqoxide_asset_server::compatibility::ReaderRequirements::legacy())
         .unwrap();
 
     let base = spawn_server(server_data.path()).await;
@@ -53,7 +53,7 @@ async fn cold_then_warm_resync_transfers_only_changed_chunks() {
     let mut changed = vec![1u8; 300_000];
     *changed.last_mut().unwrap() = 9;
     server_store
-        .build_and_write(&server_cas, "zone/qeynos", &[("qeynos.glb".into(), changed)])
+        .build_and_write(&server_cas, "zone/qeynos", &[("qeynos.glb".into(), changed)], eqoxide_asset_server::compatibility::ReaderRequirements::legacy())
         .unwrap();
 
     // re-login (new manifest version is 'latest') and re-sync: only changed chunks move

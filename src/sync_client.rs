@@ -1,6 +1,7 @@
 use crate::cas::Cas;
 use crate::manifest::Manifest;
 
+#[derive(Debug)]
 pub struct SyncStats {
     pub chunks_total: usize,
     pub chunks_downloaded: usize,
@@ -28,13 +29,20 @@ impl SyncClient {
     }
 
     pub async fn sync_set(&self, set: &str, local: &Cas) -> anyhow::Result<SyncStats> {
-        let manifest: Manifest = self
+        let response = self
             .http
             .get(format!("{}/manifest/{set}", self.base))
+            .header(crate::compatibility::READERS_HEADER, crate::compatibility::READERS)
+            .header(crate::compatibility::CAPABILITIES_HEADER, crate::compatibility::CAPABILITIES)
             .bearer_auth(&self.token)
-            .send().await?
-            .error_for_status()?
-            .json().await?;
+            .send().await?;
+        if response.status() == reqwest::StatusCode::CONFLICT {
+            anyhow::bail!("asset_reader_incompatible: {}", response.text().await?);
+        }
+        let manifest: Manifest = response.error_for_status()?.json().await?;
+
+        manifest.validate(set)?;
+        manifest.requirements.check_supported()?;
 
         // unique ordered chunk hashes across all files
         let mut wanted: Vec<String> = Vec::new();

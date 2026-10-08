@@ -9,6 +9,7 @@ pub mod chunker;
 pub mod convert;
 pub mod db;
 pub mod manifest;
+pub mod compatibility;
 pub mod server;
 pub mod sync_client;
 pub mod bsp_regions;

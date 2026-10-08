@@ -61,22 +61,36 @@ async fn get_manifest(
     if !st.no_auth && bearer(&headers, &st.tokens).is_none() {
         return (StatusCode::UNAUTHORIZED, "missing/invalid token").into_response();
     }
-    let Some(digest) = st.manifests.latest_digest(&set) else {
+    use crate::compatibility::{Advertisement, READERS_HEADER, CAPABILITIES_HEADER};
+    let Some(revision) = st.manifests.latest_digest(&set) else {
         return (StatusCode::NOT_FOUND, "no such manifest").into_response();
     };
-    // Conditional GET: identical content the client already has → 304, no body.
-    let inm = headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok());
-    if etag_matches(inm, &digest) {
-        tracing::info!("manifest {set}: 304 not-modified (client has digest {})", &digest[..12]);
-        return StatusCode::NOT_MODIFIED.into_response();
-    }
-    match st.manifests.load_latest(&set) {
-        Ok(m) => {
-            tracing::info!("manifest {set}: 200 digest={}", &digest[..12]);
-            ([(header::ETAG, format!("\"{digest}\""))], Json(m)).into_response()
+    let manifest = match st.manifests.load(&set, &revision) {
+        Ok(m) => m,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "invalid stored manifest; migrate or rebuild assets").into_response(),
+    };
+    let advertisement = (|| -> anyhow::Result<_> {
+        for name in [READERS_HEADER, CAPABILITIES_HEADER] {
+            anyhow::ensure!(headers.get_all(name).iter().count() <= 1, "duplicate advertisement header");
         }
-        Err(_) => (StatusCode::NOT_FOUND, "no such manifest").into_response(),
+        Advertisement::parse(headers.get(READERS_HEADER).map(|h| h.to_str()).transpose()?,
+            headers.get(CAPABILITIES_HEADER).map(|h| h.to_str()).transpose()?)
+    })();
+    let advertisement = match advertisement {
+        Ok(a) => a,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"reason":"malformed_asset_reader_advertisement"}))).into_response(),
+    };
+    if !advertisement.is_some_and(|a| a.supports(&manifest.requirements)) {
+        return (StatusCode::CONFLICT, Json(serde_json::json!({"reason":"asset_reader_incompatible",
+            "reader_version":manifest.requirements.reader_version,"capabilities":manifest.requirements.capabilities}))).into_response();
     }
+    let inm = headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok());
+    let etag = [(header::ETAG, format!("\"{revision}\""))];
+    if etag_matches(inm, &revision) {
+        return (StatusCode::NOT_MODIFIED, etag).into_response();
+    }
+    (etag, Json(manifest)).into_response()
+
 }
 
 async fn get_chunk(
