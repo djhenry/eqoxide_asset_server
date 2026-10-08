@@ -2399,17 +2399,47 @@ pub(crate) fn write_glb_instanced_metadata(
     vertex_alpha: &std::collections::BTreeMap<(usize, usize), Vec<u8>>,
     metadata: Option<&GlbMetadata>,
 ) -> Result<()> {
+    let prepared_materials: Vec<_> = materials.iter().map(material_to_gltf).collect();
+    let colors = vertex_alpha.iter()
+        .map(|(&key, alpha)| (key, PrimitiveColors::Alpha(alpha)))
+        .collect();
+    write_glb_instanced_prepared(
+        output, meshes, &prepared_materials, textures, nodes_in, &colors, metadata, "s3d_to_gltf",
+    )
+}
+
+/// Internal colors keep the legacy normalized-byte encoding separate from full RGBA.
+pub(crate) enum PrimitiveColors<'a> {
+    Alpha(&'a [u8]),
+    Rgba(&'a [[f32; 4]]),
+}
+impl PrimitiveColors<'_> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Alpha(a) => a.len(),
+            Self::Rgba(a) => a.len(),
+        }
+    }
+}
+
+pub(crate) fn write_glb_instanced_prepared(
+    output: &Path,
+    meshes: &[MeshData],
+    materials: &[serde_json::Value],
+    textures: &[TextureData],
+    nodes_in: &[NodeDef],
+    colors: &std::collections::BTreeMap<(usize, usize), PrimitiveColors<'_>>,
+    metadata: Option<&GlbMetadata>,
+    generator: &str,
+) -> Result<()> {
     if let Some(metadata) = metadata {
         anyhow::ensure!(metadata.node_names.keys().all(|&i| i < nodes_in.len()), "node name references missing node");
     }
-    for (&(mesh_idx, prim_idx), alpha) in vertex_alpha {
+    for (&(mesh_idx, prim_idx), color) in colors {
         let mesh = meshes.get(mesh_idx)
-            .with_context(|| format!("vertex alpha references missing mesh {mesh_idx}"))?;
-        anyhow::ensure!(prim_idx < mesh.primitives.len(),
-            "vertex alpha references missing primitive {prim_idx} in mesh {mesh_idx}");
-        anyhow::ensure!(alpha.len() == mesh.positions.len(),
-            "vertex alpha count {} differs from vertex count {} in mesh {mesh_idx} primitive {prim_idx}",
-            alpha.len(), mesh.positions.len());
+            .with_context(|| format!("vertex color references missing mesh {mesh_idx}"))?;
+        anyhow::ensure!(prim_idx < mesh.primitives.len(), "vertex color references missing primitive {prim_idx} in mesh {mesh_idx}");
+        anyhow::ensure!(color.len() == mesh.positions.len(), "vertex color count {} differs from vertex count {} in mesh {mesh_idx} primitive {prim_idx}", color.len(), mesh.positions.len());
     }
     let mut buffer_data: Vec<u8> = Vec::new();
     let mut buffer_views: Vec<serde_json::Value> = Vec::new();
@@ -2419,7 +2449,7 @@ pub(crate) fn write_glb_instanced_metadata(
     let mut gltf_materials: Vec<serde_json::Value> = Vec::new();
     let mut gltf_meshes: Vec<serde_json::Value> = Vec::new();
 
-    // Textures -> images (lowercased EQ texture name preserved).
+    // Textures -> embedded PNG images, preserving caller-supplied names.
     for tex in textures {
         let view_idx = buffer_views.len();
         let byte_offset = buffer_data.len() as u32;
@@ -2442,7 +2472,7 @@ pub(crate) fn write_glb_instanced_metadata(
 
     // Materials.
     for mat in materials {
-        gltf_materials.push(material_to_gltf(mat));
+        gltf_materials.push(mat.clone());
     }
 
     // Meshes (no implicit per-mesh node here — nodes come from `nodes_in`).
@@ -2538,21 +2568,38 @@ pub(crate) fn write_glb_instanced_metadata(
                 "indices": idx_acc_idx,
                 "material": prim.material_idx,
             });
-            if let Some(alpha) = vertex_alpha.get(&(mesh_idx, prim_idx)) {
+            if let Some(color) = colors.get(&(mesh_idx, prim_idx)) {
                 let color_offset = buffer_data.len();
-                for &a in alpha {
-                    buffer_data.extend_from_slice(&[255, 255, 255, a]);
-                }
+                let (component_type, byte_len, normalized) = match color {
+                    PrimitiveColors::Alpha(alpha) => {
+                        for &a in *alpha {
+                            buffer_data.extend_from_slice(&[255, 255, 255, a]);
+                        }
+                        (5121, alpha.len() * 4, true)
+                    }
+                    PrimitiveColors::Rgba(rgba) => {
+                        for pixel in *rgba {
+                            for channel in pixel {
+                                buffer_data.extend_from_slice(&channel.to_le_bytes());
+                            }
+                        }
+                        (5126, rgba.len() * 16, false)
+                    }
+                };
                 let color_view_idx = buffer_views.len();
                 buffer_views.push(serde_json::json!({
                     "buffer": 0, "byteOffset": color_offset,
-                    "byteLength": alpha.len() * 4, "target": 34962,
+                    "byteLength": byte_len, "target": 34962,
                 }));
                 let color_acc_idx = accessors.len();
-                accessors.push(serde_json::json!({
-                    "bufferView": color_view_idx, "componentType": 5121,
-                    "count": alpha.len(), "type": "VEC4", "normalized": true,
-                }));
+                let mut accessor = serde_json::json!({
+                    "bufferView": color_view_idx, "componentType": component_type,
+                    "count": color.len(), "type": "VEC4",
+                });
+                if normalized {
+                    accessor["normalized"] = serde_json::json!(true);
+                }
+                accessors.push(accessor);
                 prim_json["attributes"]["COLOR_0"] = serde_json::json!(color_acc_idx);
             }
             if let Some(extras) = &prim.extras {
@@ -2588,7 +2635,7 @@ pub(crate) fn write_glb_instanced_metadata(
     }
 
     let mut gltf = serde_json::json!({
-        "asset": { "version": "2.0", "generator": "s3d_to_gltf" },
+        "asset": { "version": "2.0", "generator": generator },
         "scene": 0,
         "scenes": [{ "name": "scene", "nodes": (0..nodes.len()).collect::<Vec<_>>() }],
         "nodes": nodes,
@@ -2607,9 +2654,11 @@ pub(crate) fn write_glb_instanced_metadata(
 
     let json_str = serde_json::to_string(&gltf)?;
     let json_bytes = json_str.as_bytes();
-    let json_padded_len = (json_bytes.len() + 3) & !3;
+    let json_padded_len = json_bytes.len().checked_add(3).context("static GLB JSON size overflow")? & !3;
     let bin_padded_len = buffer_data.len();
-    let total_len = 12 + 8 + json_padded_len + 8 + bin_padded_len;
+    let total_len = json_padded_len.checked_add(bin_padded_len).and_then(|n| n.checked_add(28))
+        .context("static GLB size overflow")?;
+    anyhow::ensure!(total_len <= u32::MAX as usize, "static GLB exceeds 32-bit file size limit");
 
     let mut out = fs::File::create(output)
         .with_context(|| format!("failed to create {}", output.display()))?;
@@ -3850,3 +3899,26 @@ mod cutout_tests;
 
 #[cfg(test)]
 mod vertex_alpha_tests;
+
+#[cfg(test)]
+mod prepared_static_legacy_tests {
+    use super::*;
+    #[test]
+    fn legacy_material_overrides_and_metadata_remain_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.glb");
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(1, 1).write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let meshes = vec![MeshData { name: "legacy".into(), positions: vec![[0.,0.,0.],[1.,0.,0.],[0.,1.,0.]], normals: vec![[0.,0.,1.];3], uvs: vec![[0.,0.];3], primitives: vec![PrimitiveData{indices:vec![0,1,2],material_idx:0,extras:None}]}];
+        let materials = vec![MaterialData { name: "legacy".into(), texture_idx: Some(0), base_color:[0.2,0.4,0.6,0.1], alpha_mode:AlphaMode::Blend(600), anim:None }];
+        write_glb(&path, &meshes, &materials, &[TextureData{name:"pixel".into(),png_bytes:png.into_inner()}]).unwrap();
+        let gltf = gltf::Gltf::open(path).unwrap();
+        assert!(gltf.as_json().extras.is_none());
+        assert_eq!(gltf.as_json().asset.generator.as_deref(), Some("s3d_to_gltf"));
+        let material = gltf.materials().next().unwrap();
+        assert_eq!(material.pbr_metallic_roughness().base_color_factor(),[1.,1.,1.,0.6]);
+        assert_eq!(material.alpha_mode(),gltf::material::AlphaMode::Blend);
+        assert!(material.double_sided());
+        assert!(gltf.meshes().next().unwrap().primitives().next().unwrap().get(&gltf::Semantic::Colors(0)).is_none());
+    }
+}
