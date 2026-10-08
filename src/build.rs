@@ -310,6 +310,14 @@ pub fn build_zones_from_raw(
     work_dir: &Path,
     pool: &rayon::ThreadPool,
 ) -> anyhow::Result<Vec<String>> {
+    // Inventory reports EQG support gaps without feeding those sources to WLD bakers.
+    let inventory = crate::zone_source::inventory_zones(raw_dir)?;
+    if inventory.archives_scanned > 0 || !inventory.orphan_descriptors.is_empty() || !inventory.errors.is_empty() {
+        tracing::warn!("{}", inventory.summary());
+        for error in &inventory.errors {
+            tracing::warn!("EQG inventory {}: {}", error.resource, error.message);
+        }
+    }
     // libeq panics (not Errs) on some malformed WLDs; we catch_unwind each zone and
     // log a clean WARN, so silence the default hook's verbose backtrace dump. Set once
     // before the parallel region (the hook is process-global).
