@@ -418,9 +418,15 @@ pub fn build_gameequip_from_raw(
         files.push((format!("equiptex/{name}"), png));
     }
 
-    // Bake all held-weapon models into a single GLB.
+    // Bake all held-weapon models into a single GLB. `Ok(false)` means no gequip
+    // archive was installed (nothing to bake) — that's fine; a broken archive that
+    // *is* present surfaces as `Err` and must fail the build, not vanish silently.
     let wtmp = std::env::temp_dir().join("weapons.glb");
-    if crate::convert::bake_weapons_glb(raw_dir, &["gequip.s3d","gequip2.s3d","gequip3.s3d","gequip4.s3d","gequip5.s3d","gequip6.s3d","gequip7.s3d","gequip8.s3d"], &wtmp).unwrap_or(false) {
+    if crate::convert::bake_weapons_glb(
+        raw_dir,
+        &["gequip.s3d","gequip2.s3d","gequip3.s3d","gequip4.s3d","gequip5.s3d","gequip6.s3d","gequip7.s3d","gequip8.s3d"],
+        &wtmp,
+    )? {
         files.push(("weapons.glb".to_string(), std::fs::read(&wtmp)?));
         let _ = std::fs::remove_file(&wtmp);
     }
