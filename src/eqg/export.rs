@@ -40,7 +40,7 @@ pub struct ExportReport {
 fn convert(v: [f32; 3]) -> Vec3 {
     Vec3::new(v[0], v[2], -v[1])
 }
-fn placement_matrix(p: &ZonePlacement) -> Result<Mat4> {
+pub(super) fn placement_matrix(p: &ZonePlacement) -> Result<Mat4> {
     ensure!(
         p.scale.is_finite() && p.scale > 0.,
         "zero, negative, or non-finite placement scale is unsupported"

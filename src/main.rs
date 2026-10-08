@@ -46,6 +46,16 @@ enum Cmd {
         /// Staging GLB path. Replaced only after successful conversion.
         #[arg(long)] out: PathBuf,
     },
+    /// Export isolated default static collision candidates; no gameplay publication.
+    ExportEqgCollision {
+        #[arg(long)] archive: PathBuf,
+        #[arg(long, conflicts_with = "member", required_unless_present = "member")]
+        descriptor: Option<PathBuf>,
+        #[arg(long, conflicts_with = "descriptor", required_unless_present = "descriptor")]
+        member: Option<String>,
+        /// Staging GLB path. Replaced only after successful conversion.
+        #[arg(long)] out: PathBuf,
+    },
     /// Chunk a directory of derived assets into the CAS + a manifest.
     Build {
         #[arg(long)] set: Option<String>,
@@ -134,6 +144,18 @@ async fn main() -> anyhow::Result<()> {
             };
             let scene = load_binary_zone(&archive, source)?;
             let report = eqoxide_asset_server::eqg::export::export_preview(&scene, &out)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
+        Cmd::ExportEqgCollision { archive, descriptor, member, out } => {
+            use eqoxide_asset_server::eqg::{load_binary_zone, DescriptorSource};
+            let source = match (&descriptor, &member) {
+                (Some(path), None) => DescriptorSource::Loose(path),
+                (None, Some(name)) => DescriptorSource::Archive(name),
+                _ => anyhow::bail!("select exactly one descriptor provider"),
+            };
+            let scene = load_binary_zone(&archive, source)?;
+            let report = eqoxide_asset_server::eqg::collision::export_collision(&scene, &out)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }

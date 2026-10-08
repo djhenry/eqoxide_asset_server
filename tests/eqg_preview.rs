@@ -329,3 +329,30 @@ fn vertex_alpha_cutouts_do_not_modulate_neighboring_texture_only_materials() {
             .is_none()
     );
 }
+
+#[test]
+fn collision_cli_needs_no_textures_and_keeps_hidden_faces() {
+    for version in [1, 2] {
+        let (dir, archive) = fixture(version, false, false, false);
+        let out = dir.path().join("collision.glb");
+        let result = Command::new(env!("CARGO_BIN_EXE_eqoxide-assets"))
+            .arg("export-eqg-collision").arg("--archive").arg(&archive)
+            .args(["--member", "zone.zon", "--out"]).arg(&out).output().unwrap();
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+        let (doc, buffers, images) = gltf::import(&out).unwrap();
+        assert!(images.is_empty());
+        assert_eq!(doc.nodes().len(), 1);
+        let metadata: serde_json::Value = serde_json::from_str(doc.as_json().extras.as_ref().unwrap().get()).unwrap();
+        assert_eq!(metadata["eqCollision"]["scope"], "default_static_triangle_candidates");
+        let primitive = doc.meshes().next().unwrap().primitives().next().unwrap();
+        let reader = primitive.reader(|b| Some(&buffers[b.index()]));
+        // Two faces per mesh, including a material sentinel; terrain plus two objects.
+        assert_eq!(reader.read_indices().unwrap().into_u32().count(), 18);
+        let previous = std::fs::read(&out).unwrap();
+        let failure = Command::new(env!("CARGO_BIN_EXE_eqoxide-assets"))
+            .arg("export-eqg-collision").arg("--archive").arg(&archive)
+            .args(["--member", "missing.zon", "--out"]).arg(&out).output().unwrap();
+        assert!(!failure.status.success());
+        assert_eq!(std::fs::read(&out).unwrap(), previous);
+    }
+}
