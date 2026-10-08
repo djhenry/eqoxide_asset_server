@@ -64,7 +64,7 @@ pub fn write_static_visual(scene: &StaticScene, bake_revision: &str, output: &st
 - [x] Run new conformance tests, existing color/writer and EQG preview tests, then the server suite serially. Demonstrate a meaningful mapping/material/color mutation failing and restored tests passing.
 - [x] Independently review the code and public references, repeat relevant tests, and inspect the generated example artifact through the GLB reader. This writer-only milestone has no gameplay behavior to validate; actual artifact decode is its observable boundary.
 - [x] Document limits and reserved requirements. Existing clients do not implement reader 2. Do not migrate a production store or change support advertisements.
-- [ ] Publish a PR linked to #59; leave it ready for human review and do not merge.
+- [x] Publish a PR linked to #59; leave it ready for human review and do not merge.
 
 ## Next units
 
@@ -73,3 +73,5 @@ Adapt WLD and EQG importers into this normalized scene boundary, resolving mater
 ## Acceptance evidence
 
 Author and independent all-target suites each passed 145 tests with 35 ignored. The independent reviewer repeated four production mutations (axis mapping, material factors, RGBA serialization and converted world overflow guard); each caused its targeted regression to fail, and restored conformance tests passed. Independent binary decoding of the actual authored GLB confirmed one mesh shared by two instances, full per-primitive RGBA isolation, textured tint/base alpha/nondefault cutoff, the artifact header, and world bounds `min [-3, 2, -13]`, `max [16.44179, 6.5, 7]`. Restored output was byte-identical. Acceptance applies to the static writer boundary, not source conversion or game runtime.
+
+Human review: [PR #60](https://github.com/djhenry/eqoxide_asset_server/pull/60). No merge or deployment performed.
