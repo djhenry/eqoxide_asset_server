@@ -222,6 +222,7 @@ fn validate(scene: &StaticScene, revision: &str) -> Result<()> {
         account_binary(&mut binary_bytes, t.png_bytes.len(), 1)?;
         // Limit both the compressed payload and decoder allocation before full decode.
         ensure!(t.png_bytes.len() <= 64 * 1024 * 1024, "texture {ti} PNG exceeds byte limit");
+        validate_png_stream(&t.png_bytes).with_context(|| format!("texture {ti} incomplete or non-static PNG"))?;
         let mut reader = image::ImageReader::with_format(Cursor::new(&t.png_bytes), image::ImageFormat::Png);
         let mut limits = image::Limits::default();
         limits.max_image_width = Some(8192);
@@ -295,4 +296,40 @@ mod size_tests {
         assert!(account_binary(&mut total, 1, 1).is_err());
         assert!(account_binary(&mut 0, u32::MAX as usize, 4).is_err());
     }
+}
+
+/// Validate the complete container; image decoding alone can ignore trailing data
+/// or decode only the first frame of an animated PNG.
+fn validate_png_stream(png: &[u8]) -> Result<()> {
+    ensure!(png.starts_with(b"\x89PNG\r\n\x1a\n"), "invalid PNG signature");
+    let mut offset = 8usize;
+    let mut chunks = 0usize;
+    let mut ended = false;
+    while offset < png.len() {
+        chunks = chunks.checked_add(1).context("PNG chunk count overflow")?;
+        ensure!(chunks <= 100_000, "excessive PNG chunk count");
+        let header = offset.checked_add(8).context("PNG chunk offset overflow")?;
+        let bytes = png.get(offset..header).context("truncated PNG chunk header")?;
+        let len = u32::from_be_bytes(bytes[..4].try_into()?) as usize;
+        let data_end = header.checked_add(len).context("PNG chunk size overflow")?;
+        let end = data_end.checked_add(4).context("PNG CRC offset overflow")?;
+        ensure!(end <= png.len(), "truncated PNG chunk payload");
+        let kind = &bytes[4..];
+        ensure!(kind.iter().all(u8::is_ascii_alphabetic), "invalid PNG chunk type");
+        ensure!(kind != b"acTL" && kind != b"fcTL" && kind != b"fdAT", "animated PNG requires a separate capability");
+        if chunks == 1 {
+            ensure!(kind == b"IHDR" && len == 13, "PNG must start with IHDR");
+        } else {
+            ensure!(kind != b"IHDR", "duplicate PNG IHDR");
+        }
+        let crc = u32::from_be_bytes(png[data_end..end].try_into()?);
+        ensure!(crc32fast::hash(&png[offset + 4..data_end]) == crc, "invalid PNG chunk CRC");
+        if kind == b"IEND" {
+            ensure!(len == 0 && end == png.len(), "invalid PNG end or trailing data");
+            ended = true;
+        }
+        offset = end;
+    }
+    ensure!(ended, "PNG missing IEND");
+    Ok(())
 }

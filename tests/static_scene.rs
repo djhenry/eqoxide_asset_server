@@ -188,3 +188,66 @@ fn converted_world_overflow_rejects_even_if_source_order_is_finite() {
     assert!(error.to_string().contains("converted bounds"),"{error:#}");
     assert_eq!(std::fs::read(path).unwrap(), b"last good");
 }
+
+fn png_chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    out.extend_from_slice(kind);
+    out.extend_from_slice(data);
+    out.extend_from_slice(&crc32fast::hash(&out[4..]).to_be_bytes());
+    out
+}
+
+fn animated_png(original: &[u8]) -> Vec<u8> {
+    let control = |sequence: u32| {
+        let mut data = Vec::new();
+        for n in [sequence, 1, 1, 0, 0] { data.extend_from_slice(&n.to_be_bytes()); }
+        data.extend_from_slice(&1u16.to_be_bytes());
+        data.extend_from_slice(&10u16.to_be_bytes());
+        data.extend_from_slice(&[0, 0]);
+        png_chunk(b"fcTL", &data)
+    };
+    let mut out = original[..33].to_vec();
+    let mut animation = 2u32.to_be_bytes().to_vec();
+    animation.extend_from_slice(&0u32.to_be_bytes());
+    out.extend(png_chunk(b"acTL", &animation));
+    out.extend(control(0));
+    out.extend_from_slice(&original[33..original.len() - 12]);
+    out.extend(control(1));
+    let mut frame_data = 2u32.to_be_bytes().to_vec();
+    let mut offset = 33;
+    while offset < original.len() - 12 {
+        let len = u32::from_be_bytes(original[offset..offset + 4].try_into().unwrap()) as usize;
+        if &original[offset + 4..offset + 8] == b"IDAT" {
+            frame_data.extend_from_slice(&original[offset + 8..offset + 8 + len]);
+        }
+        offset += len + 12;
+    }
+    out.extend(png_chunk(b"fdAT", &frame_data));
+    out.extend_from_slice(&original[original.len() - 12..]);
+    out
+}
+
+#[test]
+fn incomplete_crc_damaged_or_animated_png_preserves_last_good() {
+    let original_png = png();
+    let missing_end = original_png[..original_png.len() - 12].to_vec();
+    let mut trailing = original_png.clone(); trailing.extend_from_slice(b"junk");
+    let mut bad_crc = original_png.clone(); bad_crc[29] ^= 1;
+    let animation = animated_png(&original_png);
+    // This is a real two-frame APNG, not an arbitrary invalid image.
+    let reader = image::codecs::png::PngDecoder::new(std::io::Cursor::new(&animation)).unwrap();
+    assert!(reader.is_apng().unwrap());
+    assert!(image::load_from_memory_with_format(&animation, image::ImageFormat::Png).is_ok());
+    let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("scene.glb");
+    write_static_visual(&scene(), REVISION, &path).unwrap();
+    let last_good = std::fs::read(&path).unwrap();
+    for (label, payload) in [("missing IEND", missing_end), ("trailing data", trailing),
+        ("bad CRC", bad_crc), ("APNG", animation)] {
+        let mut s = scene();
+        s.textures.push(StaticTexture { name: "image".into(), png_bytes: payload });
+        s.materials[0].texture_index = Some(0);
+        assert!(write_static_visual(&s, REVISION, &path).is_err(), "accepted {label}");
+        assert_eq!(std::fs::read(&path).unwrap(), last_good, "replaced output for {label}");
+    }
+}
