@@ -23,3 +23,5 @@ cargo run --example static_visual_fixture -- output.glb
 ```
 
 The example exercises asymmetric geometry, two instances of one mesh, a tinted textured MASK material with nondefault alpha/cutoff, and full vertex color. It reopens the written artifact and reports its header, requirements, instance count and world bounds. This validates the writer boundary; source-adapter equivalence and runtime landmark acceptance are separate follow-on gates.
+
+Producer/consumer conformance is checked in CI from both repositories against explicitly pinned counterpart commits. The client script `scripts/check-static-visual-fixture.sh CLIENT_CHECKOUT PRODUCER_CHECKOUT` regenerates the synthetic artifact, compares it with the client fixture and runs the CPU decoder probe, using locked dependencies. Intentional contract or fixture changes require reviewing the counterpart pin and both fixture expectations together.
