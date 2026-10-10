@@ -3908,17 +3908,58 @@ mod prepared_static_legacy_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("legacy.glb");
         let mut png = std::io::Cursor::new(Vec::new());
-        image::DynamicImage::new_rgba8(1, 1).write_to(&mut png, image::ImageFormat::Png).unwrap();
-        let meshes = vec![MeshData { name: "legacy".into(), positions: vec![[0.,0.,0.],[1.,0.,0.],[0.,1.,0.]], normals: vec![[0.,0.,1.];3], uvs: vec![[0.,0.];3], primitives: vec![PrimitiveData{indices:vec![0,1,2],material_idx:0,extras:None}]}];
-        let materials = vec![MaterialData { name: "legacy".into(), texture_idx: Some(0), base_color:[0.2,0.4,0.6,0.1], alpha_mode:AlphaMode::Blend(600), anim:None }];
-        write_glb(&path, &meshes, &materials, &[TextureData{name:"pixel".into(),png_bytes:png.into_inner()}]).unwrap();
+        image::DynamicImage::new_rgba8(1, 1)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let meshes = vec![MeshData {
+            name: "legacy".into(),
+            positions: vec![[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]],
+            normals: vec![[0., 0., 1.]; 3],
+            uvs: vec![[0., 0.]; 3],
+            primitives: vec![PrimitiveData {
+                indices: vec![0, 1, 2],
+                material_idx: 0,
+                extras: None,
+            }],
+        }];
+        let materials = vec![MaterialData {
+            name: "legacy".into(),
+            texture_idx: Some(0),
+            base_color: [0.2, 0.4, 0.6, 0.1],
+            alpha_mode: AlphaMode::Blend(600),
+            anim: None,
+        }];
+        write_glb(
+            &path,
+            &meshes,
+            &materials,
+            &[TextureData {
+                name: "pixel".into(),
+                png_bytes: png.into_inner(),
+            }],
+        )
+        .unwrap();
         let gltf = gltf::Gltf::open(path).unwrap();
         assert!(gltf.as_json().extras.is_none());
-        assert_eq!(gltf.as_json().asset.generator.as_deref(), Some("s3d_to_gltf"));
+        assert_eq!(
+            gltf.as_json().asset.generator.as_deref(),
+            Some("s3d_to_gltf")
+        );
         let material = gltf.materials().next().unwrap();
-        assert_eq!(material.pbr_metallic_roughness().base_color_factor(),[1.,1.,1.,0.6]);
-        assert_eq!(material.alpha_mode(),gltf::material::AlphaMode::Blend);
+        assert_eq!(
+            material.pbr_metallic_roughness().base_color_factor(),
+            [1., 1., 1., 0.6]
+        );
+        assert_eq!(material.alpha_mode(), gltf::material::AlphaMode::Blend);
         assert!(material.double_sided());
-        assert!(gltf.meshes().next().unwrap().primitives().next().unwrap().get(&gltf::Semantic::Colors(0)).is_none());
+        assert!(gltf
+            .meshes()
+            .next()
+            .unwrap()
+            .primitives()
+            .next()
+            .unwrap()
+            .get(&gltf::Semantic::Colors(0))
+            .is_none());
     }
 }
