@@ -1,0 +1,45 @@
+name: static-visual
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: static-visual-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  writer-and-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RUSTC_WRAPPER: ""
+      RUSTFLAGS: ""
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: producer
+      - uses: actions/checkout@v4
+        with:
+          repository: djhenry/eqoxide
+          ref: d1c3e976b9cfb9adae656a086c68d79f463cb8f4
+          path: consumer
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            producer -> target
+            consumer -> target
+      - name: Fetch locked dependencies for both checkouts
+        run: |
+          cargo fetch --locked --manifest-path producer/Cargo.toml
+          cargo fetch --locked --manifest-path consumer/Cargo.toml
+      - name: Run writer tests
+        run: cargo test --manifest-path producer/Cargo.toml --all-targets --locked --offline
+      - name: Regenerate and decode the common fixture
+        run: consumer/scripts/check-static-visual-fixture.sh consumer producer
