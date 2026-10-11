@@ -14,6 +14,9 @@ use crate::{
     convert::{GlbMetadata, MeshData, NodeDef, PrimitiveColors, PrimitiveData, TextureData},
 };
 
+pub(crate) const MAX_TEXTURE_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_TEXTURE_DIMENSION: u32 = 8192;
+
 /// Resolved scene in server geometry axes with CCW winding. No actor-origin offset.
 #[derive(Debug, Clone, Default)]
 pub struct StaticScene {
@@ -302,7 +305,7 @@ fn validate(scene: &StaticScene, revision: &str) -> Result<()> {
         account_binary(&mut binary_bytes, t.png_bytes.len(), 1)?;
         // Limit both the compressed payload and decoder allocation before full decode.
         ensure!(
-            t.png_bytes.len() <= 64 * 1024 * 1024,
+            t.png_bytes.len() <= MAX_TEXTURE_BYTES,
             "texture {ti} PNG exceeds byte limit"
         );
         validate_png_stream(&t.png_bytes)
@@ -310,9 +313,9 @@ fn validate(scene: &StaticScene, revision: &str) -> Result<()> {
         let mut reader =
             image::ImageReader::with_format(Cursor::new(&t.png_bytes), image::ImageFormat::Png);
         let mut limits = image::Limits::default();
-        limits.max_image_width = Some(8192);
-        limits.max_image_height = Some(8192);
-        limits.max_alloc = Some(64 * 1024 * 1024);
+        limits.max_image_width = Some(MAX_TEXTURE_DIMENSION);
+        limits.max_image_height = Some(MAX_TEXTURE_DIMENSION);
+        limits.max_alloc = Some(MAX_TEXTURE_BYTES as u64);
         reader.limits(limits);
         reader
             .decode()
@@ -424,7 +427,7 @@ mod size_tests {
 
 /// Validate the complete container; image decoding alone can ignore trailing data
 /// or decode only the first frame of an animated PNG.
-fn validate_png_stream(png: &[u8]) -> Result<()> {
+pub(crate) fn validate_png_stream(png: &[u8]) -> Result<()> {
     ensure!(
         png.starts_with(b"\x89PNG\r\n\x1a\n"),
         "invalid PNG signature"
