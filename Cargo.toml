@@ -35,7 +35,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 sodiumoxide = "0.2"
 libeq_pfs = { git = "https://github.com/cjab/libeq", package = "libeq_pfs" }
 libeq_wld = { git = "https://github.com/cjab/libeq", package = "libeq_wld" }
-libeq_eqg = { git = "https://github.com/djhenry/libeq", rev = "4017525f23312b32f62e6c377e09a6f465f85666" }
+libeq_eqg = { git = "https://github.com/djhenry/libeq", rev = "b84d95b2f3877ebe5e40ca6b31d2e3355f30db72" }
 image = { version = "0.25", default-features = false, features = ["bmp", "png", "dds"] }
 crc32fast = "1"
 gltf = { version = "1", features = ["import", "extras"] }
