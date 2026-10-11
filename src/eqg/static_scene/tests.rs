@@ -695,3 +695,102 @@ fn excluded_roles_and_opaque_properties_do_not_change_visual_flags() {
     assert_eq!(b.report.sentinel_triangles, [1, 0]);
     assert_eq!(b.report.source_to_visual_mesh, [None, Some(0)]);
 }
+#[test]
+fn unused_binding_record_consumes_logical_input_bytes() {
+    let mut s = source();
+    s.meshes[0].materials.push(Material {
+        index: 777,
+        name_offset: 0,
+        shader_offset: 2,
+        properties: vec![],
+    });
+    fn threshold(s: &BinaryZoneScene, extra: bool) -> usize {
+        let mut lo = 0;
+        let mut hi = 4096;
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            let mut r = resolved();
+            if extra {
+                r.bindings.insert((0, 1), binding());
+            }
+            let limits = BridgeLimits {
+                max_input_bytes: mid,
+                ..BridgeLimits::default()
+            };
+            if build_static_scene(s, r, &limits).is_ok() {
+                hi = mid
+            } else {
+                lo = mid + 1
+            }
+        }
+        lo
+    }
+    let without = threshold(&s, false);
+    let with = threshold(&s, true);
+    assert_eq!(with - without, 32, "one fixed record is charged once");
+    assert!(
+        with > without,
+        "caller-owned binding key/material/UV/color decisions occupy nonzero logical input bytes"
+    );
+}
+
+#[test]
+fn many_unused_bindings_obey_custom_caps_and_rgba_payload_is_charged_once() {
+    let mut s = source();
+    for index in 1..=64 {
+        s.meshes[0].materials.push(Material {
+            index: 500 + index,
+            name_offset: 0,
+            shader_offset: 2,
+            properties: vec![],
+        });
+    }
+    fn resolved_with(count: usize, rgba: bool) -> ResolvedZoneVisual {
+        let mut r = resolved();
+        for ordinal in 1..=count {
+            let mut b = binding();
+            if rgba && ordinal == count {
+                b.colors = ResolvedColors::Rgba(vec![[0.2, 0.4, 0.6, 0.8]; 3]);
+            }
+            r.bindings.insert((0, ordinal), b);
+        }
+        r
+    }
+    fn threshold(s: &BinaryZoneScene, count: usize, rgba: bool) -> usize {
+        let mut lower = 0;
+        let mut upper = 16_384;
+        while lower < upper {
+            let mid = (lower + upper) / 2;
+            let limits = BridgeLimits {
+                max_input_bytes: mid,
+                ..BridgeLimits::default()
+            };
+            if build_static_scene(s, resolved_with(count, rgba), &limits).is_ok() {
+                upper = mid;
+            } else {
+                lower = mid + 1;
+            }
+        }
+        lower
+    }
+    let base = threshold(&s, 0, false);
+    let unused = threshold(&s, 64, false);
+    assert_eq!(unused - base, 64 * 32);
+    let colored = threshold(&s, 64, true);
+    assert_eq!(
+        colored - unused,
+        3 * 4 * 4,
+        "RGBA samples supplement the fixed record exactly once"
+    );
+    for (rgba, exact) in [(false, unused), (true, colored)] {
+        let mut limits = BridgeLimits {
+            max_input_bytes: exact,
+            ..BridgeLimits::default()
+        };
+        let accepted = build_static_scene(&s, resolved_with(64, rgba), &limits).unwrap();
+        assert_eq!(accepted.report.unused_bindings.len(), 64);
+        limits.max_input_bytes -= 1;
+        let err = build_static_scene(&s, resolved_with(64, rgba), &limits).unwrap_err();
+        assert!(format!("{err:#}").contains("input payload budget exceeded"));
+    }
+}

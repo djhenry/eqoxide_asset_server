@@ -298,6 +298,11 @@ fn add(total: &mut usize, count: usize, stride: usize, limit: usize, label: &str
     ensure!(*total <= limit, "{label} budget exceeded");
     Ok(())
 }
+// Logical input facts, independent of Rust layout: two u64 source-key ordinals,
+// one u64 material index, and u32 color-use and secondary-UV decisions. Optional
+// RGBA samples are charged separately. This does not count map/allocator overhead.
+const BINDING_INPUT_BYTES: usize = 32;
+
 fn preflight(s: &BinaryZoneScene, r: &ResolvedZoneVisual, l: &BridgeLimits) -> Result<()> {
     let mut input = 0;
     let mut output = 0;
@@ -461,6 +466,13 @@ fn preflight(s: &BinaryZoneScene, r: &ResolvedZoneVisual, l: &BridgeLimits) -> R
             )?;
         }
     }
+    add(
+        &mut input,
+        r.bindings.len(),
+        BINDING_INPUT_BYTES,
+        l.max_input_bytes,
+        "input payload",
+    )?;
     for binding in r.bindings.values() {
         if let ResolvedColors::Rgba(c) = &binding.colors {
             add(&mut input, c.len(), 16, l.max_input_bytes, "input payload")?;
