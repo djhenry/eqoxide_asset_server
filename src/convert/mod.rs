@@ -1,5 +1,11 @@
 #![allow(dead_code, unused_imports)]
 mod dds;
+mod texture;
+pub use texture::TextureDecodePolicy;
+pub(crate) use texture::{
+    decode_rgba as decode_texture_rgba, encode_png as encode_texture_rgba_png,
+    DecodeProfile as TextureDecodeProfile,
+};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{Cursor, Write};
@@ -35,8 +41,8 @@ pub(crate) struct TextureData {
 }
 
 /// Transparency mode for WLD render methods and verified EQG material adapters.
-/// Drives both how the source texture is decoded (masked keys out palette index 0)
-/// and which glTF `alphaMode` is emitted.
+/// Legacy conversion uses this for both texture alpha and glTF material output.
+/// Common source material normalization keeps texture decoding policy separate.
 ///
 /// `Ord` is derived (variant order, then `Blend`'s permille) purely so callers can
 /// key a `BTreeMap` or sort by it for a deterministic bake — it carries no visual
@@ -643,42 +649,26 @@ pub(crate) fn load_texture_from_archive(
 /// texture-less material. The old `try_load_image` funnelled every one of these
 /// through `.ok()?`, so a corrupt DDS silently became an untextured primitive
 /// and the resulting `.glb` still baked (issue #50 asked for the opposite).
-pub(crate) fn encode_texture_png(data: &[u8], alpha_mode: AlphaMode, name: &str) -> Result<Vec<u8>> {
-    // For masked materials, recover EQ's keyed transparency: in 8-bit paletted BMPs
-    // palette index 0 is the transparent key. The `image` crate's to_rgba8() would
-    // make it opaque, so decode the palette ourselves when we can.
-    let decoded_dds = dds::decode(data).with_context(|| format!("decode texture {name}"))?;
-    let mut rgba = if let Some(rgba) = decoded_dds {
-        rgba
-    } else if alpha_mode == AlphaMode::Masked {
-        match decode_bmp_keyed(data) {
-            Some(img) => img,
-            None => image::load_from_memory(data)
-                .with_context(|| format!("decode masked texture {name}"))?
-                .to_rgba8(),
-        }
+pub(crate) fn encode_texture_png(
+    data: &[u8],
+    alpha_mode: AlphaMode,
+    name: &str,
+) -> Result<Vec<u8>> {
+    let policy = if alpha_mode == AlphaMode::Masked {
+        TextureDecodePolicy::PaletteIndexZero
     } else {
-        image::load_from_memory(data)
-            .with_context(|| format!("decode texture {name}"))?
-            .to_rgba8()
+        TextureDecodePolicy::PreserveRgba
     };
-    if rgba.is_empty() {
-        anyhow::bail!("texture {name} decoded to a zero-pixel image");
-    }
-    // Bake per-material opacity into the alpha channel for blended materials so the
-    // client can blend straight from the texture (no per-draw opacity uniform).
+    let mut rgba =
+        decode_texture_rgba(data, policy, name, TextureDecodeProfile::Legacy)?.into_rgba8();
     if let AlphaMode::Blend(permille) = alpha_mode {
         let scale = permille as f32 / 1000.0;
         for px in rgba.pixels_mut() {
             px[3] = (px[3] as f32 * scale).round().clamp(0.0, 255.0) as u8;
         }
     }
-    let mut png_buf = Cursor::new(Vec::new());
-    rgba.write_to(&mut png_buf, image::ImageFormat::Png)
-        .with_context(|| format!("re-encode texture {name} as png"))?;
-    Ok(png_buf.into_inner())
+    encode_texture_rgba_png(&image::DynamicImage::ImageRgba8(rgba), name)
 }
-
 /// Read `filename` from `pfs` and re-encode it as a PNG. `Ok(None)` means the
 /// file is simply not in this archive — a normal miss the caller retries with a
 /// different extension or a different archive. `Err` means the file *is* present
@@ -697,68 +687,9 @@ fn try_load_image(
     encode_texture_png(&data, alpha_mode, filename).map(Some)
 }
 
-/// Decode an 8-bit paletted BMP, treating palette index 0 as fully transparent
-/// (EQ's masked-texture convention). Returns `None` for any BMP that isn't the
-/// uncompressed 8bpp BITMAPINFOHEADER form, so callers fall back to opaque decode.
+#[cfg(test)]
 fn decode_bmp_keyed(data: &[u8]) -> Option<image::RgbaImage> {
-    if data.len() < 54 || &data[0..2] != b"BM" {
-        return None;
-    }
-    let rd_u32 = |o: usize| u32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
-    let rd_i32 = |o: usize| i32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
-    let rd_u16 = |o: usize| u16::from_le_bytes([data[o], data[o + 1]]);
-
-    let pixel_offset = rd_u32(10) as usize;
-    let dib_size = rd_u32(14) as usize;
-    if dib_size < 40 {
-        return None; // only BITMAPINFOHEADER (40) or larger
-    }
-    let width = rd_i32(18);
-    let height_raw = rd_i32(22);
-    let bpp = rd_u16(28);
-    let compression = rd_u32(30);
-    if bpp != 8 || compression != 0 || width <= 0 || height_raw == 0 {
-        return None;
-    }
-    let width = width as usize;
-    let top_down = height_raw < 0;
-    let height = height_raw.unsigned_abs() as usize;
-
-    // Palette: 4 bytes each (B,G,R,reserved), right after the DIB header.
-    let palette_start = 14 + dib_size;
-    let mut colors_used = rd_u32(46) as usize;
-    if colors_used == 0 {
-        colors_used = 256;
-    }
-    if palette_start + colors_used * 4 > data.len() || palette_start + colors_used * 4 > pixel_offset {
-        return None;
-    }
-    let palette: Vec<[u8; 3]> = (0..colors_used)
-        .map(|i| {
-            let p = palette_start + i * 4;
-            [data[p + 2], data[p + 1], data[p]] // R,G,B
-        })
-        .collect();
-
-    // Rows are padded to a multiple of 4 bytes.
-    let row_stride = (width + 3) & !3;
-    if pixel_offset + row_stride * height > data.len() {
-        return None;
-    }
-
-    let mut img = image::RgbaImage::new(width as u32, height as u32);
-    for y in 0..height {
-        // BMP is bottom-up unless height is negative.
-        let src_row = if top_down { y } else { height - 1 - y };
-        let row = pixel_offset + src_row * row_stride;
-        for x in 0..width {
-            let idx = data[row + x] as usize;
-            let [r, g, b] = palette.get(idx).copied().unwrap_or([0, 0, 0]);
-            let a = if idx == 0 { 0 } else { 255 };
-            img.put_pixel(x as u32, y as u32, image::Rgba([r, g, b, a]));
-        }
-    }
-    Some(img)
+    texture::legacy_keyed_bmp(data)
 }
 
 /// A skeletal bind pose: world-space matrix per bone (indexed by dag index), in

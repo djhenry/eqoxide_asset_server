@@ -16,6 +16,7 @@ pub mod bsp_regions;
 pub mod zone_source;
 pub mod eqg;
 pub mod static_scene;
+pub mod source_material;
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
