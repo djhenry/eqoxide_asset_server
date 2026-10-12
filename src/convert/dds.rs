@@ -1,9 +1,16 @@
 //! Bounded support for legacy, uncompressed 32-bit DDS textures.
-use anyhow::{Result, ensure};
+use anyhow::{ensure, Result};
 use image::RgbaImage;
 
 /// Decode legacy RGB32 DDS data; leave other encodings to the general decoder.
+#[cfg(test)]
 pub(super) fn decode(data: &[u8]) -> Result<Option<RgbaImage>> {
+    decode_with_limits(data, None)
+}
+pub(super) fn decode_with_limits(
+    data: &[u8],
+    limits: Option<&image::Limits>,
+) -> Result<Option<RgbaImage>> {
     if !data.starts_with(b"DDS ") {
         return Ok(None);
     }
@@ -11,6 +18,10 @@ pub(super) fn decode(data: &[u8]) -> Result<Option<RgbaImage>> {
     // Every header read below is within the checked, fixed-size legacy header.
     let word = |offset| u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
     ensure!(word(4) == 124 && word(76) == 32, "invalid DDS header size");
+    if limits.is_some() {
+        validate_static_2d(data, &word)?;
+        super::texture::check_dimensions(word(16), word(12), 4, limits)?;
+    }
     let pixel_flags = word(80);
     if pixel_flags & 0x40 == 0 || pixel_flags & 4 != 0 || word(84) != 0 || word(88) != 32 {
         return Ok(None);
@@ -72,6 +83,31 @@ pub(super) fn decode(data: &[u8]) -> Result<Option<RgbaImage>> {
     ))
 }
 
+// A single straight-alpha 2D PNG cannot represent these declared DDS semantics.
+fn validate_static_2d(data: &[u8], word: impl Fn(usize) -> u32) -> Result<()> {
+    ensure!(
+        word(112) & (0xfe00 | 0x200000) == 0 && word(24) <= 1,
+        "DDS cube or volume requires a separate representation"
+    );
+    if word(84) == u32::from_le_bytes(*b"DX10") {
+        let extension: &[u8; 20] = data
+            .get(128..148)
+            .ok_or_else(|| anyhow::anyhow!("truncated DDS DX10 header"))?
+            .try_into()?;
+        let extended =
+            |offset| u32::from_le_bytes(extension[offset..offset + 4].try_into().unwrap());
+        ensure!(
+            extended(4) == 3 && extended(8) == 0 && extended(12) == 1,
+            "DDS DX10 resource requires a separate representation"
+        );
+        ensure!(
+            matches!(extended(16), 0 | 1),
+            "DDS DX10 alpha convention requires a separate representation"
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,13 +163,11 @@ mod tests {
         );
         word(&mut data, 80, 0x40);
         word(&mut data, 104, 0);
-        assert!(
-            decode(&data)
-                .unwrap()
-                .unwrap()
-                .pixels()
-                .all(|p| p[3] == 255)
-        );
+        assert!(decode(&data)
+            .unwrap()
+            .unwrap()
+            .pixels()
+            .all(|p| p[3] == 255));
     }
 
     #[test]
