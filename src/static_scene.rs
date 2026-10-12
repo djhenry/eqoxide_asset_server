@@ -171,6 +171,12 @@ pub fn write_static_visual(
         Some(&metadata),
         "eqoxide-static-visual-v1",
     )?;
+    publish_static(temp, output, "static visual")?;
+    Ok(requirements)
+}
+
+/// Publish only the staged inode; failed replacement preserves the prior artifact.
+pub(crate) fn publish_static(temp: tempfile::NamedTempFile, output: &Path, label: &str) -> Result<()> {
     // tempfile starts at 0600 on Unix; artifacts must be readable by the serving user.
     // Change only the staging inode so failed publication cannot alter the old file.
     #[cfg(unix)]
@@ -178,22 +184,22 @@ pub fn write_static_visual(
         use std::os::unix::fs::PermissionsExt;
         temp.as_file()
             .set_permissions(std::fs::Permissions::from_mode(0o644))
-            .context("set static visual publication permissions")?;
+            .context(format!("set {label} publication permissions"))?;
     }
-    temp.as_file().sync_all().context("sync static visual")?;
-    temp.persist(output).context("publish static visual")?;
-    Ok(requirements)
+    temp.as_file().sync_all().context(format!("sync {label}"))?;
+    temp.persist(output).context(format!("publish {label}"))?;
+    Ok(())
 }
 
 fn normalized(x: f32) -> bool {
     x.is_finite() && (0.0..=1.0).contains(&x)
 }
 
-fn map_axes(p: [f32; 3]) -> [f32; 3] {
+pub(crate) fn map_axes(p: [f32; 3]) -> [f32; 3] {
     [p[0], p[2], -p[1]]
 }
 
-fn convert_matrix(matrix: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
+pub(crate) fn convert_matrix(matrix: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
     // C has determinant +1; conjugation preserves proper rotation and CCW winding.
     let c = Mat4::from_cols_array_2d(&[
         [1., 0., 0., 0.],
