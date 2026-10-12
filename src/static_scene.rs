@@ -354,7 +354,7 @@ fn validate(scene: &StaticScene, revision: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_matrix(matrix: [[f32; 4]; 4]) -> Result<()> {
+pub(crate) fn validate_matrix(matrix: [[f32; 4]; 4]) -> Result<()> {
     ensure!(
         matrix.iter().flatten().all(|x| x.is_finite()),
         "nonfinite matrix"
