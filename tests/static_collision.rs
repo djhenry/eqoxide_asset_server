@@ -430,3 +430,58 @@ fn known_empty_still_obeys_scene_json_and_container_limits() {
     l.max_resources = 1;
     assert_eq!(write(&StaticCollisionScene::AvailableEmpty, &l), bytes);
 }
+#[test]
+fn small_total_budget_preserves_existing_output_with_many_shared_instances() {
+    let mut s = fixture();
+    let (_, instances) = edit(&mut s);
+    let prototype = instances[0].clone();
+    for n in 1..1000 {
+        let mut instance = prototype.clone();
+        instance.owner_id = format!("owner-{n}");
+        instances.push(instance);
+    }
+    let mut limits = CollisionWriteLimits::default();
+    limits.max_glb_bytes = 1024;
+    refuses_preserving(&s, &"a".repeat(64), &limits);
+    // Both profiles obey the total budget even with an ample independent JSON cap.
+    refuses_preserving(
+        &StaticCollisionScene::AvailableEmpty,
+        &"a".repeat(64),
+        &CollisionWriteLimits {
+            max_glb_bytes: 128,
+            ..limits
+        },
+    );
+}
+#[test]
+fn json_padding_is_included_in_total_budget_for_both_profiles() {
+    for mut scene in [fixture(), StaticCollisionScene::AvailableEmpty] {
+        let mut padded_cases = std::collections::BTreeSet::new();
+        let variants = if matches!(&scene, StaticCollisionScene::Available { .. }) {
+            4
+        } else {
+            1
+        };
+        for n in 1..=variants {
+            if let StaticCollisionScene::Available { instances, .. } = &mut scene {
+                instances[0].owner_id = "a".repeat(n);
+            }
+            let bytes = write(&scene, &CollisionWriteLimits::default());
+            let json_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+            let raw = bytes[20..20 + json_len]
+                .iter()
+                .rposition(|b| *b != b' ')
+                .unwrap()
+                + 1;
+            padded_cases.insert(json_len - raw);
+            let mut limits = CollisionWriteLimits::default();
+            limits.max_glb_bytes = bytes.len();
+            assert_eq!(write(&scene, &limits), bytes);
+            limits.max_glb_bytes -= 1;
+            refuses_preserving(&scene, &"a".repeat(64), &limits);
+        }
+        if matches!(scene, StaticCollisionScene::Available { .. }) {
+            assert_eq!(padded_cases, std::collections::BTreeSet::from([0, 1, 2, 3]));
+        }
+    }
+}

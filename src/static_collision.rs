@@ -310,17 +310,8 @@ pub fn write_static_collision(
         document["bufferViews"] = json!(views);
         document["buffers"] = json!([{"byteLength":binary.len()}]);
     }
-    let mut json_bytes = BoundedJson {
-        bytes: Vec::new(),
-        limit: limits.max_json_bytes,
-    };
-    serde_json::to_writer(&mut json_bytes, &document)
-        .context("serialize bounded collision JSON")?;
-    let json_length = aligned(json_bytes.bytes.len())?;
-    ensure!(
-        json_length <= limits.max_json_bytes && json_length <= u32::MAX as usize,
-        "collision JSON byte limit exceeded"
-    );
+    let json_bytes = encode_json(&document, binary.len(), !binary.is_empty(), limits)?;
+    let json_length = json_bytes.len();
     let total = add(
         add(20, json_length)?,
         if binary.is_empty() {
@@ -333,7 +324,6 @@ pub fn write_static_collision(
         total <= limits.max_glb_bytes && total <= u32::MAX as usize,
         "collision GLB byte limit exceeded"
     );
-    json_bytes.bytes.resize(json_length, b' ');
     let parent = output
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -344,7 +334,7 @@ pub fn write_static_collision(
     for value in [2, total as u32, json_length as u32, 0x4e4f534a] {
         temp.write_all(&value.to_le_bytes())?;
     }
-    temp.write_all(&json_bytes.bytes)?;
+    temp.write_all(&json_bytes)?;
     if !binary.is_empty() {
         temp.write_all(&(binary.len() as u32).to_le_bytes())?;
         temp.write_all(&0x004e4942u32.to_le_bytes())?;
@@ -353,6 +343,47 @@ pub fn write_static_collision(
     publish_static(temp, output, "collision artifact")?;
     Ok(requirements)
 }
+fn json_byte_budget(
+    geometry_bytes: usize,
+    has_binary: bool,
+    limits: &CollisionWriteLimits,
+) -> Result<usize> {
+    let overhead = add(
+        20,
+        if has_binary {
+            add(8, aligned(geometry_bytes)?)?
+        } else {
+            0
+        },
+    )?;
+    let remaining = limits
+        .max_glb_bytes
+        .min(u32::MAX as usize)
+        .checked_sub(overhead)
+        .context("collision GLB byte limit exceeded")?;
+    // The allowance includes JSON padding: round down before any encoded-byte growth.
+    Ok(limits.max_json_bytes.min(remaining) & !3)
+}
+fn encode_json<T: serde::Serialize>(
+    document: &T,
+    geometry_bytes: usize,
+    has_binary: bool,
+    limits: &CollisionWriteLimits,
+) -> Result<Vec<u8>> {
+    let mut output = BoundedJson {
+        bytes: Vec::new(),
+        limit: json_byte_budget(geometry_bytes, has_binary, limits)?,
+    };
+    serde_json::to_writer(&mut output, document).context("serialize bounded collision JSON")?;
+    let length = aligned(output.bytes.len())?;
+    ensure!(
+        length <= json_byte_budget(geometry_bytes, has_binary, limits)?,
+        "collision JSON byte limit exceeded"
+    );
+    output.bytes.resize(length, b' ');
+    Ok(output.bytes)
+}
+
 struct BoundedJson {
     bytes: Vec<u8>,
     limit: usize,
@@ -381,6 +412,83 @@ mod tests {
         assert!(add(usize::MAX, 1).is_err());
         assert!(mul(usize::MAX, 12).is_err());
         assert!(aligned(usize::MAX).is_err());
-        assert!(charge(&mut usize::MAX, 1, usize::MAX, "test").is_err());
+        let mut total = usize::MAX;
+        assert!(charge(&mut total, 1, usize::MAX, "test").is_err());
+    }
+    struct OversizedProbe<'a>(&'a str);
+    impl serde::Serialize for OversizedProbe<'_> {
+        fn serialize<S: serde::Serializer>(
+            &self,
+            serializer: S,
+        ) -> std::result::Result<S::Ok, S::Error> {
+            match serializer.serialize_str(self.0) {
+                Err(error) => Err(error),
+                Ok(_) => panic!("encoder reached beyond the total GLB allowance before refusing"),
+            }
+        }
+    }
+    #[test]
+    fn total_container_budget_stops_json_encoding_before_final_validation() {
+        let mut limits = CollisionWriteLimits::default();
+        limits.max_glb_bytes = 1024;
+        limits.max_json_bytes = 8192;
+        let large = "x".repeat(2048);
+        // A post-encoding length check cannot pass this probe: it panics immediately
+        // if the oversized value is accepted by the streaming serializer.
+        assert!(encode_json(&OversizedProbe(&large), 132, true, &limits).is_err());
+        assert!(encode_json(&OversizedProbe(&large), 0, false, &limits).is_err());
+        for (geometry, has_binary, overhead) in [(0, false, 20), (132, true, 160)] {
+            for remainder in 0..4 {
+                limits.max_glb_bytes = overhead + remainder;
+                assert_eq!(json_byte_budget(geometry, has_binary, &limits).unwrap(), 0);
+                assert!(
+                    encode_json(&OversizedProbe(&large), geometry, has_binary, &limits).is_err()
+                );
+            }
+        }
+    }
+    #[test]
+    fn json_allowance_includes_padding_binary_headers_and_u32_container_limit() {
+        let mut limits = CollisionWriteLimits::default();
+        limits.max_glb_bytes = 35;
+        limits.max_json_bytes = 100;
+        assert_eq!(json_byte_budget(0, false, &limits).unwrap(), 12);
+        assert_eq!(json_byte_budget(4, true, &limits).unwrap(), 0);
+        limits.max_glb_bytes = 48;
+        assert_eq!(json_byte_budget(4, true, &limits).unwrap(), 16);
+        limits.max_json_bytes = 15;
+        assert_eq!(json_byte_budget(4, true, &limits).unwrap(), 12);
+        assert_eq!(
+            encode_json(&"1234567890", 4, true, &limits).unwrap().len(),
+            12
+        );
+        assert!(encode_json(&"12345678901", 4, true, &limits).is_err());
+        limits.max_glb_bytes = usize::MAX;
+        limits.max_json_bytes = usize::MAX;
+        assert_eq!(
+            json_byte_budget(0, false, &limits).unwrap(),
+            (u32::MAX as usize - 20) & !3
+        );
+        assert!(json_byte_budget(usize::MAX, true, &limits).is_err());
+        limits.max_glb_bytes = 31;
+        assert!(json_byte_budget(4, true, &limits).is_err());
+        for has_binary in [false, true] {
+            let geometry = if has_binary { 4 } else { 0 };
+            let overhead = if has_binary { 32 } else { 20 };
+            for characters in 10..14 {
+                let text = "x".repeat(characters);
+                let padded = aligned(characters + 2).unwrap();
+                limits.max_json_bytes = 100;
+                limits.max_glb_bytes = overhead + padded;
+                assert_eq!(
+                    encode_json(&text, geometry, has_binary, &limits)
+                        .unwrap()
+                        .len(),
+                    padded
+                );
+                limits.max_glb_bytes -= 1;
+                assert!(encode_json(&text, geometry, has_binary, &limits).is_err());
+            }
+        }
     }
 }
