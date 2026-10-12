@@ -10,3 +10,5 @@ pub mod surface;
 pub mod collision;
 
 pub mod static_scene;
+
+pub mod lighting;
