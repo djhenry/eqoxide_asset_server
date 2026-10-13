@@ -37,9 +37,11 @@ pub struct StaticCollisionInstance {
     /// Column-major matrix in server geometry axes.
     pub matrix: [[f32; 4]; 4],
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum InspectionQueryPolicy {
+    #[serde(rename = "inspection-segment-front-v1")]
     FrontFaces,
+    #[serde(rename = "inspection-segment-both-v1")]
     BothFaces,
 }
 impl InspectionQueryPolicy {

@@ -17,6 +17,7 @@ pub mod zone_source;
 pub mod eqg;
 pub mod static_scene;
 pub mod static_collision;
+pub mod static_scene_descriptor;
 pub mod source_material;
 
 pub fn version() -> &'static str {
