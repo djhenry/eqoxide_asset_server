@@ -52,6 +52,31 @@ impl InspectionQueryPolicy {
         }
     }
 }
+/// Explicit producer declaration of the collision mesh's query-unit frames.
+pub const CANONICAL_QUERY_UNIT_FRAMES_CAPABILITY: &str =
+    "static-collision-query-unit-frames-v1";
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryUnitFrames {
+    Unspecified,
+    DeclaredCanonical,
+}
+impl QueryUnitFrames {
+    pub fn identifier(self) -> &'static str {
+        match self {
+            Self::Unspecified => "unspecified",
+            Self::DeclaredCanonical => "declared-canonical",
+        }
+    }
+    pub fn required_capabilities(self) -> &'static [&'static str] {
+        match self {
+            Self::Unspecified => &["static-collision-triangles-v1"],
+            Self::DeclaredCanonical => &[
+                CANONICAL_QUERY_UNIT_FRAMES_CAPABILITY,
+                "static-collision-triangles-v1",
+            ],
+        }
+    }
+}
 #[derive(Debug, Clone)]
 pub struct CollisionWriteLimits {
     pub max_glb_bytes: usize,
@@ -112,13 +137,39 @@ pub fn write_static_collision(
     output: &Path,
     limits: &CollisionWriteLimits,
 ) -> Result<ReaderRequirements> {
+    write_static_collision_with_query_units(
+        scene,
+        bake_revision,
+        policy,
+        QueryUnitFrames::Unspecified,
+        output,
+        limits,
+    )
+}
+/// Write with an explicit frame declaration. Canonical input must retain source query units:
+/// terrain world units, or model-local units with scale in the instance matrix.
+/// Callers establish source provenance and include the declaration in their bake identity;
+/// finite geometry alone cannot establish canonical units or native query behavior.
+pub fn write_static_collision_with_query_units(
+    scene: &StaticCollisionScene,
+    bake_revision: &str,
+    policy: InspectionQueryPolicy,
+    query_unit_frames: QueryUnitFrames,
+    output: &Path,
+    limits: &CollisionWriteLimits,
+) -> Result<ReaderRequirements> {
     ensure!(
         valid_hash(bake_revision),
         "bake revision must be 64 lowercase hexadecimal digits"
     );
+    let capabilities = query_unit_frames.required_capabilities();
+    ensure!(
+        capabilities.len() <= limits.max_resources,
+        "collision capability resource limit exceeded"
+    );
     let requirements = ReaderRequirements {
         reader_version: 2,
-        capabilities: vec!["static-collision-triangles-v1".into()],
+        capabilities: capabilities.iter().map(|c| (*c).to_string()).collect(),
     };
     let (meshes, instances, availability) = match scene {
         StaticCollisionScene::Available { meshes, instances } => {

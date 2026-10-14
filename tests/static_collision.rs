@@ -485,3 +485,93 @@ fn json_padding_is_included_in_total_budget_for_both_profiles() {
         }
     }
 }
+
+#[test]
+fn canonical_query_units_preserve_local_vertices_and_instance_scale() {
+    let mut scene = fixture();
+    edit(&mut scene).1[0].matrix = Mat4::from_scale(Vec3::splat(4.)).to_cols_array_2d();
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("canonical.glb");
+    let requirements = write_static_collision_with_query_units(
+        &scene,
+        &"a".repeat(64),
+        InspectionQueryPolicy::FrontFaces,
+        QueryUnitFrames::DeclaredCanonical,
+        &out,
+        &CollisionWriteLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(requirements.reader_version, 2);
+    assert_eq!(
+        requirements.capabilities,
+        ["static-collision-query-unit-frames-v1", "static-collision-triangles-v1"]
+    );
+    let bytes = std::fs::read(out).unwrap();
+    let (doc, buffers, _) = gltf::import_slice(&bytes).unwrap();
+    let primitive = doc.meshes().next().unwrap().primitives().next().unwrap();
+    let reader = primitive.reader(|b| Some(&buffers[b.index()]));
+    assert_eq!(
+        reader.read_positions().unwrap().collect::<Vec<_>>(),
+        [[1., 3., -2.], [4., 3., -2.], [1., 3., -6.]]
+    );
+    assert_eq!(
+        doc.nodes().next().unwrap().transform().matrix(),
+        Mat4::from_scale(Vec3::splat(4.)).to_cols_array_2d()
+    );
+    assert_eq!(
+        json(&bytes)["extras"]["eqoxideCollision"]["queryPolicy"],
+        "inspection-segment-front-v1"
+    );
+}
+#[test]
+fn canonical_query_units_empty_budget_and_legacy_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("empty.glb");
+    let mut limits = CollisionWriteLimits::default();
+    limits.max_resources = 1;
+    let legacy = write_static_collision(
+        &StaticCollisionScene::AvailableEmpty,
+        &"a".repeat(64),
+        InspectionQueryPolicy::BothFaces,
+        &out,
+        &limits,
+    )
+    .unwrap();
+    assert_eq!(legacy.capabilities, ["static-collision-triangles-v1"]);
+    let previous = std::fs::read(&out).unwrap();
+    let refused = write_static_collision_with_query_units(
+        &StaticCollisionScene::AvailableEmpty,
+        &"a".repeat(64),
+        InspectionQueryPolicy::BothFaces,
+        QueryUnitFrames::DeclaredCanonical,
+        &out,
+        &limits,
+    )
+    .unwrap_err();
+    assert!(refused.to_string().contains("capability resource limit"));
+    assert_eq!(std::fs::read(&out).unwrap(), previous);
+    limits.max_resources = 2;
+    let req = write_static_collision_with_query_units(
+        &StaticCollisionScene::AvailableEmpty,
+        &"a".repeat(64),
+        InspectionQueryPolicy::BothFaces,
+        QueryUnitFrames::DeclaredCanonical,
+        &out,
+        &limits,
+    )
+    .unwrap();
+    assert_eq!(
+        req.capabilities,
+        [CANONICAL_QUERY_UNIT_FRAMES_CAPABILITY, "static-collision-triangles-v1"]
+    );
+    let bytes = std::fs::read(&out).unwrap();
+    let length = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+    assert_eq!(bytes.len(), 20 + length);
+    let j = json(&bytes);
+    assert_eq!(j["extras"]["eqoxideCollision"]["availability"], "available-empty");
+    for key in ["buffers", "bufferViews", "accessors", "nodes", "meshes"] {
+        assert!(j.get(key).is_none());
+    }
+    assert_eq!(QueryUnitFrames::Unspecified.identifier(), "unspecified");
+    assert_eq!(QueryUnitFrames::DeclaredCanonical.identifier(), "declared-canonical");
+}
