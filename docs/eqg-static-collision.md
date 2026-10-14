@@ -20,6 +20,8 @@ The report records source-to-output association, supplied owner decisions, inclu
 
 Unsupported descriptor/mesh versions, skeletal geometry, malformed slot/name tables, source string references, nonfinite positions/placement fields, invalid indices, descriptor/mesh suffixes and unresolved included placement extensions refuse. Descriptor-v1 extensions and incomplete extension words refuse even on excluded records. Bounded extension lengths on v2 lighting or caller-excluded records are reported without interpreting their meaning.
 
+Required source string references are descriptor model, placement, region and light names. Visual material/property name, shader and value offsets, and mesh visual string-table contents, are size-accounted but uninterpreted; invalid visual offsets alone do not invalidate collision extraction.
+
 Included transforms are validated even when they have no eligible triangles. Selected local triangles and the f32-rounded server/asset world triangles must satisfy the common writer's widened nonzero-cross predicate. A face collapsing in one instance refuses the conversion; it is not removed globally or silently skipped. Tiny nonzero triangles remain valid. Source geometry is borrowed and unchanged on success or failure.
 
 `AvailableEmpty` is returned only after all structural and selected ownership obligations succeed and the declared candidate selection contains no triangles. It can describe all faces excluded by the verified default flag rule. Missing identity declarations or unresolved required behavior are errors, not known-empty. Zero-candidate geometry is omitted with explicit owner diagnostics. Empty static candidates say nothing about dynamic actors, volumes or an empty world.
