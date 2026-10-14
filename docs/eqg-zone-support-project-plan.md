@@ -1,18 +1,20 @@
 # EQG Zone Support Project Plan
 
-**Updated:** 2026-10-11
+**Updated:** 2026-10-14
 
 The source inventory and format observations below were recorded in the original 2026-09-09 review; their counts have not been remeasured for this update.
 
 **Tracking issue:** [#51 — EQG-only zones are never baked](https://github.com/djhenry/eqoxide_asset_server/issues/51)
 
-**Status:** In progress. Inventory, raw binary ZON/mesh parsing, source assembly, material diagnostics and staging previews/collision assessments are implemented. The common static visual writer and client CPU/GPU inspection have landed. Source-material preparation ([PR #62](https://github.com/djhenry/eqoxide_asset_server/pull/62)), the in-memory geometry bridge ([PR #64](https://github.com/djhenry/eqoxide_asset_server/pull/64)) and the isolated client preview ([client PR #1152](https://github.com/djhenry/eqoxide/pull/1152)) are being reviewed. Native material resolution, full importer routing, common collision/regions, package activation and representative gameplay acceptance remain incomplete.
+**Status:** In progress. Inventory, raw binary ZON/mesh parsing, source assembly, material diagnostics and staging previews/collision assessments are implemented. The common static visual writer, source-material preparation ([PR #62](https://github.com/djhenry/eqoxide_asset_server/pull/62)), in-memory geometry bridge ([PR #64](https://github.com/djhenry/eqoxide_asset_server/pull/64)) and isolated client preview ([client PR #1152](https://github.com/djhenry/eqoxide/pull/1152)) have landed. Client collision decoding ([PR #1160](https://github.com/djhenry/eqoxide/pull/1160)), shared visual JSON-key validation ([PR #1161](https://github.com/djhenry/eqoxide/pull/1161)), package gating/pairing ([PR #1163](https://github.com/djhenry/eqoxide/pull/1163)) and the EQG common-collision adapter ([PR #78](https://github.com/djhenry/eqoxide_asset_server/pull/78)) await human review. Segment-query arithmetic ([client PR #1166](https://github.com/djhenry/eqoxide/pull/1166)) remains a proposal; the shared material/lighting design ([PR #67](https://github.com/djhenry/eqoxide_asset_server/pull/67)) has landed, with visual scope and implementation still to be resolved. Full importer routing, source coverage, regions, package activation and representative gameplay acceptance remain incomplete.
 
 **Goal:** Bake and serve EQG zones with correct terrain, placements, collision, and region data, beginning with Crescent Reach, while reporting unsupported or incomplete resources explicitly.
 
 **Architecture:** Reusable format readers belong in libeq. Binary EQGZ, text EQTZP and legacy WLD importers feed one source-independent GLB contract; source-specific shader, geometry and semantic decisions belong in the bake. The client selects declared capabilities and component roles. Enhanced legacy content may use the same added capabilities as EQG content. The common collision/region contracts must preserve that separation. Existing manifests carry reader/capability requirements; the approved pre-release cutover may require an updated client.
 
 Current contracts: [static visual inspection](static-visual-contract.md) and [EQG geometry bridge](eqg-static-geometry.md). Cross-repository implementation status is tracked in [client issue #1126](https://github.com/djhenry/eqoxide/issues/1126). The staging exporters described in the detailed milestones provide research/inspection coverage; production routing and publication require the common-contract acceptance gates.
+
+Next source boundary: [WLD common-collision plan](wld-common-collision-source-plan.md), using existing borrowed raw geometry APIs with source-specific normalization in the baker and the same collision contract in the client.
 
 **Tech stack:** Rust, libeq_pfs, existing libeq_wld support, glam, image, glTF/GLB, and the existing asset-server build pipeline.
 
