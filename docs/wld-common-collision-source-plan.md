@@ -12,6 +12,8 @@ A future upstream contribution may expose an immutable encoded mesh view through
 
 Borrowing bounds work after parsing. Existing parsing owns vectors and strings and has legacy panic paths. Neither this plan nor an O(1) view promises bounded byte ingestion, panic-free parsing or a total process-memory limit. Byte ingestion needs its own reviewed unit.
 
+The [selected terrain contract](wld-selected-terrain-contract.md) refines the positional selection, admitted flags, pinned-parser behavior and proposed budgets. It remains a proposal for human review.
+
 ## First adapter: selected modern terrain candidates
 
 Accept an explicit bounded selection of modern `0x36` mesh references with caller-supplied stable owner identities. Validate references against their document context rather than relying on names or iteration order. Report the selected scope and unsupported records. Enumerating `Wld::meshes()` alone cannot establish full world coverage: it enumerates modern meshes and omits older geometry and other fragment kinds.
