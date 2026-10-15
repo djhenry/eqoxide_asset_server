@@ -1,4 +1,4 @@
-# Native WLD source feasibility and an open exclusion decision
+# Native WLD source feasibility and selected exclusion policy
 
 This is bounded source inspection for [issue #79](https://github.com/djhenry/eqoxide_asset_server/issues/79), supplementing the [selected terrain proposal](wld-selected-terrain-contract.md). It does not implement that normalizer or establish required terrain membership, ownership, GLB conversion, native query parity or gameplay readiness.
 
@@ -22,17 +22,17 @@ All modern records used mesh flags `0x18003` and exponent 5. Neither probe found
 
 All 42 collapsed candidates have three distinct indexes but only two distinct raw signed position tuples. The reconstructed coordinates also have only two distinct positions. They are not new collapses caused by center addition or f32 rounding. Independent synthetic controls distinguished repeated indexes, different indexes sharing positions, and three distinct collinear positions. The six-input result contains only the second class.
 
-## Consequence for the current proposal
+## Consequence for the original refusal proposal
 
-The proposed normalizer is atomic: a retained collapsed face refuses the **entire selected dataset**, with no partial scene. If every modern record in each primary WLD were selected, five of these six illustrative selections would therefore refuse. Actual required terrain selection and native activation were not resolved, so this is not a claim that five production zones necessarily fail.
+Under the original proposal, a retained collapsed face would refuse the **entire selected dataset**, with no partial scene. The selected policy changes that face admission rule; atomic refusal still applies to all remaining errors. Under that original rule, selecting every modern record in each primary WLD would make five of these six illustrative selections refuse. Actual required terrain selection and native activation were not resolved, so this is not a claim that five production zones necessarily fail.
 
 Omitting entire affected meshes would be a different, currently unauthorized policy. Those 42 records contain 4009 raw candidate faces: the 42 coincident faces plus **3967 other candidate faces**. The remaining-record screen totals 360196 candidates; that number is not a normalizer output or an approved incomplete bake.
 
 The audited native face preparation invalidates an exact-zero plane. This provides source evidence for excluding these coincident-source-position faces individually; no native binary/query was executed. Broader small-positive-face preparation, numeric rounding, traversal and query modes remain separate gates.
 
-**Recommended revision for owner consideration:** after validating every source index and record, exclude only candidate faces whose raw source position tuples coincide, with explicit per-owner exclusion counts. Preserve the original position pool and other faces. Keep other malformed or unresolved geometry as errors, including three-distinct-position collapses until their rule is accepted. This leaves the common writer's admission rules and the one GLB/client standard unchanged.
+**Owner-selected revision (2026-10-15):** after validating every source index and record, exclude only candidate faces whose raw source position tuples coincide, with explicit per-owner exclusion counts. Preserve the original position pool and other faces. Keep other malformed or unresolved geometry as errors, including three-distinct-position collapses until their rule is accepted. This leaves the common writer's admission rules and the one GLB/client standard unchanged.
 
-If selected, the implementation must add an exclusion reason and tests, distinguish raw face candidates from prepared output counts, and describe its preparation status explicitly. It must not claim full native preparation from this narrow rule. Required supported selections with no remaining candidates may be known-empty only after all required records are successfully examined. The existing atomic-refusal policy remains the written contract until this revision is approved.
+The implementation must add an exclusion reason and tests, distinguish raw face candidates from prepared output counts, and describe its preparation status explicitly. It must not claim full native preparation from this narrow rule. Required supported selections with no remaining candidates may be known-empty only after all required records are successfully examined. The owner selected this narrow diagnosed exclusion. The updated selected-terrain contract retains atomic refusal for every other error; no partial scene escapes a failure. This decision is not an implementation or a merge approval.
 
 ## Separate PFS reader defect
 

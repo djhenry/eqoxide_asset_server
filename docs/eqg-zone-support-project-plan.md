@@ -14,7 +14,7 @@ The source inventory and format observations below were recorded in the original
 
 Current contracts: [static visual inspection](static-visual-contract.md) and [EQG geometry bridge](eqg-static-geometry.md). Cross-repository implementation status is tracked in [client issue #1126](https://github.com/djhenry/eqoxide/issues/1126). The staging exporters described in the detailed milestones provide research/inspection coverage; production routing and publication require the common-contract acceptance gates.
 
-Next source boundary: [WLD common-collision plan](wld-common-collision-source-plan.md) and [selected terrain contract proposal](wld-selected-terrain-contract.md), using existing borrowed raw geometry APIs with source-specific normalization in the baker and the same collision contract in the client. The proposal adds no runtime adapter or activation.
+Next source boundary: [WLD common-collision plan](wld-common-collision-source-plan.md) and [selected terrain contract proposal](wld-selected-terrain-contract.md), using existing borrowed raw geometry APIs with source-specific normalization in the baker and the same collision contract in the client. The [implementation unit](https://github.com/djhenry/eqoxide_asset_server/issues/84) follows the owner-selected bake-time exclusion of raw coincident-position faces with explicit diagnostics; other invalid required geometry still refuses. The proposal adds no runtime adapter or activation.
 
 **Tech stack:** Rust, libeq_pfs, existing libeq_wld support, glam, image, glTF/GLB, and the existing asset-server build pipeline.
 

@@ -12,7 +12,7 @@ A future upstream contribution may expose an immutable encoded mesh view through
 
 Borrowing bounds work after parsing. Existing parsing owns vectors and strings and has legacy panic paths. Neither this plan nor an O(1) view promises bounded byte ingestion, panic-free parsing or a total process-memory limit. Byte ingestion needs its own reviewed unit.
 
-The [selected terrain contract](wld-selected-terrain-contract.md) refines the positional selection, admitted flags, pinned-parser behavior and proposed budgets. It remains a proposal for human review. [Native source feasibility](wld-terrain-feasibility.md) identifies an open coincident-face exclusion decision and a separate PFS ingestion defect.
+The [selected terrain contract](wld-selected-terrain-contract.md) refines the positional selection, admitted flags, pinned-parser behavior and proposed budgets. The narrow coincident-position exclusion is owner-selected; the [implementation plan](wld-selected-terrain-implementation-plan.md) scopes the existing inspection milestone. [Native source feasibility](wld-terrain-feasibility.md) records the owner-selected coincident-face exclusion policy and a separate PFS ingestion defect.
 
 ## First adapter: selected modern terrain candidates
 
@@ -20,7 +20,7 @@ Accept an explicit bounded selection of modern `0x36` mesh references with calle
 
 The first adapter is deliberately limited to selected static terrain records. Actor definitions, placement activation, additional definition meshes, hierarchy, animation, skin assignments, mesh operations, hulls and region membership require separate resolution. Refuse selected records with unresolved dynamic or other required semantics; do not silently flatten them or call an unextracted world empty. Unknown flags or optional source records need an explicit admission/diagnostic policy before implementation, with required interpretation distinguished from unrelated render-only data.
 
-Verified against the native RoF2 client, the modern terrain candidate rule is `face.flags & 0x0010 == 0`. This establishes default terrain triangle membership independently of render materials. It establishes neither placed-actor activation nor movement, navigation, LOS or native query behavior. Retain complete face flags for diagnostics, including excluded triangles.
+Verified against the native RoF2 client, the modern terrain candidate rule is `face.flags & 0x0010 == 0`. This establishes default terrain triangle membership independently of render materials. It establishes neither placed-actor activation nor movement, navigation, LOS or native query behavior. Retain complete face flags for diagnostics, including excluded triangles. The owner-selected preparation additionally excludes raw candidates with any exactly coincident pair of source position tuples, with explicit per-owner counts. Other invalid geometry still refuses; this is not full native query preparation.
 
 Normalize once in the baker:
 
@@ -30,7 +30,7 @@ Normalize once in the baker:
 | Mesh center | Require the center-presence flag and finite center; add center in source XYZ. No safe absent-center default is established. |
 | Server geometry axes | Map source XYZ to `(Y, X, Z)` before the common writer's existing asset-axis mapping. This is a source adapter reflection, not a client branch. |
 | Modern WLD face order | Preserve `[i0, i1, i2]` through the reflection. Native WLD collision normals use the negative conventional cross product; preserving order produces that mapped orientation. EQG's source adapter reverses winding for its different source convention. |
-| Triangle indexes | Validate every required source reference before indexing. Account separately for retained and excluded faces; malformed required data must cause an explicit refusal. |
+| Triangle indexes | Validate every source reference before indexing, including excluded faces. Partition source-flag exclusions, raw candidates, coincident-source-position exclusions and retained faces. Other malformed required data must cause an explicit refusal. |
 | Owner identity | Use a supplied stable opaque identity satisfying the common contract. Fragment or node indices are contextual references, not stable enhancement identities. |
 | Older `0x2c` geometry | Detect and report unsupported coverage. Its face-word interpretation is unresolved; do not apply modern indexes or the modern eligibility rule. |
 
@@ -75,7 +75,7 @@ An available-empty result requires a successfully extracted explicit selection w
 4. **Resolve placements and coverage separately.** Add verified selection/reference/hierarchy/activation policy and explicit fidelity choices before claiming actor or complete-world support. Representative private corpus inspection and live alignment are later gates; do not distribute native inputs.
 5. **Activate paired packages only after source coverage acceptance.** Continue the shared manifest/component pairing and client capability gates. Segment-query arithmetic still awaits the separate [client proposal](https://github.com/djhenry/eqoxide/pull/1166); movement, volumes and dynamic actors remain later milestones.
 
-The first acceptance matrix should include asymmetric signed coordinates, exponent boundaries `0`, `15`, `16`, `31`, `32`, `65535`, center presence and nonfinite data, mixed face flags and malformed indexes, count/presence inconsistencies, duplicate and missing owner bindings, exact budget boundaries and diagnostic amplification. Include unsupported older geometry, animation and actor dependencies, plus a fully examined all-excluded selection and missing/unextracted inputs. Test malformed material references without invoking visual helpers. Native eligibility and winding premises require independent source evidence; synthetic fixtures alone cannot establish them.
+The first acceptance matrix should include asymmetric signed coordinates, exponent boundaries `0`, `15`, `16`, `31`, `32`, `65535`, center presence and nonfinite data, mixed face flags and malformed indexes, count/presence inconsistencies, duplicate and missing owner bindings, exact budget boundaries and diagnostic amplification. Include unsupported older geometry, animation and actor dependencies, plus fully examined source-flag-excluded and coincident-position-excluded selections and missing/unextracted inputs. Preserve valid faces beside excluded faces and test count conservation without double counting. Test malformed material references without invoking visual helpers. Native eligibility and winding premises require independent source evidence; synthetic fixtures alone cannot establish them.
 
 ## Current evidence and limits
 
