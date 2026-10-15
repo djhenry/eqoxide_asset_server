@@ -12,3 +12,5 @@ pub mod collision;
 pub mod static_scene;
 
 pub mod lighting;
+
+pub mod static_collision;

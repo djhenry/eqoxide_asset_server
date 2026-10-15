@@ -92,7 +92,7 @@ fn charge(total: &mut usize, n: usize, limit: usize, name: &str) -> Result<()> {
     ensure!(*total <= limit, "collision {name} limit exceeded");
     Ok(())
 }
-fn triangle(points: [[f32; 3]; 3]) -> Result<()> {
+pub(crate) fn triangle(points: [[f32; 3]; 3]) -> Result<()> {
     ensure!(
         points.iter().flatten().all(|v| v.is_finite()),
         "collision transformed position nonfinite"
