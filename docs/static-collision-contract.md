@@ -41,7 +41,11 @@ The document has one flat scene selecting every node exactly once. Nodes have on
 }
 ```
 
-Each node's extras contains exactly `{"eqoxideCollisionInstance":{"ownerId":"authored-floor"}}`. Collision application records have no optional fields or hidden behavioral keys. Bake revision is a precomputed canonical input/policy identity of 64 lowercase hexadecimal digits, not this GLB's hash. The header requirements describe geometry decoding only. Do not advertise `static-segment-query-v1` until a query implementation passes its separate acceptance.
+Each node's extras contains exactly `{"eqoxideCollisionInstance":{"ownerId":"authored-floor"}}`. Collision application records have no optional fields or hidden behavioral keys. Bake revision is a precomputed canonical input/policy identity of 64 lowercase hexadecimal digits, not this GLB's hash. The header requirements describe geometry decoding and explicit frame declarations only. Do not advertise `static-segment-query-v1` until a query implementation passes its separate acceptance.
+
+`write_static_collision` keeps query-unit frames unspecified. The explicit `write_static_collision_with_query_units` entry point accepts `QueryUnitFrames::DeclaredCanonical` and adds the required capability `static-collision-query-unit-frames-v1` alongside `static-collision-triangles-v1`. This is a producer declaration, not source verification or implemented query support. Readers without the added capability must refuse rather than silently reinterpret the data.
+
+Canonical terrain retains source world query units; canonical models retain decoded model-local query units with their scale in instance matrices. Source vertex quantization must be decoded first. Folding instance scale into positions, or changing output units while preserving the visible world surface, violates the declaration. The writer preserves local pools and matrices through the existing axis conversion; bare coordinates cannot certify their original units. Source importers must establish this property and include the selected frame policy in their bake revision before opting in. No additional metric fields are emitted, and existing policy identifiers and known-empty semantics remain unchanged.
 
 The writer accepts `InspectionQueryPolicy::FrontFaces` or `BothFaces`, encoded as `inspection-segment-front-v1` or `inspection-segment-both-v1`. These identifiers reserve distinct segment inspection semantics over the encoded dataset; they do not certify native movement or LOS. A reader without a recognized, implemented operation must report unsupported. Query arithmetic, endpoint/edge rules, work limits and identity binding must be frozen and tested before the operation is shipped, as required by the design.
 
@@ -60,7 +64,7 @@ Fixed numeric header values denote exact mathematical integers: equivalent decim
 | `max_glb_bytes` | 134217728 | Header, aligned JSON, BIN headers and aligned bytes |
 | `max_json_bytes` | 8388608 | JSON bytes including padding; bounded serialization |
 | `max_geometry_bytes` | 134217728 | `12 * positions + 4 * indices`, all meshes |
-| `max_resources` | 100000 | Each collection; aggregate primitives, buffer views and accessors |
+| `max_resources` | 100000 | Each collection and required capability array; aggregate primitives, buffer views and accessors |
 | `max_vertices` | 5000000 | Position entries across all meshes |
 | `max_indices` | 15000000 | Index entries across all primitives |
 | `max_expanded_triangles` | 5000000 | Indexed triangles summed over instances |
@@ -69,3 +73,5 @@ Fixed numeric header values denote exact mathematical integers: equivalent decim
 World visits count index references rather than unique vertices. Unused vertices are still finite-validated and included in accessor min/max but never establish collision surface bounds. Collection/geometry counters do not replace expanded-instance limits. The padded JSON serializer allowance is the smaller of its own limit and the remaining total GLB budget after framing and aligned binary payload; enforce it while writing, before growing the encoded buffer. The limits bound logical payload and work, not allocator overhead or total process RSS. No spatial grid is constructed by this writer.
 
 Validate fully before atomically replacing the destination through a temporary file in its directory. On Unix the published file is mode 0644; sync the staged file before replacement. Failed validation or serialization preserves the prior file and its permissions. This provides atomic file replacement, not a manifest transaction or crash-durable parent-directory synchronization. Package publication requires the separate pairing work.
+
+The authored `static_collision_fixture OUTPUT_DIRECTORY [--canonical-query-units]` tool emits both nonempty and known-empty collision files. Its optional declaration mode is strict, contributes to the bake identity and does not establish native source acceptance.

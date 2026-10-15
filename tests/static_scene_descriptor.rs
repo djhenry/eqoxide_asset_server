@@ -666,3 +666,54 @@ fn failed_descriptor_replacement_preserves_destination_and_cleans_staging() {
     );
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
 }
+
+#[test]
+fn canonical_query_units_descriptor_union_and_refusals() {
+    let cap = "static-collision-query-unit-frames-v1";
+    for empty in [false, true] {
+        let mut c = collision(empty);
+        let req = match &mut c {
+            CollisionComponent::Available { requirements, .. }
+            | CollisionComponent::AvailableEmpty { requirements, .. } => requirements,
+            _ => unreachable!(),
+        };
+        // Component order is set-like; descriptor root remains sorted.
+        req.capabilities.push(cap.into());
+        let d = SceneDescriptor::new("demo", &"a".repeat(64), visual(), c).unwrap();
+        assert_eq!(
+            d.requirements.capabilities,
+            [cap, "static-collision-triangles-v1", "static-scene-package-v1",
+                "static-visual-v1", "vertex-rgba-v1"]
+        );
+        let bytes = encode_scene_descriptor(&d, &DescriptorLimits::default()).unwrap();
+        assert_eq!(
+            decode_scene_descriptor(&bytes, &DescriptorLimits::default()).unwrap(), d
+        );
+        for invalid in [
+            vec![cap, cap, "static-collision-triangles-v1"],
+            vec![cap],
+            vec![cap, "static-collision-triangles-v1", "unknown-v1"],
+        ] {
+            let mut bad = serde_json::to_value(&d).unwrap();
+            bad["components"]["collision"]["requirements"]["capabilities"] =
+                serde_json::json!(invalid);
+            refused(&serde_json::to_vec(&bad).unwrap());
+        }
+    }
+    let d = SceneDescriptor::new(
+        "demo", &"a".repeat(64), visual(), CollisionComponent::NotExtracted {},
+    )
+    .unwrap();
+    let mut stray = serde_json::to_value(&d).unwrap();
+    stray["requirements"]["capabilities"]
+        .as_array_mut().unwrap().insert(0, cap.into());
+    refused(&serde_json::to_vec(&stray).unwrap());
+    let mut v = visual();
+    if let VisualComponent::Available { requirements, .. } = &mut v {
+        requirements.capabilities.push(cap.into());
+    }
+    assert!(SceneDescriptor::new(
+        "demo", &"a".repeat(64), v, CollisionComponent::NotExtracted {},
+    )
+    .is_err());
+}
