@@ -275,10 +275,10 @@ fn placement_role(
     let mi = source.model_slots[slot as usize].context("placed model slot is null")?;
     Ok((mi == terrain_index).then_some(ExcludedPlacementRole::RepeatedTerrain))
 }
-fn swap([x, y, z]: [f32; 3]) -> [f32; 3] {
+pub(super) fn swap([x, y, z]: [f32; 3]) -> [f32; 3] {
     [y, x, z]
 }
-fn placement_matrix(p: &ZonePlacement) -> [[f32; 4]; 4] {
+pub(super) fn placement_matrix(p: &ZonePlacement) -> [[f32; 4]; 4] {
     let raw = Mat4::from_translation(Vec3::from_array(p.position))
         * Mat4::from_rotation_z(p.rotation[0])
         * Mat4::from_rotation_y(p.rotation[1])
