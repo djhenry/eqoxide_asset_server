@@ -2,6 +2,8 @@
 
 This refines [issue #79](https://github.com/djhenry/eqoxide_asset_server/issues/79) and the [source boundary plan](wld-common-collision-source-plan.md). It specifies the first pure, post-parse frontend to the existing [common collision scene](static-collision-contract.md). It is a design proposal, not an implemented adapter or a native-query profile.
 
+**Open exclusion decision:** [native source feasibility](wld-terrain-feasibility.md) found coincident-source-position faces in the sample and describes a narrow diagnosed-exclusion alternative. The atomic-refusal rule below remains the proposal until that revision is approved.
+
 The client receives the same GLB standard used by EQG. WLD source flags, quantization, axes and contextual references remain baker responsibilities. Selected geometry does not establish actor activation, ownership verification or world completeness.
 
 ## Input and selection

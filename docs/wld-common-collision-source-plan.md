@@ -12,7 +12,7 @@ A future upstream contribution may expose an immutable encoded mesh view through
 
 Borrowing bounds work after parsing. Existing parsing owns vectors and strings and has legacy panic paths. Neither this plan nor an O(1) view promises bounded byte ingestion, panic-free parsing or a total process-memory limit. Byte ingestion needs its own reviewed unit.
 
-The [selected terrain contract](wld-selected-terrain-contract.md) refines the positional selection, admitted flags, pinned-parser behavior and proposed budgets. It remains a proposal for human review.
+The [selected terrain contract](wld-selected-terrain-contract.md) refines the positional selection, admitted flags, pinned-parser behavior and proposed budgets. It remains a proposal for human review. [Native source feasibility](wld-terrain-feasibility.md) identifies an open coincident-face exclusion decision and a separate PFS ingestion defect.
 
 ## First adapter: selected modern terrain candidates
 
