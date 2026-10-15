@@ -12,7 +12,7 @@ A future upstream contribution may expose an immutable encoded mesh view through
 
 Borrowing bounds work after parsing. Existing parsing owns vectors and strings and has legacy panic paths. Neither this plan nor an O(1) view promises bounded byte ingestion, panic-free parsing or a total process-memory limit. Byte ingestion needs its own reviewed unit.
 
-The [selected terrain contract](wld-selected-terrain-contract.md) refines the positional selection, admitted flags, pinned-parser behavior and proposed budgets. The narrow coincident-position exclusion is owner-selected; the [implementation plan](wld-selected-terrain-implementation-plan.md) scopes the existing inspection milestone. [Native source feasibility](wld-terrain-feasibility.md) records the owner-selected coincident-face exclusion policy and a separate PFS ingestion defect.
+The [selected terrain contract](wld-selected-terrain-contract.md) refines the positional selection, admitted flags, pinned-parser behavior and logical budgets. The narrow coincident-position exclusion is owner-selected; the [implementation plan](wld-selected-terrain-implementation-plan.md) scopes the existing inspection milestone. [Native source feasibility](wld-terrain-feasibility.md) records the owner-selected coincident-face exclusion policy and a separate PFS ingestion defect.
 
 ## First adapter: selected modern terrain candidates
 
@@ -57,7 +57,7 @@ Before supporting placements, resolve definition reference kind, every required 
 
 ## Bound work before doing it
 
-The implementation should define explicit caller-lowerable limits with checked counters before scans, allocation and copies. Freeze exact defaults and error categories in the implementation PR.
+The isolated selected-terrain frontend defines caller-lowerable limits with checked counters before scans, allocation and copies. Its [contract](wld-selected-terrain-contract.md) and [bake diagnostics guide](wld-selected-terrain-bake.md) record the defaults, error categories and exact logical charge schedule.
 
 - Count document fragments and selected references before collection or resolution. Bound repeated reference visits, string/name lookup and selection multiplicity; do not perform an unbounded name search for each owner.
 - Charge raw vertices, all examined faces, retained indexes, included/excluded records and expanded owner/triangle work separately. Excluded faces still consume inspection work.
@@ -80,3 +80,5 @@ The first acceptance matrix should include asymmetric signed coordinates, expone
 ## Current evidence and limits
 
 This proposal is based on a read-only libeq API inventory, native source-semantics investigation and existing common-contract code. A standalone Rust probe of the legacy signed-shift expression observed a negative factor at exponent 31, an overflow panic at 32 with debug assertions, and a factor of one at 32 in the optimized probe; [libeq issue #3](https://github.com/djhenry/libeq/issues/3) tracks that defect. That probe did not execute a libeq document or a native client. Neither a WLD common adapter, corpus conversion, full library regression suite nor live client test was run for this document. Separate tracked defects and implementation PRs must carry their own acceptance.
+
+The subsequent isolated frontend in `src/wld_collision.rs` implements the owner-selected coincident-position exclusion for explicit selections. Its authored fixtures and common writer/client CPU acceptance cover this bounded dataset contract. They do not establish native corpus coverage, zone membership, server alignment, production routing or gameplay readiness.
