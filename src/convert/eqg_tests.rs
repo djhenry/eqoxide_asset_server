@@ -10,6 +10,7 @@ struct Fixture {
     triangle: usize,
     property: usize,
     texture: usize,
+    shader: usize,
 }
 
 fn fixture(version: u32, model: bool) -> Fixture {
@@ -23,6 +24,7 @@ fn fixture(version: u32, model: bool) -> Fixture {
     }
     let strings_start = bytes.len();
     bytes.extend(strings);
+    let shader = bytes.len() + 8;
     for value in [0, 0, 4, 2, 11, 2, 27, 36, 77, u32::MAX] {
         word(&mut bytes, value);
     }
@@ -61,7 +63,33 @@ fn fixture(version: u32, model: bool) -> Fixture {
         triangle,
         property: strings_start + 11,
         texture: strings_start + 27,
+        shader,
     }
+}
+
+#[test]
+fn eqg_adapter_refuses_unresolved_shader_before_diffuse_fallback() {
+    for model in [false, true] {
+        let mut input = fixture(1, model);
+        input.bytes[input.shader..input.shader + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        let error = match parse_eqg_model(&input.bytes) {
+            Err(error) => format!("{error:#}"),
+            Ok(_) => panic!("unresolved shader was accepted"),
+        };
+        assert!(error.contains("unresolved shader"), "{error}");
+        assert!(error.contains("0xffffffff"), "{error}");
+    }
+}
+
+#[test]
+fn eqg_adapter_keeps_valid_empty_shader_string_distinct() {
+    let mut input = fixture(1, true);
+    input.bytes[input.shader..input.shader + 4].copy_from_slice(&0u32.to_le_bytes());
+    let string_table_start = 28;
+    input.bytes[string_table_start] = 0;
+    let mesh = parse_eqg_model(&input.bytes).unwrap();
+    assert_eq!(mesh.mat_textures, [Some("boat.dds".into())]);
+    assert_eq!(mesh.positions, [[1., 2., 3.], [4., 5., 6.]]);
 }
 
 #[test]

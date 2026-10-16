@@ -2715,6 +2715,10 @@ fn parse_eqg_model(b: &[u8]) -> Result<EqgMesh> {
     let raw = libeq_eqg::mesh::parse(b).context("parsing EQG static geometry")?;
     let mut mat_textures = Vec::with_capacity(raw.materials.len());
     for (material_index, material) in raw.materials.iter().enumerate() {
+        anyhow::ensure!(
+            material.shader_offset.is_some(),
+            "EQG material {material_index} has unresolved shader word 0xffffffff"
+        );
         let mut diffuse = None;
         for property in &material.properties {
             let name = std::str::from_utf8(raw.string(property.name_offset)?)

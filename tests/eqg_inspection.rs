@@ -188,11 +188,15 @@ fn inspection_preserves_raw_surface_values_and_groups_by_both_triangle_words() {
         serde_json::json!({"bytes": [109,97,116], "utf8": "mat"})
     );
     assert_eq!(materials[0]["shader"]["utf8"], "shader");
+    assert_eq!(materials[0]["shader_offset_word"], 4);
+    assert_eq!(materials[0]["shader_string_resolved"], true);
     assert_eq!(
         materials[1]["name"],
         serde_json::json!({"bytes": [255], "utf8": null})
     );
     assert_eq!(materials[1]["shader"], materials[1]["name"]);
+    assert_eq!(materials[1]["shader_offset_word"], 16);
+    assert_eq!(materials[1]["shader_string_resolved"], true);
     let properties = &materials[0]["properties"];
     assert_eq!(properties[0]["name"]["utf8"], "prop");
     assert_eq!(properties[0]["kind"], 0);
