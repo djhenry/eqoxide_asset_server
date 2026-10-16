@@ -4,6 +4,8 @@
 
 The bridge is a geometry boundary. It does not resolve native shader names, interpret packed vertex colors, infer lighting, choose texture providers or publish asset packages. A successful conversion establishes the supported geometry and placement rules. It does not establish native material fidelity, collision, regions, server landmark alignment or gameplay readiness.
 
+The raw all-ones material shader word is retained as unresolved string data in inspection reports, including its exact wire value. Visual conversion preserves refusal for all parsed materials, including unused records and caller-supplied bindings; it does not imply a default shader. A valid empty string at offset zero remains distinct. Collision extraction does not use shader state to select geometry. The source meaning remains tracked in [libeq #9](https://github.com/djhenry/libeq/issues/9).
+
 ## Explicit material decisions
 
 `ResolvedZoneVisual` owns the global common materials and textures. Each `SourceMaterialKey` addresses a deduplicated source mesh and a material **table ordinal**. A material's separate metadata index or name is not that ordinal. Every material referenced by included visual geometry needs a binding to a global output material.

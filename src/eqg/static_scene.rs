@@ -626,7 +626,10 @@ fn validate_mesh(m: &ZoneMesh) -> Result<()> {
     let last = m.string_table.iter().rposition(|&b| b == 0);
     for material in &m.materials {
         string_offset(last, material.name_offset)?;
-        string_offset(last, material.shader_offset)?;
+        let shader = material
+            .shader_offset
+            .context("unresolved shader word 0xffffffff")?;
+        string_offset(last, shader)?;
         for property in &material.properties {
             string_offset(last, property.name_offset)?;
             if property.kind == 2 {
