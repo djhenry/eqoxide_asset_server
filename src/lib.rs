@@ -19,6 +19,7 @@ pub mod static_scene;
 pub mod static_collision;
 pub mod static_scene_descriptor;
 pub mod source_material;
+pub mod wld_collision;
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
@@ -31,5 +32,3 @@ mod tests {
         assert!(!super::version().is_empty());
     }
 }
-
-pub mod wld_collision;
