@@ -19,6 +19,9 @@ fn string_details(table: &[u8], offset: u32) -> Value {
 pub fn summary(scene: &BinaryZoneScene) -> Value {
     let meshes: Vec<_> = scene.meshes.iter().map(|mesh| {
         let material_details: Vec<_> = mesh.materials.iter().enumerate().map(|(ordinal, material)| {
+            let shader = material.shader_offset
+                .map(|offset| string_details(&mesh.string_table, offset))
+                .unwrap_or_else(|| json!({"bytes": null, "utf8": null}));
             let properties: Vec<_> = material.properties.iter().map(|property| {
                 json!({
                     "name": string_details(&mesh.string_table, property.name_offset),
@@ -32,7 +35,9 @@ pub fn summary(scene: &BinaryZoneScene) -> Value {
                 "ordinal": ordinal,
                 "index": material.index,
                 "name": string_details(&mesh.string_table, material.name_offset),
-                "shader": string_details(&mesh.string_table, material.shader_offset),
+                "shader_offset_word": material.shader_offset.unwrap_or(u32::MAX),
+                "shader_string_resolved": shader["bytes"].is_array(),
+                "shader": shader,
                 "properties": properties,
             })
         }).collect();
