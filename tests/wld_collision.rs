@@ -694,3 +694,315 @@ fn normalized_writer_output_and_failed_write_are_observable() {
     );
     assert!(json.get("meshes").is_none());
 }
+
+#[test]
+fn index_equal_to_pool_length_is_invalid_in_every_corner_before_flag_exclusion() {
+    for flags in [0, 1, 0x10, u16::MAX] {
+        for indices in [[3, 1, 2], [0, 3, 2], [0, 1, 3]] {
+            let mesh = MeshFixture {
+                faces: vec![(flags, indices)],
+                ..MeshFixture::default()
+            };
+            assert!(
+                matches!(run(&mesh), Err(WldCollisionError::InvalidGeometry { .. })),
+                "flags {flags:#x}, indices {indices:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn every_coincident_corner_pair_is_excluded_without_changing_neighbors_or_pool() {
+    for indices in [
+        [0, 3, 2], // AB: different indexes, identical positions.
+        [0, 1, 4], // BC: different indexes, identical positions.
+        [0, 1, 3], // CA: different indexes, identical positions.
+        [0, 0, 2], // AB: repeated index.
+        [0, 1, 1], // BC: repeated index.
+        [0, 1, 0], // CA: repeated index.
+    ] {
+        let mesh = MeshFixture {
+            positions: vec![
+                [-2, 4, -6],
+                [6, 4, -6],
+                [-2, 10, -6],
+                [-2, 4, -6],
+                [6, 4, -6],
+                [-2, 10, -6],
+            ],
+            faces: vec![
+                (0, [0, 1, 2]),
+                (0, indices),
+                (1, [2, 1, 0]),
+                (0x10, indices),
+            ],
+            ..MeshFixture::default()
+        };
+        let normalized = run(&mesh).unwrap_or_else(|error| panic!("{indices:?}: {error:?}"));
+        let expected = WldFaceCounts {
+            source_faces: 4,
+            source_flag_excluded: 1,
+            raw_candidates: 3,
+            coincident_source_positions_excluded: 1,
+            retained_faces: 2,
+        };
+        assert_eq!(normalized.report.faces, expected, "{indices:?}");
+        assert_eq!(normalized.report.owners[0].faces, expected, "{indices:?}");
+        let StaticCollisionScene::Available { meshes, instances } = normalized.scene else {
+            panic!("{indices:?}: expected retained neighbors")
+        };
+        assert_eq!(meshes.len(), 1);
+        assert_eq!(
+            meshes[0].positions,
+            [
+                [-18., 9., 0.],
+                [-18., 13., 0.],
+                [-15., 9., 0.],
+                [-18., 9., 0.],
+                [-18., 13., 0.],
+                [-15., 9., 0.],
+            ]
+        );
+        assert_eq!(meshes[0].primitives[0].indices, [0, 1, 2, 2, 1, 0]);
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].owner_id, "owner-a");
+        assert_eq!(instances[0].mesh_index, 0);
+    }
+}
+
+#[test]
+fn contributing_owners_keep_distinct_meshes_and_independently_charged_histograms() {
+    let first = MeshFixture {
+        positions: vec![[-2, 4, -6], [6, 4, -6], [-2, 10, -6], [6, 10, -6]],
+        faces: vec![
+            (0, [0, 1, 2]),
+            (0x10, [0, 1, 3]),
+            (1, [1, 3, 2]),
+            (0, [0, 0, 2]),
+        ],
+        ..MeshFixture::default()
+    };
+    let empty = MeshFixture {
+        faces: vec![(0x10, [0, 1, 2]), (1, [0, 0, 2])],
+        ..MeshFixture::default()
+    };
+    let second = MeshFixture {
+        center: [100., 200., 30.],
+        exponent: 0,
+        positions: vec![[0, 0, 0], [2, 0, 0], [0, 3, 0], [9, 9, 9]],
+        faces: vec![
+            (1, [2, 0, 1]),
+            (0, [0, 1, 2]),
+            (1, [0, 0, 2]),
+            (0x10, [0, 1, 2]),
+            (0x10, [0, 0, 2]),
+        ],
+        ..MeshFixture::default()
+    };
+    let doc = document(
+        &[
+            (0x36, second.bytes(false)),
+            (0x9999, vec![]),
+            (0x36, empty.bytes(false)),
+            (0x36, first.bytes(false)),
+        ],
+        false,
+    );
+    // Explicit selection order differs from document order; empty owners emit no mesh.
+    let select = [
+        WldTerrainSelection {
+            fragment_slot: 3,
+            owner_id: "owner-a",
+        },
+        WldTerrainSelection {
+            fragment_slot: 2,
+            owner_id: "owner-empty",
+        },
+        WldTerrainSelection {
+            fragment_slot: 0,
+            owner_id: "owner-b",
+        },
+    ];
+    let call = |limits: &WldCollisionLimits| {
+        normalize_selected_wld_terrain(
+            WldTerrainInput {
+                document: &doc,
+                source_context: "ctx",
+                selections: &select,
+            },
+            limits,
+        )
+    };
+    // Published logical schedule: S=3, H=8 per-owner flag values, C=2 contributors.
+    // Resources: 4 + 5*3 + 2*8 + 3*2 = 41.
+    // Payload: 256 + 3*24 + 8192 + 3*(80+8+16) + 3 context bytes
+    // + 3*(160+24) + 8*(10+16) + 25 report-owner bytes
+    // + 2*(48+24+96) + 8*12 position bytes + 12*4 index bytes
+    // + 14 instance-owner bytes = 10114. Charges are logical units, not RSS.
+    let expected_usage = WldCollisionUsage {
+        document_visits: 7,
+        selected_owners: 3,
+        source_vertices: 11,
+        source_faces: 11,
+        retained_indices: 12,
+        source_geometry_bytes: 154,
+        owned_payload_bytes: 10114,
+        resource_entries: 41,
+        face_visits: 31,
+        decoded_vertices: 11,
+    };
+    let normalized = call(&WldCollisionLimits::default()).unwrap();
+    assert_eq!(normalized.usage, expected_usage);
+    assert_eq!(normalized.report.source_context, "ctx");
+    assert_eq!(
+        normalized.report.coverage,
+        WldCoverage {
+            unknown: 1,
+            ..WldCoverage::default()
+        }
+    );
+    assert_eq!(
+        normalized.report.faces,
+        WldFaceCounts {
+            source_faces: 11,
+            source_flag_excluded: 4,
+            raw_candidates: 7,
+            coincident_source_positions_excluded: 3,
+            retained_faces: 4,
+        }
+    );
+    let owners = &normalized.report.owners;
+    assert_eq!(owners.len(), 3);
+    for (owner, id, slot, faces, histogram) in [
+        (
+            &owners[0],
+            "owner-a",
+            3,
+            WldFaceCounts {
+                source_faces: 4,
+                source_flag_excluded: 1,
+                raw_candidates: 3,
+                coincident_source_positions_excluded: 1,
+                retained_faces: 2,
+            },
+            vec![
+                WldFaceFlagCount { flags: 0, count: 2 },
+                WldFaceFlagCount { flags: 1, count: 1 },
+                WldFaceFlagCount {
+                    flags: 16,
+                    count: 1,
+                },
+            ],
+        ),
+        (
+            &owners[1],
+            "owner-empty",
+            2,
+            WldFaceCounts {
+                source_faces: 2,
+                source_flag_excluded: 1,
+                raw_candidates: 1,
+                coincident_source_positions_excluded: 1,
+                retained_faces: 0,
+            },
+            vec![
+                WldFaceFlagCount { flags: 1, count: 1 },
+                WldFaceFlagCount {
+                    flags: 16,
+                    count: 1,
+                },
+            ],
+        ),
+        (
+            &owners[2],
+            "owner-b",
+            0,
+            WldFaceCounts {
+                source_faces: 5,
+                source_flag_excluded: 2,
+                raw_candidates: 3,
+                coincident_source_positions_excluded: 1,
+                retained_faces: 2,
+            },
+            vec![
+                WldFaceFlagCount { flags: 0, count: 1 },
+                WldFaceFlagCount { flags: 1, count: 2 },
+                WldFaceFlagCount {
+                    flags: 16,
+                    count: 2,
+                },
+            ],
+        ),
+    ] {
+        assert_eq!(owner.owner_id, id);
+        assert_eq!(owner.fragment_slot, slot);
+        assert_eq!(owner.faces, faces);
+        assert_eq!(owner.raw_face_flags, histogram);
+    }
+    let StaticCollisionScene::Available { meshes, instances } = normalized.scene else {
+        panic!("expected two contributing owners")
+    };
+    assert_eq!(meshes.len(), 2);
+    assert_eq!(
+        meshes[0].positions,
+        [
+            [-18., 9., 0.],
+            [-18., 13., 0.],
+            [-15., 9., 0.],
+            [-15., 13., 0.]
+        ]
+    );
+    assert_eq!(meshes[0].primitives.len(), 1);
+    assert_eq!(meshes[0].primitives[0].indices, [0, 1, 2, 1, 3, 2]);
+    assert_eq!(
+        meshes[1].positions,
+        [
+            [200., 100., 30.],
+            [200., 102., 30.],
+            [203., 100., 30.],
+            [209., 109., 39.]
+        ]
+    );
+    assert_eq!(meshes[1].primitives.len(), 1);
+    assert_eq!(meshes[1].primitives[0].indices, [2, 0, 1, 0, 1, 2]);
+    assert_eq!(instances.len(), 2);
+    assert_eq!(instances[0].owner_id, "owner-a");
+    assert_eq!(instances[0].mesh_index, 0);
+    assert_eq!(instances[1].owner_id, "owner-b");
+    assert_eq!(instances[1].mesh_index, 1);
+    for instance in &instances {
+        assert_eq!(instance.matrix, glam::Mat4::IDENTITY.to_cols_array_2d());
+    }
+    let exact = exact_limits(expected_usage);
+    assert_eq!(call(&exact).unwrap().usage, expected_usage);
+    for (kind, limits) in [
+        (
+            WldCollisionBudget::ResourceEntries,
+            WldCollisionLimits {
+                resource_entries: 40,
+                ..exact
+            },
+        ),
+        (
+            WldCollisionBudget::OwnedPayloadBytes,
+            WldCollisionLimits {
+                owned_payload_bytes: 10113,
+                ..exact
+            },
+        ),
+    ] {
+        let (attempted, maximum) = match kind {
+            WldCollisionBudget::ResourceEntries => (41, 40),
+            WldCollisionBudget::OwnedPayloadBytes => (10114, 10113),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            call(&limits).unwrap_err(),
+            WldCollisionError::BudgetExceeded {
+                budget: kind,
+                attempted,
+                maximum,
+            }
+        );
+    }
+}
