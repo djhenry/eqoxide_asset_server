@@ -37,6 +37,15 @@ Offline inspection of the same six primary WLD members used in the [earlier feas
 
 Every modern mesh in these six primary members has one positive Region association; no modern target is shared or unlinked. The other 7288 regions have no modern reference and zero inline geometry counts. Declared Region counts match the observed source Region counts. These samples contain no Region `0x40` layout, named/null/invalid modern reference, unparseable Region, or legacy wall/obstacle record. Their absence here does not justify dropping those cases from future diagnostics.
 
+The same previously recorded six-sample inspection has the following aggregate full-flag frequencies. This is historical sample evidence, not a new asset scan or a universal native-valid flag mask.
+
+| Complete Region flags | Region count |
+|---|---:|
+| `0x81` | 7288 |
+| `0x101` | 26 |
+| `0x181` | 14291 |
+| **Total** | **21605** |
+
 All 42 previously observed raw coincident-position candidates occur in Region-associated meshes. This resolves their source-input membership for these samples; it does not establish their final native query behavior. Face statistics count each distinct mesh once and are not weighted by hypothetical shared associations.
 
 Each sample ran serially in a separate process with 768 MiB address-space, 30-second CPU and 45-second wall limits. Archive/member limits were 16 MiB, with checked WLD extents and at most 50000 fragments before parsing. The author probe additionally capped document/reference work at 200000 visits each, nodes at 100000, face visits at 5000000, histogram cardinality at 256, exceptions at 8 and emitted JSON at 64 KiB; redirected output files had 128 KiB limits. These are research controls, not a production ingestion or logical-payload contract. The locked PFS reader can inflate eagerly before an outer read limit, so process limits remain necessary. Exact inputs, witnesses and provenance remain private. No normalizer, GLB writer, native executable or live client ran for this inspection.
@@ -49,7 +58,9 @@ A successful typed parse is not proof that this unsupported layout was understoo
 
 ## Recommended first inspector
 
-Inspect one explicitly supplied document and its header evidence. Enumerate all source Region entries in document order, preserving unsupported placeholders. Record declared/actual counts, full Region flag frequencies, reference kinds, target kinds and modern meshes unassociated with these regions. Keep tree structure and ordinal diagnostics separate from terrain input membership.
+The [proposed association inspection contract](wld-terrain-association-contract.md) makes this boundary concrete: exact first-profile flags, per-record observations, atomic logical budgets and authored acceptance oracles. It proposes linear tree-ordinal diagnostics with graph analysis explicitly not performed; cyclic/disconnected fixtures must terminate without filtering Region associations or claiming tree validity. This remains a specification for human review, with no runtime implementation or automatic selection.
+
+Inspect one explicitly supplied document and its header evidence. Enumerate all source Region entries in document order, preserving unsupported placeholders. Record declared/actual counts, full Region flag frequencies, reference kinds, target kinds and modern records with zero observed resolved Region associations, qualified by unresolved coverage. Keep tree structure and ordinal diagnostics separate from terrain input membership.
 
 Define an explicit supported Region layout/flag profile; a typed parse alone is insufficient admission. Initially resolve only positive modern references with checked subtraction, bounds and exact target-kind checks. When a Region declares a modern association, report null or named references, missing targets, and targets that are unknown, older or of the wrong kind as unsupported required associations. A supported Region without `0x100` is reported separately; it is not a missing required modern reference. A legacy-only region profile remains explicit unsupported coverage, rather than evidence of complete empty terrain. Header inactivity or inconsistent/missing required records must not become an available-empty world.
 
