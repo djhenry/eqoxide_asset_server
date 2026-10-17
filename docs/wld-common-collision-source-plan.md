@@ -4,7 +4,7 @@ Tracked in [issue #79](https://github.com/djhenry/eqoxide_asset_server/issues/79
 
 ## Start with the raw API that already exists
 
-The inspected [libeq revision](https://github.com/djhenry/libeq/commit/86f44611bba397410293530e18e6fc8d2dccb575) exposes `WldDoc`, typed borrowed fragment iteration, modern `DmSpriteDef2` meshes and `Actor` placements through its public parser API. Modern WLD geometry does not need another byte-format parser. The first server adapter can consume these immutable records directly.
+The current locked [libeq revision](https://github.com/djhenry/libeq/commit/39fb132fe0d206b7e5878213649eeb5e33c67d78) exposes `WldDoc`, typed borrowed fragment iteration, modern `DmSpriteDef2` meshes and `Actor` placements through its public parser API. Modern WLD geometry does not need another byte-format parser. The first server adapter can consume these immutable records directly.
 
 High-level visual helpers are unsuitable as the source of collision facts. They allocate decoded positions or flattened indices, discard face flags or field presence, and apply visual coordinate/placement conventions. In particular, `ObjectLocation::scale()` returns bounding radius and uniform scale as a pair; they are different quantities. Material and primitive helpers may resolve references and panic. Collision extraction must not depend on material validity, transparency, UVs, normals or vertex colors.
 
@@ -82,3 +82,5 @@ The first acceptance matrix should include asymmetric signed coordinates, expone
 This proposal is based on a read-only libeq API inventory, native source-semantics investigation and existing common-contract code. A standalone Rust probe of the legacy signed-shift expression observed a negative factor at exponent 31, an overflow panic at 32 with debug assertions, and a factor of one at 32 in the optimized probe; [libeq issue #3](https://github.com/djhenry/libeq/issues/3) tracks that defect. That probe did not execute a libeq document or a native client. Neither a WLD common adapter, corpus conversion, full library regression suite nor live client test was run for this document. Separate tracked defects and implementation PRs must carry their own acceptance.
 
 The subsequent isolated frontend in `src/wld_collision.rs` implements the owner-selected coincident-position exclusion for explicit selections. Its authored fixtures and common writer/client CPU acceptance cover this bounded dataset contract. They do not establish native corpus coverage, zone membership, server alignment, production routing or gameplay readiness.
+
+The next [terrain input membership investigation](wld-terrain-membership-inspection.md), tracked in [issue #86](https://github.com/djhenry/eqoxide_asset_server/issues/86), separates all Region associations from BSP reachability and all-modern enumeration. Its proposed inspector adds no automatic selection or complete native preparation claim.

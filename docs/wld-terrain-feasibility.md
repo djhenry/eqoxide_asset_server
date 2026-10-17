@@ -34,6 +34,10 @@ The audited native face preparation invalidates an exact-zero plane. This provid
 
 The implementation must add an exclusion reason and tests, distinguish raw face candidates from prepared output counts, and describe its preparation status explicitly. It must not claim full native preparation from this narrow rule. Required supported selections with no remaining candidates may be known-empty only after all required records are successfully examined. The owner selected this narrow diagnosed exclusion. The updated selected-terrain contract retains atomic refusal for every other error; no partial scene escapes a failure. This decision is not an implementation or a merge approval.
 
+## Follow-on membership evidence
+
+The [terrain membership inspection](wld-terrain-membership-inspection.md) subsequently found positive Region associations for all modern meshes in these six primary inputs, including all 42 coincident-position candidates. This resolves their source-input membership for the inspected sample. It does not establish final native query preparation, traversal order, ownership or world completeness.
+
 ## Separate PFS reader defect
 
 The audit also reproduced [libeq issue #4](https://github.com/djhenry/libeq/issues/4): a synthetic block and file entry declaring 8192 bytes successfully yielded 1048576 bytes. The first block inflates inside `get_reader`, before an outer read limit can constrain its allocation. The exact public reproducer was independently compiled and executed; valid-size and corrupt-zlib controls were also exercised. No game assets or out-of-memory crash were needed for that reproduction.
