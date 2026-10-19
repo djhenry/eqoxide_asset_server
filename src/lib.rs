@@ -32,3 +32,5 @@ mod tests {
         assert!(!super::version().is_empty());
     }
 }
+
+pub mod wld_association;
