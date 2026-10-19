@@ -572,8 +572,10 @@ fn later_typed_tree_uses_actual_nodes_and_region_ordinal_bounds() {
         ],
         200,
     );
-    let mut limits = WldAssociationLimits::default();
-    limits.tree_nodes = 2;
+    let limits = WldAssociationLimits {
+        tree_nodes: 2,
+        ..WldAssociationLimits::default()
+    };
     let report = inspect_wld_terrain_associations(&document, limits, None).unwrap();
     assert_eq!(report.tree.original_tree_count, 2);
     assert_eq!(report.tree.selected_slot, Some(3));
@@ -692,7 +694,7 @@ fn histogram_capacity_saturates_at_256_and_counts_unused_reservations() {
 fn header_words_are_evidence_without_magic_or_version_admission() {
     let mut bytes = fixture::bytes(&[], 99);
     let words = [0x12345678u32, 0x55667788, 0, 99, 42, 0, 17];
-    for (chunk, word) in bytes.chunks_exact_mut(4).zip(words) {
+    for (chunk, word) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(words) {
         chunk.copy_from_slice(&word.to_le_bytes());
     }
     let document = WldDoc::parse(&bytes).unwrap();

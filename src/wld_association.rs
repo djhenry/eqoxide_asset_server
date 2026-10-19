@@ -381,7 +381,7 @@ pub fn inspect_wld_terrain_associations(
         return Err(WldAssociationError::HeaderApiInvariant);
     }
     let mut stored_words = [0; 7];
-    for (word, bytes) in stored_words.iter_mut().zip(header_bytes.chunks_exact(4)) {
+    for (word, bytes) in stored_words.iter_mut().zip(header_bytes.as_chunks::<4>().0) {
         budget.charge(B::WorkUnits, 1, S::Header)?;
         *word = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
     }
