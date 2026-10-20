@@ -272,7 +272,10 @@ fn component_union(components: &SceneComponents, limits: &DescriptorLimits) -> R
         role_requirements(
             requirements,
             "static-collision-triangles-v1",
-            &["static-collision-triangles-v1"],
+            &[
+                "static-collision-triangles-v1",
+                crate::static_collision::CANONICAL_QUERY_UNIT_FRAMES_CAPABILITY,
+            ],
         )?;
     }
     let mut paths = BTreeSet::new();

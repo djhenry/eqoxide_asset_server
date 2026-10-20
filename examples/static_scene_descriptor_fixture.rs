@@ -4,8 +4,8 @@ use eqoxide_asset_server::{
     cas::Cas,
     manifest::{Manifest, ManifestStore},
     static_collision::{
-        write_static_collision, CollisionWriteLimits, InspectionQueryPolicy,
-        StaticCollisionInstance, StaticCollisionMesh, StaticCollisionPrimitive,
+        write_static_collision_with_query_units, CollisionWriteLimits, InspectionQueryPolicy,
+        QueryUnitFrames, StaticCollisionInstance, StaticCollisionMesh, StaticCollisionPrimitive,
         StaticCollisionScene,
     },
     static_scene::{
@@ -46,16 +46,26 @@ fn rehash(manifest: &mut Manifest) -> Result<()> {
     Ok(())
 }
 fn main() -> Result<()> {
-    let output = PathBuf::from(
-        std::env::args_os()
-            .nth(1)
-            .context("usage: static_scene_descriptor_fixture OUTPUT_DIRECTORY")?,
+    let mut args = std::env::args_os().skip(1);
+    let output = PathBuf::from(args.next().context(
+        "usage: static_scene_descriptor_fixture OUTPUT_DIRECTORY [--canonical-query-units]",
+    )?);
+    ensure!(
+        !output.as_os_str().to_string_lossy().starts_with("--"),
+        "output directory must precede the optional flag"
     );
+    let query_unit_frames = match args.next() {
+        None => QueryUnitFrames::Unspecified,
+        Some(flag) if flag == "--canonical-query-units" => QueryUnitFrames::DeclaredCanonical,
+        Some(_) => anyhow::bail!("unknown fixture option"),
+    };
+    ensure!(args.next().is_none(), "unexpected fixture argument");
     std::fs::create_dir_all(&output)?;
     let limits = DescriptorLimits::default();
     let mut identity = blake3::Hasher::new();
     identity.update(b"static-scene-descriptor-authored-policy-v1\0");
     identity.update(include_bytes!("static_scene_descriptor_fixture.rs"));
+    identity.update(query_unit_frames.identifier().as_bytes());
     let bake_revision = identity.finalize().to_hex().to_string();
     let positions = vec![[0., 0., 0.], [2., 0., 0.], [0., 3., 0.]];
     let matrices = [
@@ -118,10 +128,11 @@ fn main() -> Result<()> {
     };
     let visual_requirements =
         write_static_visual(&visual, &bake_revision, &output.join("visual.glb"))?;
-    let collision_requirements = write_static_collision(
+    let collision_requirements = write_static_collision_with_query_units(
         &collision,
         &bake_revision,
         InspectionQueryPolicy::FrontFaces,
+        query_unit_frames,
         &output.join("collision.glb"),
         &CollisionWriteLimits::default(),
     )?;
@@ -197,6 +208,7 @@ fn main() -> Result<()> {
             "availability":{"visual":"available","collision":"available"},
             "descriptorMetadataBound":true, "metadataCorruptionsRefused":refusals,"restoredBinding":true,
             "componentDecodingPerformed":false,"casChunkContentVerificationPerformed":false,
+            "queryUnitFrames":query_unit_frames.identifier(),
             "segmentQueriesImplemented":false,"runtimeActivationPerformed":false
         }))?
     );
