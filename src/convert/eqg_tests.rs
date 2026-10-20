@@ -81,6 +81,47 @@ fn eqg_adapter_refuses_unresolved_shader_before_diffuse_fallback() {
     }
 }
 
+fn assert_unused_second_material_shader_is_refused(model: bool) {
+    let mut input = fixture(1, model);
+    let second_material = input.bytes[input.shader - 8..input.vertex].to_vec();
+    assert_eq!(second_material.len(), 40);
+    input
+        .bytes
+        .splice(input.vertex..input.vertex, second_material);
+    input.bytes[12..16].copy_from_slice(&2u32.to_le_bytes());
+
+    let mesh = parse_eqg_model(&input.bytes).unwrap();
+    assert_eq!(
+        mesh.mat_textures,
+        [Some("boat.dds".into()), Some("boat.dds".into())]
+    );
+    assert_eq!(mesh.positions, [[1., 2., 3.], [4., 5., 6.]]);
+    assert_eq!(mesh.normals, [[0., 0., 1.]; 2]);
+    assert_eq!(mesh.uvs, [[0.25, 0.75]; 2]);
+    assert_eq!(mesh.tris, [(0, 1, 0, 0)]);
+
+    let second_shader = input.vertex + 8;
+    input.bytes[second_shader..second_shader + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    let error = match parse_eqg_model(&input.bytes) {
+        Err(error) => format!("{error:#}"),
+        Ok(_) => panic!("unresolved shader on unused second material was accepted"),
+    };
+    assert!(
+        error.contains("EQG material 1 has unresolved shader word 0xffffffff"),
+        "{error}"
+    );
+}
+
+#[test]
+fn eqgt_adapter_refuses_unresolved_shader_on_unused_second_material() {
+    assert_unused_second_material_shader_is_refused(false);
+}
+
+#[test]
+fn eqgm_adapter_refuses_unresolved_shader_on_unused_second_material() {
+    assert_unused_second_material_shader_is_refused(true);
+}
+
 #[test]
 fn eqg_adapter_keeps_valid_empty_shader_string_distinct() {
     let mut input = fixture(1, true);
