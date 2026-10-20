@@ -34,3 +34,5 @@ mod tests {
 }
 
 pub mod wld_association;
+
+pub mod wld_associated_terrain;
