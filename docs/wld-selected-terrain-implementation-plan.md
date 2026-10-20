@@ -1,6 +1,6 @@
 # Selected WLD Terrain Normalization Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Tracking:** [Implementation issue #84](https://github.com/djhenry/eqoxide_asset_server/issues/84).
 
@@ -38,38 +38,38 @@
 
 **Files:** Create `src/wld_collision.rs`; export it from `src/lib.rs`. Expose the existing triangle-admission helper in `src/static_collision.rs` only at crate visibility if needed for reuse.
 
-- [ ] Define borrowed selection/input, caller-lowerable limits, typed refusal categories, source-reference diagnostics, per-owner face counts and bounded raw-flag histograms.
-- [ ] Define a usage record and explicit logical charges for report fields, identity copies, borrowed selection scratch, duplicate tracking, histogram entries and output payload/containers. Establish allowances before each allocation/copy; document fixed bounded scratch and maximum passes.
-- [ ] Write direct-record tests for all nine declared/actual count pairs and canonical animation-null discrimination. Run RED before implementation.
-- [ ] Implement record validation without material lookup or dependency resolution.
-- [ ] Implement checked positional selection, coverage accounting and duplicate-owner/slot refusal. Budget coverage visits and repeated selected lookups explicitly.
-- [ ] Add exact-limit/one-below tests for every budget, including a valid nonempty selection producing empty geometry, with nonzero report costs. Verify overflow-safe refusal and invalid caller limits.
+- [x] Define borrowed selection/input, caller-lowerable limits, typed refusal categories, source-reference diagnostics, per-owner face counts and bounded raw-flag histograms.
+- [x] Define a usage record and explicit logical charges for report fields, identity copies, borrowed selection scratch, duplicate tracking, histogram entries and output payload/containers. Establish allowances before each allocation/copy; document fixed bounded scratch and maximum passes.
+- [x] Write direct-record tests for all nine declared/actual count pairs and canonical animation-null discrimination. Run RED before implementation.
+- [x] Implement record validation without material lookup or dependency resolution.
+- [x] Implement checked positional selection, coverage accounting and duplicate-owner/slot refusal. Budget coverage visits and repeated selected lookups explicitly.
+- [x] Add exact-limit/one-below tests for every budget, including a valid nonempty selection producing empty geometry, with nonzero report costs. Verify overflow-safe refusal and invalid caller limits.
 
 ### Task 2: Normalize and diagnose source face preparation
 
 **Files:** `src/wld_collision.rs` and its internal tests; `tests/wld_collision.rs` with shared authored fixture support if needed.
 
-- [ ] Author binary WLD fixtures for actual `WldDoc::parse`, including a positional `Unknown` preceding a selected valid mesh. Do not construct private document internals.
-- [ ] Write RED cases for distinct-index/coincident-position and repeated-index exclusions; source-flag precedence; mixed valid/excluded geometry; all-coincident known-empty; malformed excluded indexes; distinct-source collinearity; reconstruction collapse; and preserved unused positions.
-- [ ] Implement index validation, complete raw-flag accounting, exact raw-tuple comparison, power-of-two reconstruction, source reflection and unchanged retained winding.
-- [ ] Validate retained geometry through shared triangle admission; produce one indexed pool and identity instance per contributing owner. Keep reports for successfully examined empty owners.
-- [ ] Check per-owner and total conservation: `source = flag_excluded + candidates`, `candidates = coincident_excluded + retained`.
-- [ ] Exercise both WLD texture-coordinate representations, accepted mesh flags, exponent boundaries, source center, unsupported dynamics, bad materials and missing/duplicate bindings.
+- [x] Author binary WLD fixtures for actual `WldDoc::parse`, including a positional `Unknown` preceding a selected valid mesh. Do not construct private document internals.
+- [x] Write RED cases for distinct-index/coincident-position and repeated-index exclusions; source-flag precedence; mixed valid/excluded geometry; all-coincident known-empty; malformed excluded indexes; distinct-source collinearity; reconstruction collapse; and preserved unused positions.
+- [x] Implement index validation, complete raw-flag accounting, exact raw-tuple comparison, power-of-two reconstruction, source reflection and unchanged retained winding.
+- [x] Validate retained geometry through shared triangle admission; produce one indexed pool and identity instance per contributing owner. Keep reports for successfully examined empty owners.
+- [x] Check per-owner and total conservation: `source = flag_excluded + candidates`, `candidates = coincident_excluded + retained`.
+- [x] Exercise both WLD texture-coordinate representations, accepted mesh flags, exponent boundaries, source center, unsupported dynamics, bad materials and missing/duplicate bindings.
 
 ### Task 3: Accept through real collision output and client inspection
 
 **Files:** `tests/wld_collision.rs`; add an authored fixture example only if needed to reproduce the writer-to-client pipeline.
 
-- [ ] Pass normalized mixed and known-empty scenes through `write_static_collision`; check positions, retained indexes, owners, ordinary requirements and atomic writer refusal.
-- [ ] Independently assemble a descriptor/manifest with actual common APIs and load it through freshly built current client CPU role/package probes.
-- [ ] Check the source-to-server reflection and writer's later asset-axis rotation separately; never use the writer's axis helper as the WLD reflection.
-- [ ] Include a correctly hashed package disagreement so integrity validation cannot hide a binding error.
-- [ ] Mutation-check source eligibility, coincidence comparison, index validation order, axes, winding, center, exponent, owner identity, known-empty handling and budget charges. Require actual runtime assertion failures, exact restoration and fresh passing runs.
-- [ ] Author and independent acceptance agent separately run the applicable suite and CPU pipeline. No live-game claim applies to this isolated producer module.
+- [x] Pass normalized mixed and known-empty scenes through `write_static_collision`; check positions, retained indexes, owners, ordinary requirements and atomic writer refusal.
+- [x] Independently assemble a descriptor/manifest with actual common APIs and load it through freshly built current client CPU role/package probes.
+- [x] Check the source-to-server reflection and writer's later asset-axis rotation separately; never use the writer's axis helper as the WLD reflection.
+- [x] Include a correctly hashed package disagreement so integrity validation cannot hide a binding error.
+- [x] Mutation-check source eligibility, coincidence comparison, index validation order, axes, winding, center, exponent, owner identity, known-empty handling and budget charges. Require actual runtime assertion failures, exact restoration and fresh passing runs.
+- [x] Author and independent acceptance agent separately run the applicable suite and CPU pipeline. No live-game claim applies to this isolated producer module.
 
 ### Task 4: Publish the bounded unit for human review
 
-- [ ] Update contract/implementation status and bake diagnostics documentation to match actual behavior and exact charge schedule.
-- [ ] Independently review new prose references and title/body claims; run whitespace and privacy checks on tracked files and public text.
-- [ ] Publish the implementation on its own branch/PR, clearly depending on the selected-source design, with exact verification results and remaining source-coverage limits.
-- [ ] Leave merging and production rollout to human review.
+- [x] Update contract/implementation status and bake diagnostics documentation to match actual behavior and exact charge schedule.
+- [x] Independently review new prose references and title/body claims; run whitespace and privacy checks on tracked files and public text.
+- [x] Publish the implementation on its own branch/PR, clearly depending on the selected-source design, with exact verification results and remaining source-coverage limits.
+- [x] Leave merging and production rollout to human review.
