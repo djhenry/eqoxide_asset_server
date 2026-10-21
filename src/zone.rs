@@ -190,7 +190,7 @@ fn wld_placement_matrix(
 /// preserved; bounding radius does not control geometry. Refusal is this
 /// exporter's policy, not a claim about native rejection semantics.
 pub fn read_placements(main_s3d: &Path) -> anyhow::Result<Vec<(String, [[f32; 4]; 4])>> {
-    use libeq_wld::parser::{Actor, WldDoc};
+    use libeq_wld::parser::{Actor, FragmentType, WldDoc};
 
     let main_file =
         std::fs::File::open(main_s3d).with_context(|| format!("open {}", main_s3d.display()))?;
@@ -209,11 +209,18 @@ pub fn read_placements(main_s3d: &Path) -> anyhow::Result<Vec<(String, [[f32; 4]
                 continue;
             }
         };
-        // Unlike the high-level loader (which panics on parse errors), the raw
-        // parser also preserves absent location/scale instead of defaulting to 0.
+        // Raw fields preserve absent location/scale. The parser tolerates malformed
+        // fragment bodies as Unknown placeholders retaining the original type/slot;
+        // reject unavailable Actor bodies below while tolerating unrelated kinds.
         let doc = WldDoc::parse(&bytes)
             .map_err(|e| anyhow::anyhow!("parse {} member {wn}: {e:?}", main_s3d.display()))?;
         for (slot, fragment) in doc.iter().enumerate() {
+            if matches!(fragment, FragmentType::Unknown(unknown) if unknown.type_id == 0x15) {
+                anyhow::bail!(
+                    "{} member {wn} Actor slot {slot}: unavailable Actor body (original type 0x15)",
+                    main_s3d.display()
+                );
+            }
             let Some(actor) = fragment.as_any().downcast_ref::<Actor>() else {
                 continue;
             };

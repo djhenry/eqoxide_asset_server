@@ -317,3 +317,39 @@ fn wld_placement_nonfinite_radius_does_not_scale_geometry() {
         },
     );
 }
+
+#[test]
+fn wld_placement_truncated_required_scale_is_not_empty_success() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("truncated-scale.s3d");
+    let mut body = actor(&ActorSpec::default());
+    // Flags promise location, radius and scale; stop halfway through scale,
+    // before its remaining two bytes and the four-byte user-data length.
+    body.truncate(body.len() - 6);
+    let bytes = document(&[(0x9999, vec![]), (0x15, body)], "\0PROBE_ACTORDEF\0");
+    let parsed = libeq_wld::parser::WldDoc::parse(&bytes).unwrap();
+    assert!(matches!(
+        parsed.at(1),
+        Some(libeq_wld::parser::FragmentType::Unknown(unknown)) if unknown.type_id == 0x15
+    ));
+    archive(&path, "objects.wld", &bytes);
+    let error = format!("{:#}", read_placements(&path).unwrap_err());
+    for context in [
+        "truncated-scale.s3d",
+        "objects.wld",
+        "Actor slot 1",
+        "unavailable Actor body",
+        "0x15",
+    ] {
+        assert!(error.contains(context), "expected {context}: {error}");
+    }
+}
+
+#[test]
+fn wld_placement_unrelated_unknown_is_still_tolerated() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("unrelated-unknown.s3d");
+    let bytes = document(&[(0x9999, vec![])], "\0");
+    archive(&path, "objects.wld", &bytes);
+    assert!(read_placements(&path).unwrap().is_empty());
+}
