@@ -20,6 +20,8 @@ pub mod static_collision;
 pub mod static_scene_descriptor;
 pub mod source_material;
 pub mod wld_collision;
+pub mod wld_association;
+pub mod wld_associated_terrain;
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
@@ -32,7 +34,3 @@ mod tests {
         assert!(!super::version().is_empty());
     }
 }
-
-pub mod wld_association;
-
-pub mod wld_associated_terrain;

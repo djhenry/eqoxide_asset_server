@@ -264,7 +264,7 @@ fn retains_material_strings_and_unknown_properties() {
     let material = &model.materials[0];
     assert_eq!(
         (material.index, material.name_offset, material.shader_offset),
-        (42, 0, 4)
+        (42, 0, Some(4))
     );
     assert_eq!(material.properties.len(), 2);
     assert_eq!(

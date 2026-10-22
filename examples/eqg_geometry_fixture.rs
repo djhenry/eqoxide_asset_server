@@ -27,7 +27,7 @@ fn geometry(
         materials: vec![Material {
             index: 42,
             name_offset: 0,
-            shader_offset: 9,
+            shader_offset: Some(9),
             properties: vec![],
         }],
         vertices: positions

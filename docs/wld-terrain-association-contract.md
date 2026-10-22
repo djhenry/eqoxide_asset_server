@@ -50,7 +50,7 @@ Inspect exactly one association status for every Region, including unknown bodie
 | Required field absent or unexpected field present | `inconsistent_optionality`; do not resolve. |
 | `Name(0)` | `null_required_reference`. |
 | Negative `Name`, including `i32::MIN` | `named_unresolved`, preserving the signed value without negation or absolute value. |
-| Positive `Index` representable as signed i32 | Checked subtraction of one, then one checked `doc.at` lookup. Report `missing_target`, `resolved_modern`, `unknown_modern_target`, `older_geometry_target` only for exact typed `DmSpriteDef`, or `wrong_kind_target` retaining original kind and exact typed variant/unknown body. Original `0x2c` alone is insufficient: the parser can dispatch it as other typed variants or `Unknown`, none of which establishes older EQ geometry. |
+| Positive `Index` representable as signed i32 | After validating positivity, subtract one, then perform one checked `doc.at` lookup. Report `missing_target`, `resolved_modern`, `unknown_modern_target`, `older_geometry_target` only for exact typed `DmSpriteDef`, or `wrong_kind_target` retaining original kind and exact typed variant/unknown body. Original `0x2c` alone is insufficient: the parser can dispatch it as other typed variants or `Unknown`, none of which establishes older EQ geometry. |
 | `Index(0)`, `Index` above i32 maximum, or nonnegative nonzero `Name` | `invalid_reference_representation`, preserving variant and original numeric value; public enums permit in-memory mutation beyond genuine parsed representations. |
 | Unknown Region or unsupported layout | `unavailable_body` or `unsupported_layout`, without inventing an absent/zero reference. |
 
@@ -68,7 +68,7 @@ This deliberately keeps graph validation outside the first milestone. A bounded 
 
 ## Atomic limits and exact logical accounting
 
-All numbers here are **proposed engineering limits**, not native limits, measured ingestion limits, allocator layout, serialized report size or RSS guarantees. Use checked u64 arithmetic. Caller limits may lower but never exceed these defaults/hard maxima. Zero is a valid lowered cap, not an invalid-limits error: a zero-use domain may fit it, while any scheduled positive charge refuses normally. Even empty documents require the fixed positive header/report/container/work charges to fit. Validate the entire limits object before any source work. Budget exhaustion, arithmetic overflow and failure of inspector-managed fallible reservations return a tagged error with counter/stage information; no partial report escapes. This does not guarantee recovery from the upstream header helper's infallible allocation, global out-of-memory aborts or arbitrary upstream panics. Structural anomalies described above return observations, never silent defaults. Unexpected failure of the pinned header API to return 28 bytes is an inspector-input/API invariant error, not an inactive header.
+All numbers here are **proposed engineering limits**, not native limits, measured ingestion limits, allocator layout, serialized report size or RSS guarantees. Use checked u64 arithmetic. Caller limits may lower but never exceed these defaults/hard maxima. Zero is a valid lowered cap, not an invalid-limits error: a zero-use domain may fit it, while any scheduled positive charge refuses normally. Even empty documents require the fixed positive header/report/container/work charges to fit. Validate the entire limits object before any source work. Budget exhaustion, arithmetic overflow and failure of inspector-managed fallible reservations return a tagged error with counter/stage information; no partial report escapes. This does not guarantee recovery from the upstream header helper's infallible allocation, global out-of-memory aborts or arbitrary upstream panics. Structural anomalies described above return observations, never silent defaults. Unexpected failure of the pinned header API to return 28 bytes is an inspector-input/API invariant error, not an inactive header. A missing accepted modern reference, a resolved document slot outside target scratch, or an in-range Region ordinal outside the completed Region report slice also returns an explicit inspector/API invariant error. These defend cross-function assumptions; they are distinct from ordinary source observations such as `inconsistent_optionality`, `missing_target` and `out_of_range`. The immutable public construction currently keeps those private assumptions consistent; exercising inconsistent private helper inputs does not establish a reachable malformed-document failure.
 
 | Counter | Default and hard maximum |
 |---|---:|
@@ -85,6 +85,8 @@ All numbers here are **proposed engineering limits**, not native limits, measure
 | Total work units | 2000000 |
 | Cumulative logical payload bytes | 67108864 |
 | Cumulative resource entries | 600000 |
+
+Each hard maximum is an independent ceiling, not a promise that every combination below the individual maxima succeeds. In particular, a distribution with many known flag values may exhaust histogram comparisons or total work while its Region count remains below the Region-record ceiling. Refusal at that earlier scheduled budget is intentional. The first-occurrence linear histogram and its comparison charges remain part of this v1 profile; changing the lookup strategy or its schedule requires a separate reviewed contract change.
 
 The implementation must follow this charge schedule, rather than substitute a final-output-size check:
 
@@ -104,7 +106,7 @@ The implementation must follow this charge schedule, rather than substitute a fi
 | Histogram capacity | `16 * Q` | `Q` |
 | Target multiplicity scratch | `8 * D` | `D` |
 
-These are fixed contract charges per capacity element, irrespective of optional-field presence or Rust representation. Borrowed fragment contents, fixed scalar/stack arithmetic and allocator overhead are excluded explicitly. Header storage is a separate sixth container, already charged in step 1; no copied identity strings or secondary diagnostic collections exist. Implementations using additional owned scratch, copies or containers must charge them under an amended contract before claiming this profile.
+These are fixed contract charges per capacity element, irrespective of optional-field presence or Rust representation. They are not `size_of::<T>()` measurements and must not be replaced by allocator-dependent sizes or compile-time layout assertions. Rust layout changes do not automatically change these logical units; changes to owned resources or to the accounting profile require explicit contract review. Borrowed fragment contents, fixed scalar/stack arithmetic and allocator overhead are excluded explicitly. Header storage is a separate sixth container, already charged in step 1; no copied identity strings or secondary diagnostic collections exist. Implementations using additional owned scratch, copies or containers must charge them under an amended contract before claiming this profile.
 
 On a successful run, exact totals are:
 

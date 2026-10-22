@@ -747,3 +747,22 @@ fn alternate_world_vertices_2c_is_not_older_geometry() {
         }
     );
 }
+
+#[test]
+fn histogram_comparison_ceiling_can_refuse_below_region_record_ceiling() {
+    // Establish 256 first-occurrence entries, then repeatedly match the last.
+    // The bounded linear search may exhaust comparisons while Region storage fits.
+    let mut fragments: Vec<_> = (0..256)
+        .map(|index| (0x22, fixture::region(0x81 | (index << 9), 0, false)))
+        .collect();
+    fragments.extend((256..4096).map(|_| (0x22, fixture::region(0x1fe81, 0, false))));
+    let document = fixture::document(&fragments, 4096);
+    assert!(matches!(
+        inspect_wld_terrain_associations(&document, WldAssociationLimits::default(), None),
+        Err(WldAssociationError::BudgetExceeded {
+            counter: WldAssociationBudget::HistogramComparisons,
+            stage: WldAssociationStage::Histogram,
+            ..
+        })
+    ));
+}

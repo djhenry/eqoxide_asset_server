@@ -108,6 +108,12 @@ pub enum WldAssociationError {
     },
     #[error("header helper did not return seven words")]
     HeaderApiInvariant,
+    #[error("inspector invariant: accepted modern reference is missing")]
+    RequiredModernReferenceInvariant,
+    #[error("inspector invariant: resolved document slot is outside target scratch")]
+    TargetScratchInvariant,
+    #[error("inspector invariant: in-range Region ordinal is outside the report slice")]
+    RegionOrdinalInvariant,
 }
 struct Budget {
     limits: WldAssociationLimits,
@@ -474,12 +480,7 @@ pub fn inspect_wld_terrain_associations(
                 observation.reference = reference;
                 observation.association = match initial_status {
                     Some(status) => status,
-                    None => resolve_modern(
-                        reference.expect("accepted required field"),
-                        document,
-                        &mut targets,
-                        &mut budget,
-                    )?,
+                    None => resolve_modern(reference, document, &mut targets, &mut budget)?,
                 };
             } else {
                 unavailable_flags_count =
@@ -672,25 +673,22 @@ fn region_layout(
     (layout, None, reference)
 }
 fn resolve_modern(
-    reference: RawReference,
+    reference: Option<RawReference>,
     document: &WldDoc,
     targets: &mut [u64],
     budget: &mut Budget,
 ) -> Result<AssociationStatus, WldAssociationError> {
     use WldAssociationBudget as B;
     use WldAssociationStage as S;
+    let reference = reference.ok_or(WldAssociationError::RequiredModernReferenceInvariant)?;
     let index = match reference {
         RawReference::Name(0) => return Ok(AssociationStatus::NullRequiredReference),
         RawReference::Name(value) if value < 0 => return Ok(AssociationStatus::NamedUnresolved),
         RawReference::Index(value) if value > 0 && value <= i32::MAX as u32 => value,
         _ => return Ok(AssociationStatus::InvalidReferenceRepresentation),
     };
-    let slot = index
-        .checked_sub(1)
-        .ok_or(WldAssociationError::ArithmeticOverflow {
-            counter: B::DocumentSlots,
-            stage: S::ResolveModern,
-        })?;
+    // The matched representation above guarantees a positive index.
+    let slot = index - 1;
     budget.charge(B::LookupAttempts, 1, S::ResolveModern)?;
     budget.document_visit(S::ResolveModern)?;
     let slot = slot as usize;
@@ -699,10 +697,10 @@ fn resolve_modern(
         Some(FragmentType::DmSpriteDef2(_)) => {
             budget.charge(B::ResolvedAssociations, 1, S::ResolveModern)?;
             budget.charge(B::WorkUnits, 1, S::ResolveModern)?;
-            // A successful document lookup bounds this scratch access by D.
+            // Public construction sizes scratch to D; refuse internal disagreement.
             let count = targets
                 .get_mut(slot)
-                .expect("document slot bounds target scratch");
+                .ok_or(WldAssociationError::TargetScratchInvariant)?;
             *count = increment(*count, B::ResolvedAssociations, S::ResolveModern)?;
             AssociationStatus::ResolvedModern { slot: slot as u64 }
         }
@@ -788,7 +786,7 @@ fn classify_ordinal<T>(
             } else if let Some(regions) = regions {
                 let target = regions
                     .get((value - 1) as usize)
-                    .expect("actual Region ordinal bound");
+                    .ok_or(WldAssociationError::RegionOrdinalInvariant)?;
                 OrdinalStatus::InRangeRegion {
                     slot: target.slot,
                     body: target.body,
@@ -966,7 +964,7 @@ mod tests {
             RawReference::Name(i32::MAX),
         ] {
             assert_eq!(
-                resolve_modern(reference, &document, &mut [], &mut budget).unwrap(),
+                resolve_modern(Some(reference), &document, &mut [], &mut budget).unwrap(),
                 AssociationStatus::InvalidReferenceRepresentation
             );
         }
@@ -1150,5 +1148,46 @@ mod tests {
             Err(WldAssociationError::ReservationFailed { .. })
                 | Err(WldAssociationError::ArithmeticOverflow { .. })
         ));
+    }
+    #[test]
+    fn invariant_short_target_scratch_returns_error() {
+        let mut bytes: Vec<u8> = [0x54503d02u32, 0x15500, 1, 0, 0, 0, 0, 96, 0x36]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        bytes.extend([0; 96]);
+        let document = WldDoc::parse(&bytes).unwrap();
+        assert!(matches!(
+            document.at(0),
+            Some(FragmentType::DmSpriteDef2(_))
+        ));
+        // The immutable public inspector sizes scratch to document slots. Force
+        // that private invariant to disagree without fabricating a source failure.
+        let result = resolve_modern(
+            Some(RawReference::Index(1)),
+            &document,
+            &mut [],
+            &mut budget(),
+        );
+        assert_eq!(result, Err(WldAssociationError::TargetScratchInvariant));
+    }
+
+    #[test]
+    fn invariant_region_bound_exceeding_report_slice_returns_error() {
+        // The public inspector derives both from the same completed Region pass.
+        let reference = FragmentRef::<Region>::new(1);
+        let result = classify_ordinal(&reference, 1, Some(&[]), &mut budget());
+        assert_eq!(result, Err(WldAssociationError::RegionOrdinalInvariant));
+    }
+    #[test]
+    fn invariant_missing_required_modern_reference_returns_error() {
+        // region_layout never emits an accepted modern layout without a reference.
+        // Exercise the resolver directly to verify defensive refusal if it did.
+        let mut budget = budget();
+        assert_eq!(
+            resolve_modern(None, &empty_document(), &mut [], &mut budget),
+            Err(WldAssociationError::RequiredModernReferenceInvariant)
+        );
+        assert_eq!(budget.usage, WldAssociationUsage::default());
     }
 }
