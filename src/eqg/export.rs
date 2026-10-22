@@ -95,6 +95,16 @@ pub fn export_preview(scene: &BinaryZoneScene, out: &Path) -> Result<ExportRepor
         matches!(scene.version, 1 | 2),
         "unsupported binary zone version"
     );
+    // Preserve visual refusal for every parsed material, including unused records.
+    for source in &scene.meshes {
+        for (ordinal, material) in source.materials.iter().enumerate() {
+            ensure!(
+                material.shader_offset.is_some(),
+                "{} material {ordinal}: unresolved shader word 0xffffffff",
+                source.source_name
+            );
+        }
+    }
     let mut archive = libeq_pfs::PfsReader::open(File::open(&scene.archive_path)?)?;
     let mut members: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for name in archive.filenames()? {
@@ -221,6 +231,13 @@ pub fn export_preview(scene: &BinaryZoneScene, out: &Path) -> Result<ExportRepor
         let mut primitives = Vec::new();
         for (material_index, indices) in groups {
             let material = &source.materials[material_index];
+            let shader_offset = material.shader_offset.with_context(|| {
+                format!(
+                    "{} material {material_index}: unresolved shader word 0xffffffff",
+                    source.source_name
+                )
+            })?;
+            let shader = string(source, shader_offset)?;
             let name = format!(
                 "{}:{}",
                 source.source_name,
@@ -271,7 +288,6 @@ pub fn export_preview(scene: &BinaryZoneScene, out: &Path) -> Result<ExportRepor
                 report.untextured_materials.push(name.clone());
                 None
             };
-            let shader = string(source, material.shader_offset)?;
             let alpha_mode = if shader == "Chroma_MaxC1.fx" && texture_idx.is_some() {
                 report.cutout_materials.push(name.clone());
                 AlphaMode::Cutout(192)

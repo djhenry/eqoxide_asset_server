@@ -165,7 +165,7 @@ mod tests {
             version: 3,
             string_table: vec![0],
             materials: vec![libeq_eqg::mesh::Material {
-                index: 0, name_offset: 0, shader_offset: 0, properties: vec![],
+                index: 0, name_offset: 0, shader_offset: Some(0), properties: vec![],
             }],
             vertices: [[1., 2., 3.], [2., 2., 3.], [1., 3., 3.]].into_iter()
                 .map(|position| Vertex {

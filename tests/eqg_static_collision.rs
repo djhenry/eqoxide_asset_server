@@ -453,7 +453,7 @@ fn unused_metadata_and_report_groups_are_budgeted() {
     s.meshes[2].materials.push(libeq_eqg::mesh::Material {
         index: 42,
         name_offset: 99,
-        shader_offset: 99,
+        shader_offset: Some(99),
         properties: (0..16)
             .map(|_| libeq_eqg::mesh::Property {
                 name_offset: 99,

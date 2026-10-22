@@ -15,7 +15,7 @@ fn mesh(name: &str, kind: MeshKind) -> ZoneMesh {
         materials: vec![Material {
             index: 42,
             name_offset: 0,
-            shader_offset: 2,
+            shader_offset: Some(2),
             properties: vec![],
         }],
         vertices: [[1., 2., 3.], [4., 2., 4.], [1., 6., 5.]]
@@ -299,7 +299,7 @@ fn primitive_rgba_isolation_preserves_shared_pool_and_source_facts() {
     s.meshes[0].materials.push(Material {
         index: 99,
         name_offset: 0,
-        shader_offset: 2,
+        shader_offset: Some(2),
         properties: vec![],
     });
     s.meshes[0].triangles.push(Triangle {
@@ -440,7 +440,7 @@ fn unresolved_visual_extensions_fail_but_metadata_is_reported() {
 fn malformed_string_slot_and_source_attribute_context_fail_even_unused() {
     let mut s = source();
     s.placements.clear();
-    s.meshes[0].materials[0].shader_offset = 99;
+    s.meshes[0].materials[0].shader_offset = Some(99);
     error(&s, resolved(), "string offset");
     let mut s = source();
     s.model_slots[0] = Some(99);
@@ -701,7 +701,7 @@ fn unused_binding_record_consumes_logical_input_bytes() {
     s.meshes[0].materials.push(Material {
         index: 777,
         name_offset: 0,
-        shader_offset: 2,
+        shader_offset: Some(2),
         properties: vec![],
     });
     fn threshold(s: &BinaryZoneScene, extra: bool) -> usize {
@@ -741,7 +741,7 @@ fn many_unused_bindings_obey_custom_caps_and_rgba_payload_is_charged_once() {
         s.meshes[0].materials.push(Material {
             index: 500 + index,
             name_offset: 0,
-            shader_offset: 2,
+            shader_offset: Some(2),
             properties: vec![],
         });
     }
