@@ -1,6 +1,10 @@
 #[path = "common/wld_associated_terrain_fixture.rs"]
 mod fixture;
-use eqoxide_asset_server::{wld_associated_terrain::*, static_collision::StaticCollisionScene};
+use eqoxide_asset_server::{
+    static_collision::StaticCollisionScene, wld_associated_terrain::*, wld_association::*,
+    wld_collision::*,
+};
+use libeq_wld::parser::WldDoc;
 #[test]
 fn binds_region_document_slots_without_selecting_unassociated_or_filtering_tree() {
     let document = fixture::primary();
@@ -31,6 +35,23 @@ fn binds_region_document_slots_without_selecting_unassociated_or_filtering_tree(
             payload_bytes: 136,
             resource_entries: 4
         }
+    );
+    assert_eq!(result.association_report.regions.len(), 3);
+    let no_modern = &result.association_report.regions[1];
+    assert_eq!(no_modern.slot, 3);
+    assert_eq!(no_modern.association, AssociationStatus::NoModernField);
+    assert_eq!(no_modern.reference, None);
+    assert_eq!(
+        no_modern.legacy_coverage,
+        LegacyCoverage::NoLegacyOrInlineObserved
+    );
+    assert_eq!(result.association_report.scope.no_modern_field_count, 1);
+    assert_eq!(
+        result
+            .association_report
+            .scope
+            .unresolved_region_association_count,
+        0
     );
     assert_eq!(result.normalized.report.faces.retained_faces, 2);
     assert_eq!(
@@ -87,8 +108,6 @@ fn binds_region_document_slots_without_selecting_unassociated_or_filtering_tree(
                 .full_native_query_preparation_applied
     );
 }
-use eqoxide_asset_server::{wld_association::*, wld_collision::*};
-use libeq_wld::parser::WldDoc;
 fn bindings() -> [WldRegionOwnerBinding<'static>; 2] {
     [
         WldRegionOwnerBinding {
@@ -198,7 +217,11 @@ fn anomalous_region_alongside_valid_association_cannot_be_silently_omitted() {
     let mut inline = fixture::region(0x181, 1);
     inline[12..16].copy_from_slice(&1u32.to_le_bytes());
     inline.splice(44..44, [0u8; 12]);
+    let mut inline_no_modern = fixture::region(0x81, 0);
+    inline_no_modern[12..16].copy_from_slice(&1u32.to_le_bytes());
+    inline_no_modern.splice(44..44, [0u8; 12]);
     let cases = [
+        (inline_no_modern, AssociationStatus::NoModernField),
         (vec![], AssociationStatus::UnavailableBody),
         (
             fixture::region(0x40, 0),
@@ -551,16 +574,7 @@ fn zero_and_above_hard_binding_limits_validate_before_inspection() {
                 WldBindingBudget::ResourceEntries => &mut l.binding.resource_entries,
             };
             *f = if above { *f + 1 } else { 0 };
-            if above
-                || matches!(
-                    counter,
-                    WldBindingBudget::Bindings
-                        | WldBindingBudget::PayloadBytes
-                        | WldBindingBudget::ResourceEntries
-                )
-            {
-                l.inspection.document_slots = 0;
-            }
+            l.inspection.document_slots = 0;
             let e = run(&d, &bindings(), &l).unwrap_err();
             assert!(
                 if above {
@@ -604,4 +618,44 @@ fn nested_limits_are_validated_only_before_their_respective_phases() {
         run(&bad, &[], &l),
         Err(WldAssociatedTerrainError::HeaderProfileRefused { .. })
     ));
+}
+
+#[test]
+fn zero_binding_work_refuses_before_inspection() {
+    let document = fixture::primary();
+    let mut limits = WldAssociatedTerrainLimits::default();
+    limits.binding.work_units = 0;
+    limits.inspection.document_slots = 0;
+    assert_eq!(
+        run(&document, &bindings(), &limits).unwrap_err(),
+        WldAssociatedTerrainError::BindingBudgetExceeded {
+            counter: WldBindingBudget::WorkUnits,
+            attempted: 1,
+            limit: 0,
+        }
+    );
+}
+
+#[test]
+fn oversized_supplied_binding_slice_refuses_before_extra_binding_diagnostic() {
+    let document = fixture::primary();
+    let matched = bindings();
+    let extra = [matched[0], matched[1], matched[0]];
+    let mut limits = WldAssociatedTerrainLimits::default();
+    limits.binding.bindings = 2;
+    assert_eq!(
+        run(&document, &extra, &limits).unwrap_err(),
+        WldAssociatedTerrainError::BindingBudgetExceeded {
+            counter: WldBindingBudget::Bindings,
+            attempted: 3,
+            limit: 2,
+        }
+    );
+    assert_eq!(
+        run(&document, &extra, &WldAssociatedTerrainLimits::default()).unwrap_err(),
+        WldAssociatedTerrainError::ExtraBindings {
+            expected: 2,
+            actual: 3
+        }
+    );
 }

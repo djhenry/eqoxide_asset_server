@@ -40,12 +40,13 @@ pub struct WldBindingLimits {
     pub payload_bytes: u64,
     pub resource_entries: u64,
 }
+const MAX_BINDINGS: u64 = 100000;
 impl WldBindingLimits {
     pub const HARD: Self = Self {
-        bindings: 100000,
-        work_units: 300002,
-        payload_bytes: 2400088,
-        resource_entries: 100002,
+        bindings: MAX_BINDINGS,
+        work_units: 2 + 2 * WldAssociationLimits::HARD.region_records + MAX_BINDINGS,
+        payload_bytes: 88 + 24 * MAX_BINDINGS,
+        resource_entries: 2 + MAX_BINDINGS,
     };
 }
 impl Default for WldBindingLimits {
@@ -94,6 +95,8 @@ pub enum WldAssociatedTerrainError {
     BindingArithmeticOverflow { counter: WldBindingBudget },
     #[error("binding selection reservation failed")]
     BindingReservationFailed,
+    #[error("association report and binding traversal counts disagree")]
+    AssociationReportBindingCountInvariant,
     #[error("header profile refused: {gate:?}, {agreement:?}")]
     HeaderProfileRefused {
         gate: StoredRegionCountGate,
@@ -165,8 +168,9 @@ impl Budget {
 /// Binding slots are zero-based Region document slots in resolved Region order. Owner tokens
 /// and source context are passed verbatim to the normalizer; neither ownership nor source
 /// identity is verified. Tree diagnostics never filter selection. Errors expose no partial result.
-/// Binding limits validate before inspection; nested limits validate before their respective
-/// phases. Parsing and upstream allocation/panic caveats remain outside these limits.
+/// Binding limits and initial binding charges are checked before inspection; nested limits
+/// validate before their respective phases. Inspector work has its own limits. Parsing and
+/// upstream allocation/panic caveats remain outside these limits.
 pub fn normalize_associated_wld_terrain(
     input: WldAssociatedTerrainInput<'_>,
     limits: &WldAssociatedTerrainLimits,
@@ -208,9 +212,9 @@ pub fn normalize_associated_wld_terrain(
     budget.charge(B::Bindings, supplied)?;
     budget.charge(B::PayloadBytes, 64)?;
     budget.charge(B::ResourceEntries, 1)?;
+    budget.charge(B::WorkUnits, 1)?;
     let association_report =
         inspect_wld_terrain_associations(input.document, limits.inspection, None)?;
-    budget.charge(B::WorkUnits, 1)?;
     let header = association_report.header;
     if header.stored_region_count_gate != StoredRegionCountGate::Nonzero
         || header.region_count_agreement != CountAgreement::Equal
@@ -279,12 +283,44 @@ pub fn normalize_associated_wld_terrain(
     selections
         .try_reserve_exact(input.bindings.len())
         .map_err(|_| WldAssociatedTerrainError::BindingReservationFailed)?;
+    append_selections(
+        &association_report.regions,
+        input.bindings,
+        &mut selections,
+        &mut budget,
+    )?;
+    let normalized = normalize_selected_wld_terrain(
+        WldTerrainInput {
+            document: input.document,
+            source_context: input.source_context,
+            selections: &selections,
+        },
+        &limits.normalization,
+    )?;
+    Ok(WldAssociatedTerrain {
+        association_report,
+        normalized,
+        binding_usage: budget.usage,
+    })
+}
+// The public caller passes an empty Vec already reserved for every binding.
+// Checked binding access bounds pushes to that precharged capacity.
+fn append_selections<'a>(
+    regions: &[RegionObservation],
+    bindings: &[WldRegionOwnerBinding<'a>],
+    selections: &mut Vec<WldTerrainSelection<'a>>,
+    budget: &mut Budget,
+) -> Result<(), WldAssociatedTerrainError> {
+    use WldBindingBudget as B;
+    let overflow = |counter| WldAssociatedTerrainError::BindingArithmeticOverflow { counter };
     let mut binding_index = 0;
-    for region in &association_report.regions {
+    for region in regions {
         budget.charge(B::WorkUnits, 1)?;
         if let AssociationStatus::ResolvedModern { slot } = region.association {
             budget.charge(B::WorkUnits, 1)?;
-            let binding = &input.bindings[binding_index];
+            let binding = bindings
+                .get(binding_index)
+                .ok_or(WldAssociatedTerrainError::AssociationReportBindingCountInvariant)?;
             if u64::try_from(binding.region_slot).map_err(|_| overflow(B::Bindings))? != region.slot
             {
                 return Err(WldAssociatedTerrainError::WrongRegionSlot {
@@ -301,20 +337,15 @@ pub fn normalize_associated_wld_terrain(
             binding_index += 1;
         }
     }
-    let normalized = normalize_selected_wld_terrain(
-        WldTerrainInput {
-            document: input.document,
-            source_context: input.source_context,
-            selections: &selections,
-        },
-        &limits.normalization,
-    )?;
-    Ok(WldAssociatedTerrain {
-        association_report,
-        normalized,
-        binding_usage: budget.usage,
-    })
+    if binding_index != bindings.len() {
+        return Err(WldAssociatedTerrainError::AssociationReportBindingCountInvariant);
+    }
+    Ok(())
 }
+
+#[cfg(test)]
+#[path = "../tests/common/wld_associated_terrain_fixture.rs"]
+mod fixture;
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,5 +365,67 @@ mod tests {
             })
         );
         assert_eq!(b.usage.work_units, u64::MAX);
+    }
+    fn binding_budget() -> Budget {
+        Budget {
+            limits: WldBindingLimits::HARD,
+            usage: WldBindingUsage::default(),
+        }
+    }
+
+    #[test]
+    fn inconsistent_resolved_rows_cannot_overrun_pre_reserved_selection_capacity() {
+        let document = fixture::primary();
+        let report =
+            inspect_wld_terrain_associations(&document, WldAssociationLimits::default(), None)
+                .unwrap();
+        let bindings = [WldRegionOwnerBinding {
+            region_slot: 2,
+            owner_id: "a",
+        }];
+        let mut selections = Vec::with_capacity(bindings.len());
+        let capacity = selections.capacity();
+        let result = append_selections(
+            &report.regions,
+            &bindings,
+            &mut selections,
+            &mut binding_budget(),
+        );
+        assert_eq!(
+            result,
+            Err(WldAssociatedTerrainError::AssociationReportBindingCountInvariant)
+        );
+        assert_eq!(selections.len(), 1);
+        assert_eq!(selections.capacity(), capacity);
+    }
+
+    #[test]
+    fn inconsistent_resolved_rows_cannot_leave_unconsumed_bindings() {
+        let document = fixture::primary();
+        let report =
+            inspect_wld_terrain_associations(&document, WldAssociationLimits::default(), None)
+                .unwrap();
+        let bindings = [
+            WldRegionOwnerBinding {
+                region_slot: 2,
+                owner_id: "a",
+            },
+            WldRegionOwnerBinding {
+                region_slot: 5,
+                owner_id: "c",
+            },
+        ];
+        let mut selections = Vec::with_capacity(bindings.len());
+        let result = append_selections(
+            &report.regions[..2],
+            &bindings,
+            &mut selections,
+            &mut binding_budget(),
+        );
+        assert_eq!(
+            result,
+            Err(WldAssociatedTerrainError::AssociationReportBindingCountInvariant)
+        );
+        assert_eq!(selections.len(), 1);
     }
 }
