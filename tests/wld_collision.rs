@@ -1006,3 +1006,63 @@ fn contributing_owners_keep_distinct_meshes_and_independently_charged_histograms
         );
     }
 }
+
+#[test]
+fn canonical_source_frames_decode_quantization_before_world_units() {
+    let mesh = MeshFixture {
+        exponent: 2,
+        ..Default::default()
+    };
+    let doc = document(&[(0x9999, vec![]), (0x36, mesh.bytes(false))], false);
+    let normalized = normalize(&doc);
+    assert!(!normalized.report.ownership_verified);
+    assert!(!normalized.report.world_complete);
+    assert!(!normalized.report.full_native_query_preparation_applied);
+    assert_eq!(normalized.report.owners[0].exponent, 2);
+    let StaticCollisionScene::Available { meshes, instances } = &normalized.scene else {
+        panic!()
+    };
+    assert_eq!(
+        meshes[0].positions,
+        [[-19., 9.5, 1.5], [-19., 11.5, 1.5], [-17.5, 9.5, 1.5]]
+    );
+    assert_eq!(instances[0].matrix, glam::Mat4::IDENTITY.to_cols_array_2d());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("canonical.glb");
+    let requirements = write_static_collision_with_query_units(
+        &normalized.scene,
+        &"d".repeat(64),
+        InspectionQueryPolicy::FrontFaces,
+        QueryUnitFrames::DeclaredCanonical,
+        &path,
+        &CollisionWriteLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        requirements.capabilities,
+        [
+            CANONICAL_QUERY_UNIT_FRAMES_CAPABILITY,
+            "static-collision-triangles-v1"
+        ]
+    );
+    let (doc, buffers, _) = gltf::import(&path).unwrap();
+    let node = doc.nodes().next().unwrap();
+    assert_eq!(
+        node.transform().matrix(),
+        glam::Mat4::IDENTITY.to_cols_array_2d()
+    );
+    let positions: Vec<_> = node
+        .mesh()
+        .unwrap()
+        .primitives()
+        .next()
+        .unwrap()
+        .reader(|b| Some(&buffers[b.index()]))
+        .read_positions()
+        .unwrap()
+        .collect();
+    assert_eq!(
+        positions,
+        [[-19., 1.5, -9.5], [-19., 1.5, -11.5], [-17.5, 1.5, -9.5]]
+    );
+}

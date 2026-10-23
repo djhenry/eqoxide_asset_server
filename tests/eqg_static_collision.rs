@@ -644,3 +644,100 @@ fn zero_candidate_owners_do_not_hide_nonfinite_or_invalid_matrices() {
     s.placements[0].scale = 0.;
     refuses(&s, &owners(), "positive scale");
 }
+
+#[test]
+fn canonical_source_frames_keep_model_locals_and_shared_instance_scale() {
+    use eqoxide_asset_server::static_collision::*;
+    let mut s = source();
+    s.placements.push(ZonePlacement {
+        position: [-3., 7., 11.],
+        rotation: [std::f32::consts::FRAC_PI_2, 0., 0.],
+        scale: 0.5,
+        ..placement()
+    });
+    let mut o = owners();
+    o.placements.insert(
+        1,
+        PlacementOwner::Include {
+            owner_id: "second-owner".into(),
+        },
+    );
+    let b = build(&s, &o);
+    assert!(!b.report.ownership_verified);
+    assert!(!b.report.world_complete);
+    let StaticCollisionScene::Available { meshes, instances } = &b.scene else {
+        panic!()
+    };
+    let local = [[2., 1., 3.], [2., 4., 4.], [6., 1., 5.]];
+    assert_eq!(meshes[0].positions, local);
+    assert_eq!(meshes[1].positions, local);
+    assert_eq!(instances[0].matrix, Mat4::IDENTITY.to_cols_array_2d());
+    assert_eq!(instances[1].mesh_index, instances[2].mesh_index);
+    assert_eq!(
+        instances[1].matrix,
+        [
+            [2., 0., 0., 0.],
+            [0., 2., 0., 0.],
+            [0., 0., 2., 0.],
+            [-20., 10., 5., 1.]
+        ]
+    );
+    let second = [
+        [0., -0.5, 0., 0.],
+        [0.5, 0., 0., 0.],
+        [0., 0., 0.5, 0.],
+        [7., -3., 11., 1.],
+    ];
+    for (actual, want) in instances[2]
+        .matrix
+        .iter()
+        .flatten()
+        .zip(second.iter().flatten())
+    {
+        assert!((actual - want).abs() < 0.000001);
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("canonical.glb");
+    let requirements = write_static_collision_with_query_units(
+        &b.scene,
+        &"c".repeat(64),
+        InspectionQueryPolicy::FrontFaces,
+        QueryUnitFrames::DeclaredCanonical,
+        &path,
+        &CollisionWriteLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        requirements.capabilities,
+        [
+            CANONICAL_QUERY_UNIT_FRAMES_CAPABILITY,
+            "static-collision-triangles-v1"
+        ]
+    );
+    let (doc, buffers, _) = gltf::import(&path).unwrap();
+    for mesh in doc.meshes() {
+        let positions: Vec<_> = mesh
+            .primitives()
+            .next()
+            .unwrap()
+            .reader(|b| Some(&buffers[b.index()]))
+            .read_positions()
+            .unwrap()
+            .collect();
+        assert_eq!(positions, [[2., 3., -1.], [2., 4., -4.], [6., 5., -1.]]);
+    }
+    let nodes: Vec<_> = doc.nodes().collect();
+    assert_eq!(
+        nodes[1].transform().matrix(),
+        [
+            [2., 0., 0., 0.],
+            [0., 2., 0., 0.],
+            [0., 0., 2., 0.],
+            [-20., 5., -10., 1.]
+        ]
+    );
+    assert_eq!(
+        nodes[1].mesh().unwrap().index(),
+        nodes[2].mesh().unwrap().index()
+    );
+}

@@ -43,6 +43,16 @@ Preflight checks selected records, indexes and raw face eligibility, reserves al
 
 ## Output boundary
 
-Contributing records become indexed meshes with identity instances in the common collision scene. The WLD frontend maps source coordinates to server `(Y, X, Z)` and preserves source winding; the common writer then applies its asset-axis rotation. Query-unit frames remain unspecified in this first bridge. The client uses the existing shared GLB role/package decoders with no WLD-specific behavior.
+Contributing records become indexed meshes with identity instances in the common collision scene. The WLD frontend maps source coordinates to server `(Y, X, Z)` and preserves source winding; the common writer then applies its asset-axis rotation. The normalizer itself does not declare query-unit frames; callers choose the existing common writer mode. The client uses the existing shared GLB role/package decoders with no WLD-specific behavior.
 
 The `wld_collision_fixture` example writes authored mixed, empty and deliberately inconsistent packages for CPU inspection. These fixtures exercise the real parser, normalizer, writer, descriptor and manifest APIs; they are not a native-zone conversion command or proof of gameplay fidelity.
+
+```sh
+cargo run --locked --offline --example wld_collision_fixture -- OUTPUT_DIRECTORY [--canonical-query-units]
+```
+
+Without the flag, query-unit frames remain unspecified. The optional flag declares canonical query-unit frames and adds exactly `static-collision-query-unit-frames-v1` to the collision requirements; the descriptor and manifest propagate those requirements. Missing output, misplaced, unknown, duplicate or trailing options refuse before output is written. The disagreement package remains deliberately inconsistent and must be refused by the package decoder.
+
+The authored `wld-selected-passed-record-query-frames-v1` profile assumes selected records use source world units after decoding each position as `raw * 2^-exponent + center`. This example explicitly uses exponent 2 and a nonzero center, then the documented axis conversion, with identity source instances; shared fixture defaults are unchanged. Mode and profile version participate in its deterministic bake identity alongside source, selection and normalization policy. Both modes preserve geometry and diagnostic truth flags; known-empty output remains JSON-only.
+
+The declaration is conditional on those passed-record units. It does not verify source history, complete terrain membership, WLD actors, full native preparation or numerical query agreement. It adds no discovery, lighting, query operation, online publication or gameplay activation.

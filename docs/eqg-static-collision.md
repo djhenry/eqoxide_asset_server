@@ -37,9 +37,13 @@ The common writer and reader independently enforce their own artifact limits. Pa
 ## Synthetic artifact inspection
 
 ```sh
-cargo run --locked --offline --example eqg_collision_fixture -- OUTPUT_DIRECTORY
+cargo run --locked --offline --example eqg_collision_fixture -- OUTPUT_DIRECTORY [--canonical-query-units]
 ```
 
-The example uses authored raw records and stable identities, calls the actual adapter and common writer, and produces `collision.glb` plus legal JSON-only `empty.glb`. Nonempty data includes asymmetric indexed terrain and shared object instances, including an underground owner. Its front/both policy values are reserved metadata; the geometry requirements contain only `static-collision-triangles-v1`.
+The example uses authored raw records and stable identities, calls the actual adapter and common writer, and produces `collision.glb` plus legal JSON-only `empty.glb`. Nonempty data includes asymmetric indexed terrain and shared object instances, including an underground owner. Its front/both policy values are reserved metadata. With no flag, query-unit frames remain unspecified and the geometry requirements contain only `static-collision-triangles-v1`. The optional flag declares canonical query-unit frames and adds exactly `static-collision-query-unit-frames-v1`. Missing output, misplaced, unknown, duplicate or trailing options refuse before output is written.
+
+The authored `eqg-passed-record-query-frames-v1` profile assumes terrain records already use source world units and model records use source local units. Model-local positions stay unchanged apart from the documented axis conversion; positive placement scale stays in each referring instance matrix. The mode and profile version participate in the deterministic fixture bake identity. Both modes preserve the same geometry, ownership, candidate scope and face-policy metadata; known-empty output remains JSON-only.
+
+This is a conditional declaration over the passed records. It does not establish their source history, complete source membership, native preparation or numerical query agreement. It adds no source discovery, lighting, query operation, online publication or gameplay activation.
 
 The client `eqoxide-assets` example `static_collision_probe` can decode these artifacts and inspect owners, policy and indexed world bounds. That is CPU source-to-format acceptance. It does not perform a segment query, verify a paired package or establish gameplay readiness. Real-source corpus coverage, stable importer registries, native actor exclusions and representative server landmarks remain separate acceptance gates.
