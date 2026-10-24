@@ -16,3 +16,5 @@ pub mod lighting;
 pub mod static_collision;
 
 pub mod terrain_hierarchy;
+
+pub mod terrain_neighbors;
