@@ -15,7 +15,9 @@ The following preparation facts were checked against the native RoF2 client:
 | Seam operation | Copies an east neighbor's first column to the current last column, then a north neighbor's first row to the current last row of working heights | Averaging all borders or inventing a corner owner is not established |
 | Hierarchical refinement | Flags or child requests can force splitting. Otherwise, for finite comparison operands, the error test requests a split only when deviation exceeds tolerance; equality alone does not request one | Zero tolerance does not guarantee a fully split topology |
 | Index representation | Full-grid indexing shares the same refinement passes as compact indexing | Full-grid indexing is not a maximum-detail override |
-| Initial controls | The tessellator constructor initializes global tolerance to `1.0`; tile override state initially selects that global value | The final outer load/quality-setting order has not been verified |
+| Initial controls | Ordinary project loading explicitly reinitializes global tolerance to `1.0` before loading tiles; fresh tile override state selects that global value | Transitive resource-callback effects and later quality-setting behavior remain unverified |
+
+Emission scans internal nodes in ascending index order, processing the first tree and then the second at each index. A split node emits a retained unsplit odd child before a retained unsplit even child, in each child's stored corner order. Unsplit internal nodes still write working midpoint heights even when a coarser ancestor covers them. Replacing that scan with recursive traversal or skipping covered descendants is not established as equivalent.
 
 Preparation can interpolate unused working midpoint heights and regenerate diagonal bits from emitted triangles. Different raw and working buffers do not by themselves prove different final surfaces: interpolated points might lie on the same emitted surface. Exact equivalence remains unproved.
 
@@ -30,7 +32,7 @@ Target the actual initial-load preparation first, without forcing detail or chan
 1. Admit the complete concrete tile set using the loader's membership and coordinate rules, with bounded counts and explicit source/resource identities. Start with packed DAT v20 and `q = 32` as the limited geometry proof target. The broader positive dimensions accepted by the raw parser do not imply geometry-profile support.
 2. Initialize working heights from raw heights and preserve initial quad flags. Retain the complete neighbor context; do not treat a missing required input as a proven outside boundary.
 3. Reproduce the ordered seam pass, then the ordered preparation pass with self/east/north/northeast contexts, cached split state and dependency propagation.
-4. Establish the actual outer control initialization. Constructor tolerance `1.0` is a candidate input until that ordering is verified; it is not a claimed universal final setting.
+4. Preserve the verified load-time reset to tolerance `1.0`, then establish any intervening changes before preparation. The reset is an actual outer-load action, not only a constructor assumption; it does not certify every callback or later quality setting.
 5. Reproduce the hierarchy, emission, working-height stores and diagonal regeneration with a stated numerical contract. Capture the appropriate render stream and prepared collision stream, comparing their surfaces rather than assuming equality or difference.
 6. Convert verified results into the common coordinate basis once. Preserve canonical query units and the existing visual/collision component roles and pairing. Separate geometry is permitted if the proof requires it; sharing geometry requires evidence.
 
@@ -40,8 +42,8 @@ This candidate neither selects a deliberately forced full-detail policy nor intr
 
 - Verify exact hierarchy neighbor links, emitted corner ordering, holes and dependency propagation, including missing outer neighbors and repeated preparation state.
 - Verify loader tile membership, source-order versus preparation-order rules, duplicate coordinates and incomplete input refusal. Establish the geometry dimension domain rather than inferring it from the raw parser.
-- Verify floating-point evaluation and stored-value boundaries. Widened arithmetic, ordinary `f32` arithmetic and native extended intermediates must not be assumed interchangeable at refinement thresholds.
-- Verify outer load/quality initialization and mode-specific height-buffer selection. Do not call a constructor default the active profile without tracing its caller.
+- Verify floating-point evaluation, ambient precision/rounding controls and stored-value boundaries. The error calculation has no intermediate `f32` store between endpoint addition, halving, midpoint subtraction and comparison. Finite `f32` inputs therefore do not establish that rounding each operation to `f32` is equivalent. Bind the actual arithmetic state before certifying threshold behavior.
+- Verify remaining intervening callback/quality effects and mode-specific height-buffer selection. The explicit load-time reset does not certify a universal active profile or rule out later changes.
 - Freeze independent expected prepared heights, indices and flags for asymmetric noncoplanar fixtures, exact-threshold ties, holes, forced-detail source bits, mismatched shared borders and corner cases. Include resource/work limits and explicit unsupported inputs.
 - Compare render and collision surfaces and preserve any verified difference in their respective common components. Test winding after basis conversion; decoding success is not a query or movement certificate.
 
