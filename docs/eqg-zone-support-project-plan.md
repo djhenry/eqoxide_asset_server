@@ -340,6 +340,8 @@ new manifests are emitted by this assessment slice.
 
 **Dependencies:** M1 resource resolution, M2 shared scene/export infrastructure, and M3 publication contracts.
 
+The [initial-load terrain preparation candidate](eqg-terrain-preparation-design.md), tracked in [issue #100](https://github.com/djhenry/eqoxide_asset_server/issues/100), separates raw DAT decoding from the working surface supplied to native collision. It defines the remaining bake-side proof gates without assuming a runtime client capability is necessary.
+
 - [ ] Parse project metadata including project name, bounds, units per vertex, quads per tile, coverage/layer sizes, and version.
 - [ ] Contribute reusable project/DAT parsing to `libeq_eqg`; keep project resource resolution and terrain rendering policy in this repository.
 - [ ] Resolve DAT resources by project references. Distinguish terrain data from auxiliary files such as water and exclusion data.
