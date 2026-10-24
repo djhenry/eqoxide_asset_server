@@ -338,6 +338,8 @@ new manifests are emitted by this assessment slice.
 
 **Integer topology prerequisite:** `eqg::terrain_hierarchy::Q32Hierarchy` constructs the two ordered triangle trees for a fixed 32-by-32-quad tile, with bounded fallible allocation and checked node/leaf-quad lookup ([issue #102](https://github.com/djhenry/eqoxide_asset_server/issues/102)). Tests cover corner ordering, index boundaries, clockwise unit triangles and complete quad coverage. This helper does not prepare heights, refine triangles, link neighbors, produce a GLB or activate a bake route; the full preparation profile and native surface agreement remain unverified.
 
+**Neighbor topology prerequisite:** `eqg::terrain_neighbors::Q32Neighbors` provides the immutable four-context neighbor template ([issue #104](https://github.com/djhenry/eqoxide_asset_server/issues/104)). Its complete edge graph is checked against geometric edge matching at each hierarchy depth, including the roots' distinct child rule. An edge outside the template window is distinct from an invalid lookup and says nothing about actual source-tile availability. Prepared-state reuse, split propagation, numerical rules and final surfaces remain separate work; this helper activates no bake or query route.
+
 **Files:** Add `src/eqg/terrain.rs`, `src/eqg/material.rs`, and `src/eqg/object_group.rs`; extend `src/eqg/regions.rs`, `src/zone_scene.rs`, and build dispatch; add `tests/eqg_terrain.rs` and `tests/eqg_object_groups.rs`.
 
 **Dependencies:** M1 resource resolution, M2 shared scene/export infrastructure, and M3 publication contracts.
