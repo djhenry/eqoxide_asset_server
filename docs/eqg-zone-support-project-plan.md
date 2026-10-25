@@ -346,6 +346,8 @@ new manifests are emitted by this assessment slice.
 
 **Files:** Add `src/eqg/terrain.rs`, `src/eqg/material.rs`, and `src/eqg/object_group.rs`; extend `src/eqg/regions.rs`, `src/zone_scene.rs`, and build dispatch; add `tests/eqg_terrain.rs` and `tests/eqg_object_groups.rs`.
 
+**Conditional arithmetic prerequisite:** `eqg::terrain_arithmetic` models finite-input midpoint and deviation operations with 53-bit significand rounding toward zero ([issue #106](https://github.com/djhenry/eqoxide_asset_server/issues/106)). The allocation-free integer implementation preserves intermediate rounding and signed zeros without changing the host floating-point mode; nonfinite operands return explicit errors. This is a value-only conditional model, not proof of the arithmetic mode active at every native terrain entry. It selects no bake profile, admits no source dataset and activates no output or query route.
+
 **Dependencies:** M1 resource resolution, M2 shared scene/export infrastructure, and M3 publication contracts.
 
 - [ ] Parse project metadata including project name, bounds, units per vertex, quads per tile, coverage/layer sizes, and version.

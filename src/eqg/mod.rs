@@ -22,3 +22,5 @@ pub mod terrain_neighbors;
 pub mod terrain_dependencies;
 
 pub mod terrain_leaf_states;
+
+pub mod terrain_arithmetic;
