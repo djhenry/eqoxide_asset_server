@@ -14,3 +14,5 @@ pub mod static_scene;
 pub mod lighting;
 
 pub mod static_collision;
+
+pub mod terrain_arithmetic;
