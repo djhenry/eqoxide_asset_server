@@ -342,6 +342,8 @@ new manifests are emitted by this assessment slice.
 
 **Dependency-state prerequisite:** `eqg::terrain_dependencies::propagate_once` performs one ordered, in-place sweep over optional q32 split-state views ([issue #108](https://github.com/djhenry/eqoxide_asset_server/issues/108)). Tests pin target and parent writes, reserved slot zero, raw-byte normalization, missing views and the difference between one sweep and repeated closure. The helper allocates no memory and does not interpret prepared-cache markers. Caller-seeded state tests do not establish full preparation reachability, source admission or native surface agreement; no bake or query route is enabled.
 
+**Leaf-state prerequisite:** `eqg::terrain_leaf_states::seed_if_unprepared` initializes a supplied q32 state view before error evaluation ([issue #110](https://github.com/djhenry/eqoxide_asset_server/issues/110)). It preserves nonzero prepared views and reserved state bytes, clears unprepared active states, and seeds leaf omissions and immediate-parent requests from quad flags. An explicitly absent flag view still clears states; it is not a metadata fallback. Tests cover flag precedence, unrelated bits and asymmetric leaf-to-quad mapping. The helper does not mark a view prepared, propagate further splits, evaluate errors, admit source datasets or enable an output route.
+
 **Files:** Add `src/eqg/terrain.rs`, `src/eqg/material.rs`, and `src/eqg/object_group.rs`; extend `src/eqg/regions.rs`, `src/zone_scene.rs`, and build dispatch; add `tests/eqg_terrain.rs` and `tests/eqg_object_groups.rs`.
 
 **Dependencies:** M1 resource resolution, M2 shared scene/export infrastructure, and M3 publication contracts.
