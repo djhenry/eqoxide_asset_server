@@ -24,3 +24,5 @@ pub mod terrain_dependencies;
 pub mod terrain_leaf_states;
 
 pub mod terrain_arithmetic;
+
+pub mod terrain_split_stage;
