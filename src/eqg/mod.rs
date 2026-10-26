@@ -30,3 +30,5 @@ pub mod terrain_split_stage;
 pub mod terrain_emission;
 
 pub mod terrain_preparation;
+
+pub mod terrain_initial_load;
