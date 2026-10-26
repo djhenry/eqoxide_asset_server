@@ -1,75 +1,71 @@
-# Shared material arithmetic and lighting policy
+# Shared material policy: standard glTF and editable assets
 
-Status: proposal for owner scope review. Tracks [issue #65](https://github.com/djhenry/eqoxide_asset_server/issues/65), [asset-format project #51](https://github.com/djhenry/eqoxide_asset_server/issues/51) and [client project #1126](https://github.com/djhenry/eqoxide/issues/1126). This document changes no runtime behavior or publication capability.
+Status: owner-directed design revision, not implemented runtime support. Tracks [interoperability revision #122](https://github.com/djhenry/eqoxide_asset_server/issues/122), [material policy #65](https://github.com/djhenry/eqoxide_asset_server/issues/65), [asset-format project #51](https://github.com/djhenry/eqoxide_asset_server/issues/51) and [client project #1126](https://github.com/djhenry/eqoxide/issues/1126). No publication capability changes in this document.
 
-## Purpose and current boundary
+## Decision and purpose
 
-Both original source families and authored enhancements must use one material contract. Source shader selection, packed-color interpretation and lighting dependency discovery belong in the bake. Runtime behavior must depend on declared operations and capabilities, never archive family or native shader names.
+The owner prioritizes assets that people can modify, enhance and replace with open tools, including Blender. Use standard glTF 2.0 materials and tested Khronos extensions for the common visual format. Both original source families and newly authored content follow that format. Source interpretation and supported conversion belong in the bake; the client does not dispatch on archive family or native shader names.
 
-The existing [static visual contract](static-visual-contract.md) supports normalized material RGBA, optional full vertex RGBA, embedded textures, ordinary multiplication and opaque/mask/blend coverage. The renderer uses neutral unlit inspection. The [geometry bridge](eqg-static-geometry.md) requires resolved inputs; it does not resolve native material or lighting behavior.
+This supersedes the earlier recommendation for a required `EQOXIDE_materials_rgb_combine` extension and its proposed `material-rgb-combine-v1` capability. Do not implement either as the default material path. The previous neutral-versus-native-lighting scope question is superseded by this interoperability priority. It does not authorize arbitrary visual loss or a complete lighting bake.
 
-Current glTF base-color texture RGB is decoded from sRGB before computation. Factors and `COLOR_0` are linear multipliers; their alpha is linear coverage. That is defined by the [glTF material specification](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#materials). A native operation on normalized stored RGB codes is a different working space, not an alternative source format the client should detect.
+Use direct standard mappings where they are valid. For static effects that need conversion, evaluate baking to ordinary textures and UVs with explicit quality and resource limits. Refuse unsupported effects rather than silently substituting a plausible material. If acceptable fidelity requires an engine-specific operation, return with measured examples and the compatibility cost before adopting it.
 
-## Findings that change the next step
+## Current implementation boundary
 
-The traced native static paths distinguish three inputs: material tint, independent precomputed lighting, and normals. Original mesh RGBA supplies material tint for some passes and is unused by others. Lighting RGB and its environment-light weight occupy a separate stream. That weight is not surface opacity.
+The existing [static visual contract](static-visual-contract.md) transports material RGBA, optional vertex RGBA, embedded textures, multiplication and opaque/mask/blend coverage. The inspector applies neutral unlit rendering as a viewer override; the writer does not yet declare `KHR_materials_unlit`. That override is not a portable material definition. The [geometry bridge](eqg-static-geometry.md) requires resolved inputs and does not resolve native shading or lighting.
 
-Some passes amplify and clamp the texture/tint product before applying lighting. Static evidence and documented [D3D9 sampler defaults](https://learn.microsoft.com/en-us/windows/win32/direct3d9/d3dsamplerstatetype) and [render-state defaults](https://learn.microsoft.com/en-us/windows/win32/direct3d9/d3drenderstatetype) support normalized-code RGB arithmetic in the selected ordinary installed paths. This is not a captured live device-state proof. Gamma adjustment is separate; final gamma options, fog, mip/sampler behavior and complete lighting equivalence are not certified.
+The current inspection profile also retains 16-bit PNG samples. Core glTF base-color textures use 8-bit channels. Existing precision support must not be silently removed: portable delivery needs an explicit conversion and its own acceptance, while high-precision originals remain authoring inputs. This revision does not claim that today's writer, decoder or renderer already satisfies the proposed portable profile.
 
-Consequently, adding only a gain operation to today's linear renderer is insufficient to claim native fidelity. Putting all packed source RGBA into ordinary vertex tint is also incorrect. No investigated complete shader family has been certified as equivalent to ordinary unlit linear glTF through a general static bake.
+Production advertisements remain unchanged until the package loader, renderer and publication gates actually support the selected fields and extensions. A valid GLB or a manifest capability declaration alone is not proof of eqoxide support.
 
-Two scalar examples show why operation order belongs in a shared renderer capability:
+## Portable visual material profile
 
-- Texture `0.8`, vertex multiplier `0.8`, factor `1`, gain `2`: clamping their complete product gives `1`. Amplifying/clamping the texture first then multiplying by the vertex gives `0.8`.
-- A pre-lighting product of `1.2` and lighting `0.5`: clamping before lighting gives `0.5`; putting lighting inside that clamp gives `0.6`.
+Start with a deliberately small supported subset, then extend it through measured interoperability tests:
 
-These examples are algebraic acceptance cases, not native screenshot measurements. Moving a nonlinear operation to vertices also changes interpolation. Changing texture decoding changes filtering; decoding after a filtered sample does not reproduce filtering already-decoded texels.
+| Input or intent | Standard representation | Boundary |
+| --- | --- | --- |
+| Surface geometry and tint | Mesh positions, normals, UVs, `COLOR_0`, base-color texture and factor | Preserve coordinate and color meanings; source packed lighting is not automatically vertex tint |
+| Coverage and sidedness | `alphaMode`, `alphaCutoff`, `doubleSided`, independently composed alpha | Preserve OPAQUE, MASK and BLEND semantics; do not infer coverage from lighting weights |
+| Authored lit surfaces | Core metallic-roughness PBR fields and standard normal, occlusion and emissive inputs | Admit each feature only after producer, client and tool acceptance; missing source parameters are not evidence of a physically accurate mapping |
+| Explicit unlit inspection or authored unlit surfaces | Ratified `KHR_materials_unlit` with ordinary base-color inputs | Does not reproduce native lighting or fog; retain the author's unlit intent |
+| Additional static source effects | Validated texture/UV conversion into the supported standard profile | Record approximation, resolution, precision and instance costs; unsupported is explicit |
 
-## Recommendation and scope choice
+The [glTF material specification](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#materials) defines texture transfer, linear factors/vertex colors and alpha behavior. Do not repurpose these fields to transport encoded native RGB operations or light weights. Preserve straight alpha; an RGB bake must not accidentally bake opacity into color or apply tint twice.
 
-Proceed in two independently useful stages:
+For unlit materials, use the [Khronos extension definition](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_unlit). Declare it in `extensionsUsed`; also declare it in `extensionsRequired` when the artifact requires unlit interpretation. A core-PBR fallback may be optional only when its different lighting behavior is deliberately accepted and reported. Exact inspection fixtures require unlit support. An eqoxide inspection-only override for a PBR asset must remain visibly identified as an override, not exported as the asset's intended appearance.
 
-1. Add a raw lighting-data reader and dependency diagnostics. Preserve lighting facts without applying them or treating their alpha as opacity. This can proceed without selecting a visual approximation.
-2. After owner approval, implement a small shared RGB-arithmetic capability for **neutral material inspection**. Keep native lighting, fog and full sampler parity as later capabilities. State the preview context explicitly; do not advertise it as native appearance or production/gameplay readiness.
+Blender's [glTF importer/exporter](https://github.com/KhronosGroup/glTF-Blender-IO/blob/main/docs/blender_docs/scene_gltf2.rst) is the initial authoring interoperability target. Use its supported glTF material arrangements, not arbitrary Blender shader graphs. Pin the tested Blender version and export settings in acceptance evidence. A standard feature or extension is not automatically supported just because Blender or glTF defines it; the allowed set must match tested producer and client behavior.
 
-The alternative is to require native-like lighting before using native materials through the unified preview. That needs per-instance lighting association, additional GPU streams or storage, environment/point-light evaluation, sampling and transfer calibration, and independent native reference captures. It preserves a stronger fidelity target but substantially enlarges the first material milestone. A fixed reference-light bake is another useful inspection profile, but cannot replace changing runtime illumination.
+## What a bake can and cannot preserve
 
-Approval of the unified architecture does not choose between those visual scopes. Neutral lighting is a deliberate preview approximation requiring the owner's decision; full lighting is a broader renderer project. Unknown effects still fail or produce an explicit unsupported result under either choice.
+The inspected native static paths distinguish material tint, independent precomputed lighting and normals. Some passes amplify and clamp texture/tint RGB before applying lighting, potentially in normalized stored RGB code space. Static evidence is not a captured live-device-state proof; gamma, fog, sampler behavior and complete lighting equivalence remain unverified. Lighting RGB and its environment-light weight are separate from surface opacity.
 
-## Proposed neutral RGB capability
+These scalar examples demonstrate the conversion problem, rather than native screenshot agreement:
 
-Use one typed RGB operation, not a shader graph. Preserve today's multiplication as the unchanged default. The first additional operation evaluates a complete product with gain `1` or `2`, then clamps RGB. Gain does not affect alpha, cutoffs or coverage.
+- Texture `0.8`, vertex multiplier `0.8`, gain `2`: clamping the complete product gives `1`; clamping the amplified texture first and then multiplying by the vertex gives `0.8`.
+- Product `1.2`, lighting `0.5`: clamp before lighting gives `0.5`; including lighting inside the clamp gives `0.6`.
 
-The operation declares its working space:
+Nonlinear operations do not generally commute with interpolation, texture filtering or color transfer. Baking vertex-dependent effects may need new UVs and texture atlases. A finite texture samples an effect; it does not guarantee identical results at every pixel, distance, mip level or camera angle. A fixed-light bake cannot reproduce changing illumination. Ordinary metallic-roughness PBR is also not a general substitute for the original shading model.
 
-| Mode | Texture upload/filtering | Vertex/factor processing | Output |
-| --- | --- | --- | --- |
-| Linear | Decode texture RGB before filtering, as today | Interpolate linear vertex RGB; keep factor linear | Linear RGB to the existing sRGB target |
-| sRGB code | Filter normalized encoded texture RGB | Encode supplied linear vertex RGB in the vertex stage, before interpolation; encode the constant linear factor | Decode the resulting encoded RGB before the existing sRGB target |
+Keep material conversion and lighting scope distinct. The first portable inspection fixtures can be unlit to isolate material conversion, explicitly without native lighting or fog. Keep any future reference-lit bake separately labeled and preserve its lighting inputs apart from editable albedo. Do not permanently merge native light streams into the only retained color source. Native-like runtime lighting remains a separate fidelity project; it must not require different client paths for EQG and older content.
 
-For code mode, the bake converts a supplied normalized code-space tint into linear transport values before writing standard factor/vertex fields. The shader's inverse transform recovers those code values within the chosen floating-point tolerance before interpolation/product. This keeps the stored standard fields' linear meaning and avoids substituting `encode(interpolate(linear))` for `interpolate(encode(linear))`. It is an explicit operation definition, not a claim that native lighting weights are sRGB colors.
+Every converted material must have a report distinguishing direct mapping, measured approximation and unsupported input. Before enabling an approximation, define its reference context, color management, error metric/tolerance and comparison views; record resolution, image depth, filtering/mips, UV changes and material/instance expansion. Bound bake memory, time, output size and GPU texture cost. Unknown or unmeasured loss is not successful resolution. Consequential visual loss or a large asset-size increase goes back to the owner with concrete comparisons.
 
-Code-mode vertex colors must use FLOAT accessors; normalized integer `COLOR_0` is refused for this first profile. Low decoded values can disappear when quantized to normalized bytes, so core glTF's otherwise legal compact color encodings are not interchangeable for this transport. Material factors use the existing float conversion. Reference cases include all 256 normalized byte codes, interpolation across the transfer breakpoint and the lowest nonzero code. Render comparisons use a documented per-channel tolerance; no bit-exact native rendering claim follows from a reversible real-number formula.
+## Editable authoring and delivery
 
-Alpha remains `textureAlpha * vertexAlpha * factorAlpha`, evaluated independently. MASK survives at or above its normalized cutoff. The first code-space implementation accepts only OPAQUE and MASK. Native-style encoded-space blending cannot be reproduced by simply sending decoded source RGB through today's linear blending stage; BLEND needs a separately defined operation. Linear-mode blending retains its current behavior.
+Retain original/high-precision texture inputs and separate material/lighting facts for rebaking. Deliver portable base-color textures at the standard channel depth through an explicit, tested color/precision conversion; decide quantization and any dithering from acceptance results. Do not overwrite the original images or downgrade the existing reader in this documentation change.
 
-The initial inspection profile uses lighting constant one, fog disabled, repeating bilinear filtering and mip level zero only. It applies no display gamma ramp. These are explicit preview choices matching the current inspector, not certifications of native sampler, fog or lighting equivalence. Unsupported source shading, extra layers, required UV1, animation, additive operations, lighting and render overrides remain explicit. Resolved inputs must not silently acquire white tint or opaque classification.
+Offer an editable export with `.gltf`, external images and buffers, alongside a packaged delivery `.glb`. These are two packagings of the same supported visual semantics, not two source-family runtime formats. A native `.blend` authoring convenience may be added later; it is not required to define the runtime contract. Newly authored PBR or unlit replacements should not need native shader emulation.
 
-These choices also support enhanced legacy content. They are intentionally shared numeric/transfer operations; source-qualified provenance stays in the conversion report.
+Give authors stable semantic identities and document the supported edit/reimport path. Blender export may reorder or split geometry and materials, alter names or indices, and discard unknown metadata. Do not promise byte-identical GLB round trips or preservation of arbitrary node graphs, `extras` or extensions. Reimport must validate supported content and rebuild affected conversion reports, hashes and component pairing; ambiguous identity changes require explicit remapping, not guessed matching.
 
-## Encoding and compatibility
+Visual interoperability is distinct from collision and package semantics. Engine metadata can remain in the existing documented contract or companion records, without making material appearance depend on it. Editing visible geometry does not automatically update collision, regions or canonical query-unit frames. A package with stale visual/collision pairing must refuse activation until rebuilt and validated. This decision does not loosen the agreed collision transform restrictions or introduce a Blender-specific gameplay format.
 
-Recommend a required, eqoxide-defined glTF extension for this operation, plus the existing manifest/artifact capability gate. The proposed name is `EQOXIDE_materials_rgb_combine`. Its version-1 object requires `version: 1`, `operation: "gain_saturate"`, `gain: 1` or `2`, and `workingSpace: "linear"` or `"srgb_code"`. Version and gain use unsigned JSON integer tokens; decimal/exponent spellings such as `1.0` are refused rather than rounded into a discrete selector. This is an explicit application encoding rule, not a claim about JSON Schema's mathematical integer type. Unknown fields fail. Version 1 fixes the neutral inspection profile just described. No registered Khronos extension is claimed.
+## Compatibility and migration
 
-Declare it in both `extensionsUsed` and `extensionsRequired` whenever needed. The [glTF extension rules](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#specifying-extensions) require that relationship. Standard fields remain unchanged; extension parameters specify the additional operation. Unknown versions, fields, modes, gains or inconsistent declarations fail before payload activation.
+Reuse the existing versioned manifest, artifact requirements and client capability checks. Do not add the abandoned RGB-combine requirement for this profile or change the meaning of an existing requirement to imply newly implemented PBR/unlit support. Introduce a new requirement/revision when actual supported semantics demand it; incompatible clients must fail explicitly. The project's pre-release policy permits requiring an updated client, with a coordinated rollout.
 
-Retain reader contract 2/schema 1 for an additive capability and require `material-rgb-combine-v1`, alongside the existing baseline and vertex-RGBA requirement when used. Old reader-2 builds already reject unknown required capabilities. Do not redefine `static-visual-v1` or treat reader version as a minimum application release number. Capability metadata changes the existing compatibility revision.
-
-This choice has an external-tool cost: tools without the extension cannot faithfully render it. Application `extras` alone would be simpler, but general viewers could ignore the operation and show a misleading approximation. Tools may still be used for geometry inspection when they explicitly support that mode; ordinary material viewing is not a fidelity check.
-
-The current eqoxide inspection profile also retains 16-bit PNG sample precision; core glTF's base-color image rule is 8-bit. Treat this as an engine-specific GLB profile rather than assuming full general-viewer conformance. The new code-space upload must derive from retained original sample depth, including 16-bit input, without an RGBA8 intermediate; budget float preparation before allocating it. This proposal does not remove existing precision support.
-
-Production advertisements remain reader 1/legacy until the package loader, renderer and complete publication gates actually support the selected scope. The isolated inspector may support the operation first. A manifest capability declaration alone is not runtime support.
+A future client may support more standard glTF features, but it must declare only what it implements. Inspection overrides must not conceal an unsupported required extension. Ordinary tools may render standard visual content without understanding engine-specific collision or package metadata; that does not make their output an immediately valid game package.
 
 ## Raw lighting data and association
 
@@ -83,11 +79,11 @@ Per-instance lighting can differ while geometry remains shared. The current glob
 
 ## Implementation and acceptance order
 
-- Independently implement and mutation-test the bounded raw container reader with synthetic fixtures. Keep provider resolution and source interpretation outside libeq; native-dependent corpus checks remain opt-in.
-- Approve the visual scope and required-extension strategy, then finalize the numeric schema and sampling profile. No material resolver should claim unsupported native behavior is resolved.
-- Implement typed producer/CPU/GPU operations and capability cross-checks with source-independent fixtures. Budget each GPU texture variant by texture identity and working space; sharing one image across modes does not make duplicate uploads free.
-- Verify clipping boundaries, perspective interpolation, filtering gradients, code/linear round trips, independent alpha, unchanged baseline, and explicit rejection of code-mode blending and unknown features. Gain-before-clamp and lighting-after-clamp must discriminate intentional mutations.
-- Author and independent reviewer each render their own fixture in CPU/GPU/live inspection, including negative controls and truthful capability/readiness failures.
-- Resolve selected source families under the approved inspection profile, report omissions, then perform independent real-zone/reference acceptance. Native material, lighting, collision and gameplay readiness remain distinct gates.
+1. Inventory the common writer, client loaders and renderer against the portable subset. Identify current differences, including unlit override and image depth, before changing advertisements. Raw lighting readers/diagnostics remain useful without applying lighting; keep source interpretation and provider selection outside libeq.
+2. Create small source-independent fixtures for directly mapped materials and explicit `KHR_materials_unlit`. Check the Khronos glTF validator and pinned Blender import, edit, export and reimport, then the actual eqoxide decoder and renderer. First establish the tooling path without claiming new source-family shading coverage.
+3. Verify geometry, UVs, normals, vertex tint, alpha modes/non-default cutoff, sidedness, instance transforms and material assignments across that round trip. Compare under controlled lighting and color management. Validator success alone does not establish matching appearance. Include metadata loss/reordering, unsupported-extension and stale-pairing negative controls.
+4. Implement the missing shared producer/consumer semantics with capability checks. Author and independent reviewer each validate their own fixtures; include CPU assertions, rendered comparisons and mutation-discriminating regression checks where behavior changes. Do not advertise unfinished PBR or unlit support.
+5. Evaluate source-specific static conversions against declared references and budgets, retaining editable inputs and reporting loss. Enable only accepted mappings/approximations; unresolved effects stay unsupported. Use the same output profile for enhanced older content.
+6. Validate representative actual assets through the supported authoring workflow, packaging, delivery and client. Material fidelity, lighting, collision and gameplay remain distinct acceptance gates. Human review remains required before every merge.
 
-No new bake/client behavior, material approximation, production advertisement or merge is authorized by this proposal. Human review remains required before every merge.
+This is a design revision only: no new bake, renderer, package publication or readiness claim is implemented here.
