@@ -356,3 +356,150 @@ fn full_content_and_selected_names_bind_identity_without_unused_namespace_data()
     assert_ne!(a.descriptor_hash, d.descriptor_hash);
     assert_eq!(a.dat_hash, d.dat_hash);
 }
+
+#[test]
+fn raw_coordinate_words_are_signed_bits_with_independent_admission_bounds() {
+    use eqoxide_asset_server::eqg::terrain_initial_load::InitialLoadError;
+    for coordinate in [[-1, -2], [-200000, 200000], [200000, -200000]] {
+        let bytes = dat(&[(coordinate, 1.0, 0)]);
+        let out = prepare_explicit_project_53rz(
+            descriptor(PROJECT),
+            &[provider(&bytes)],
+            &SourceLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(out.dat.tiles()[0].coordinates, coordinate.map(|v| v as u32));
+        assert_eq!(out.prepared[0].coordinate(), coordinate);
+    }
+    for coordinate in [[i32::MIN, 0], [0, i32::MAX], [-200001, 0], [0, 200001]] {
+        let bytes = dat(&[(coordinate, 1.0, 0)]);
+        assert!(matches!(prepare_explicit_project_53rz(
+            descriptor(PROJECT), &[provider(&bytes)], &SourceLimits::default(),
+        ), Err(SourceError::Load(InitialLoadError::Coordinate { coordinate: actual })) if actual == coordinate));
+    }
+}
+
+#[test]
+fn last_units_assignment_is_applied_to_a_nonempty_source() {
+    let bytes = dat(&[([0, 0], 2.0, 0)]);
+    for (fields, expected) in [
+        ("*UNITSPERVERT 7 *UNITSPERVERT 5.00", 5.0),
+        ("*UNITSPERVERT 5.00 *UNITSPERVERT 7", 7.0),
+    ] {
+        let project = format!("EQTZP *NAME Custom *QUADSPERTILE 32 {fields}");
+        let out = prepare_explicit_project_53rz(
+            descriptor(project.as_bytes()),
+            &[provider(&bytes)],
+            &SourceLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(out.metadata.units.value, expected);
+        assert_eq!(out.metadata.tile_width, expected * 32.0);
+        assert_eq!(out.prepared.len(), 1);
+        assert_eq!(out.prepared[0].heights()[0][0], 2.0);
+    }
+}
+
+#[test]
+fn exact_name_and_raw_token_boundaries_do_not_change_resource_matching() {
+    let bytes = dat(&[([0, 0], 1.0, 0)]);
+    let name = "a".repeat(128);
+    let project = format!("EQTZP *NAME {name} *QUADSPERTILE 32 *UNITSPERVERT 5");
+    let resource_name = format!("{name}.dat");
+    let out = prepare_explicit_project_53rz(
+        descriptor(project.as_bytes()),
+        &[NamedSource {
+            name: resource_name.as_bytes(),
+            bytes: &bytes,
+        }],
+        &SourceLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(out.dat_name, resource_name.as_bytes());
+    assert_eq!(out.prepared.len(), 1);
+    let too_long = format!("EQTZP *NAME {name}b *QUADSPERTILE 32 *UNITSPERVERT 5");
+    assert!(matches!(
+        prepare_explicit_project_53rz(
+            descriptor(too_long.as_bytes()),
+            &[],
+            &SourceLimits::default()
+        ),
+        Err(SourceError::Metadata { key: "*NAME", .. })
+    ));
+    for (length, valid) in [(255, true), (256, false)] {
+        let project = format!(
+            "EQTZP *NAME Custom *QUADSPERTILE 32 *UNITSPERVERT 5 *MINLNG {}",
+            "0".repeat(length)
+        );
+        let result = prepare_explicit_project_53rz(
+            descriptor(project.as_bytes()),
+            &[provider(&bytes)],
+            &SourceLimits::default(),
+        );
+        if valid {
+            assert_eq!(result.unwrap().metadata.unmodeled_values, 1);
+        } else {
+            assert!(matches!(
+                result,
+                Err(SourceError::Metadata { key: "*MINLNG", .. })
+            ));
+        }
+    }
+}
+
+#[test]
+fn unmodeled_value_errors_name_the_actual_directive() {
+    let bytes = dat(&[]);
+    for (directive, prefix) in [
+        ("*MINLNG", ""),
+        ("*MAXLAT", ""),
+        ("*COVERMAPINPUTSIZE", ""),
+        ("*MAX_EXTENTS", "0 0 "),
+    ] {
+        let project = format!(
+            "EQTZP *NAME Custom *QUADSPERTILE 32 *UNITSPERVERT 5 {directive} {prefix}{}",
+            "x".repeat(256)
+        );
+        let offset = project.rfind('x').unwrap() - 255;
+        assert!(
+            matches!(prepare_explicit_project_53rz(descriptor(project.as_bytes()),
+            &[provider(&bytes)], &SourceLimits::default()),
+            Err(SourceError::Metadata { key, offset: actual, .. }) if key == directive && actual == offset)
+        );
+    }
+}
+
+#[test]
+fn source_identity_is_content_not_an_acceptance_or_prepared_output_cache_key() {
+    let bytes = dat(&[([0, 0], 1.0, 0)]);
+    let a = prepare_explicit_project_53rz(
+        descriptor(PROJECT),
+        &[provider(&bytes)],
+        &SourceLimits::default(),
+    )
+    .unwrap();
+    let mut relaxed = SourceLimits::default();
+    relaxed.max_namespace_bytes += 1;
+    relaxed.preparation.max_triangles += 1;
+    let b =
+        prepare_explicit_project_53rz(descriptor(PROJECT), &[provider(&bytes)], &relaxed).unwrap();
+    assert_eq!(a.source_id, b.source_id);
+    assert_eq!(a.prepared[0].triangles(), b.prepared[0].triangles());
+    relaxed.max_namespace_bytes = bytes.len() - 1;
+    assert!(matches!(
+        prepare_explicit_project_53rz(descriptor(PROJECT), &[provider(&bytes)], &relaxed),
+        Err(SourceError::Budget {
+            resource: "namespace bytes",
+            ..
+        })
+    ));
+    let empty = dat(&[]);
+    let out = prepare_explicit_project_53rz(
+        descriptor(PROJECT),
+        &[provider(&empty)],
+        &SourceLimits::default(),
+    )
+    .unwrap();
+    assert!(out.prepared.is_empty());
+    assert!(out.dat.tiles().is_empty());
+}

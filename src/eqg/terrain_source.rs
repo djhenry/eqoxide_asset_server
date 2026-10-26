@@ -67,6 +67,9 @@ pub struct Metadata<'a> {
 /// descriptor bytes, selected DAT name and DAT bytes, each with LE-u64 length.
 /// It identifies supplied content, not archive authenticity, provider
 /// completeness, complete-zone coverage or a native arithmetic certificate.
+/// Limits and unused namespace entries are not hashed. This is not a cache key
+/// for acceptance or prepared output: callers must revalidate their limits and
+/// bind any cached result to its preparation policy and implementation revision.
 #[derive(Debug)]
 pub struct SourceDiagnostic<'a> {
     pub descriptor_name: &'a [u8],
@@ -145,6 +148,8 @@ pub enum SourceError {
 /// scheduling, fixed controls and conditional 53RZ come from the load model.
 /// Fallible allocations and private ownership make late refusal atomic. Empty
 /// counted input yields an empty supplied-source diagnostic, not a usable zone.
+/// Decoded inputs remain allocated alongside the load model's owned snapshots;
+/// tile/triangle limits are not a total-memory or process-RSS bound.
 /// No source resolver, world-position conversion, material/GLB/query route or
 /// full-content/native-mode/surface-equivalence certificate is enabled.
 pub fn prepare_explicit_project_53rz<'a>(
@@ -188,13 +193,9 @@ pub fn prepare_explicit_project_53rz<'a>(
         });
     }
     let metadata = metadata(project)?;
-    let mut requested = [0u8; 132];
-    let length = metadata.name.value.len();
-    requested[..length].copy_from_slice(metadata.name.value);
-    requested[length..length + 4].copy_from_slice(b".dat");
     let mut matches = resources
         .iter()
-        .filter(|r| r.name == &requested[..length + 4]);
+        .filter(|r| r.name.strip_suffix(b".dat") == Some(metadata.name.value));
     let selected = matches.next().ok_or(SourceError::MissingDat)?;
     if matches.next().is_some() {
         return Err(SourceError::AmbiguousDat);
@@ -212,26 +213,30 @@ pub fn prepare_explicit_project_53rz<'a>(
             bytes: dat.trailing_data().len(),
         });
     }
+    let mut input = Vec::new();
+    input.try_reserve_exact(dat.tiles().len())?;
     for (tile, source) in dat.tiles().iter().enumerate() {
-        for (vertex, bytes) in source.grid_bytes[0].as_chunks::<4>().0.iter().enumerate() {
-            if !decode_height(bytes).is_finite() {
+        let mut heights = [[0.0; 33]; 33];
+        for (vertex, (height, bytes)) in heights
+            .iter_mut()
+            .flatten()
+            .zip(source.grid_bytes[0].as_chunks::<4>().0)
+            .enumerate()
+        {
+            *height = decode_height(bytes);
+            if !height.is_finite() {
                 return Err(SourceError::NonFiniteHeight { tile, vertex });
             }
         }
-    }
-    let mut input = Vec::new();
-    input.try_reserve_exact(dat.tiles().len())?;
-    for tile in dat.tiles() {
         input.push(super::terrain_initial_load::Q32TileInput {
-            coordinate: tile.coordinates.map(|word| word as i32),
-            heights: std::array::from_fn(|y| {
-                std::array::from_fn(|x| {
-                    let start = 4 * (33 * y + x);
-                    decode_height(&tile.grid_bytes[0][start..start + 4])
-                })
-            }),
+            // Raw words preserve signed two's-complement source coordinates;
+            // the load model independently checks its diagnostic admission bound.
+            coordinate: source
+                .coordinates
+                .map(|word| i32::from_le_bytes(word.to_le_bytes())),
+            heights,
             flags: std::array::from_fn(|y| {
-                tile.quad_bytes[32 * y..32 * (y + 1)]
+                source.quad_bytes[32 * y..32 * (y + 1)]
                     .try_into()
                     .expect("fixed q32 row")
             }),
@@ -369,15 +374,16 @@ fn metadata<'a>(project: terrain_project::Project<'a>) -> Result<Metadata<'a>, S
             b"*QUADSPERTILE" => ("*QUADSPERTILE", 1),
             b"*UNITSPERVERT" => ("*UNITSPERVERT", 1),
             b"*VERSION" => ("*VERSION", 1),
-            b"*MINLNG"
-            | b"*MAXLNG"
-            | b"*MINLAT"
-            | b"*MAXLAT"
-            | b"*COLORMAPINPUTSIZE"
-            | b"*COVERMAPINPUTSIZE"
-            | b"*LAYERINGMAPINPUTSIZE"
-            | b"*COVERAGEMAPINPUTSIZE" => ("unmodeled scalar", 1),
-            b"*MIN_EXTENTS" | b"*MAX_EXTENTS" => ("unmodeled extents", 3),
+            b"*MINLNG" => ("*MINLNG", 1),
+            b"*MAXLNG" => ("*MAXLNG", 1),
+            b"*MINLAT" => ("*MINLAT", 1),
+            b"*MAXLAT" => ("*MAXLAT", 1),
+            b"*COLORMAPINPUTSIZE" => ("*COLORMAPINPUTSIZE", 1),
+            b"*COVERMAPINPUTSIZE" => ("*COVERMAPINPUTSIZE", 1),
+            b"*LAYERINGMAPINPUTSIZE" => ("*LAYERINGMAPINPUTSIZE", 1),
+            b"*COVERAGEMAPINPUTSIZE" => ("*COVERAGEMAPINPUTSIZE", 1),
+            b"*MIN_EXTENTS" => ("*MIN_EXTENTS", 3),
+            b"*MAX_EXTENTS" => ("*MAX_EXTENTS", 3),
             _ => {
                 return Err(SourceError::UnknownDirective {
                     offset: token.byte_offset,
