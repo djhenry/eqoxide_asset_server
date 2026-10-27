@@ -1,10 +1,12 @@
 use eqoxide_asset_server::eqg::{
     terrain_hierarchy::Q32Hierarchy,
     terrain_initial_load::{
-        prepare_initial_load_53rz, InitialLoadError, Q32LoadLimits, Q32TileInput,
+        prepare_initial_load_53rz, InitialLoadError, Q32LoadLimits, Q32PreparedTile, Q32TileInput,
     },
+    terrain_leaf_states::Q32QuadFlags,
     terrain_neighbors::Q32Neighbors,
-    terrain_preparation::{prepare_self_53rz, Q32WorkingView},
+    terrain_preparation::{prepare_self_53rz, PreparationError, Q32WorkingView},
+    terrain_split_stage::SplitPreparationError,
 };
 
 fn tile(coordinate: [i32; 2], height: f32) -> Q32TileInput {
@@ -189,6 +191,7 @@ fn late_refusal_keeps_all_input_bits_and_reports_actual_update() {
         prepare_initial_load_53rz(&input, &limits()),
         Err(InitialLoadError::Preparation {
             coordinate: [9, 9],
+            context_coordinate: Some([9, 9]),
             ..
         })
     ));
@@ -240,4 +243,212 @@ fn actual_empty_emission_fits_zero_triangle_budget() {
     .unwrap();
     assert!(output[0].triangles().is_empty());
     assert_eq!(output[0].flags(), &[[0x7f; 32]; 32]);
+}
+
+#[test]
+fn neighbor_failure_display_labels_update_and_working_context() {
+    let mut input = vec![tile([4, 6], 0.0), tile([5, 6], 0.0)];
+    input[1].heights[16][16] = f32::from_bits(0x7fc0_1234);
+    let error = prepare_initial_load_53rz(&input, &limits()).unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            InitialLoadError::Preparation {
+                coordinate: [4, 6],
+                source: PreparationError::Split(SplitPreparationError::Height { context: 1, .. }),
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    let text = error.to_string();
+    assert!(
+        text.contains("update [4, 6]") && text.contains("working context Some([5, 6])"),
+        "{text}"
+    );
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct InputBits {
+    coordinate: [i32; 2],
+    heights: [[u32; 33]; 33],
+    flags: Q32QuadFlags,
+}
+
+fn input_bits(input: &[Q32TileInput]) -> Vec<InputBits> {
+    input
+        .iter()
+        .map(|t| InputBits {
+            coordinate: t.coordinate,
+            heights: t.heights.map(|r| r.map(f32::to_bits)),
+            flags: t.flags,
+        })
+        .collect()
+}
+
+fn assert_snapshots_equal(a: &[Q32PreparedTile], b: &[Q32PreparedTile]) {
+    assert_eq!(a.len(), b.len());
+    for (a, b) in a.iter().zip(b) {
+        assert_eq!(a.coordinate(), b.coordinate());
+        assert_eq!(
+            a.heights().map(|r| r.map(f32::to_bits)),
+            b.heights().map(|r| r.map(f32::to_bits))
+        );
+        assert_eq!(a.flags(), b.flags());
+        assert_eq!(a.states(), b.states());
+        assert_eq!(a.prepared(), b.prepared());
+        assert_eq!(a.triangles(), b.triangles());
+    }
+}
+
+#[test]
+fn used_interior_nan_identifies_each_working_context_without_changing_inputs() {
+    let coordinates = [[4, 6], [5, 6], [4, 7], [5, 7]];
+    for context in 0..4 {
+        for present in 0u8..8 {
+            if context != 0 && present & (1 << (context - 1)) == 0 {
+                continue;
+            }
+            // Preceding storage and absent slots must not renumber working contexts.
+            let mut input = vec![tile([-20, -20], 0.0), tile(coordinates[0], 0.0)];
+            for (neighbor, coordinate) in coordinates.iter().enumerate().skip(1) {
+                if present & (1 << (neighbor - 1)) != 0 {
+                    input.push(tile(*coordinate, 0.0));
+                }
+            }
+            let failing = input
+                .iter_mut()
+                .find(|t| t.coordinate == coordinates[context])
+                .unwrap();
+            failing.heights[16][16] = f32::from_bits(0x7fc0_1234 + context as u32);
+            for _ in 0..input.len() {
+                let before = input_bits(&input);
+                let error = prepare_initial_load_53rz(&input, &limits()).unwrap_err();
+                let text = error.to_string();
+                let nested = std::error::Error::source(&error)
+                    .expect("preparation source is retained")
+                    .to_string();
+                let InitialLoadError::Preparation {
+                    coordinate,
+                    context_coordinate,
+                    source,
+                } = error
+                else {
+                    panic!("expected preparation failure: {text}");
+                };
+                assert_eq!(coordinate, [4, 6], "{text}");
+                assert_eq!(context_coordinate, Some(coordinates[context]), "{text}");
+                assert!(
+                    matches!(source, PreparationError::Split(SplitPreparationError::Height {context: actual, ..}) if actual == context),
+                    "{source:?}"
+                );
+                assert_eq!(nested, source.to_string());
+                assert!(text.contains("update [4, 6]") && text.contains("working context"));
+                assert_eq!(before, input_bits(&input));
+                input.rotate_left(1);
+            }
+        }
+    }
+}
+
+#[test]
+fn copied_boundary_nan_reports_failing_self_view_not_original_sample_owner() {
+    let mut input = vec![tile([4, 6], 0.0), tile([5, 6], 0.0)];
+    input[1].heights[0][0] = f32::from_bits(0x7fc0_abcd);
+    let before = input_bits(&input);
+    let error = prepare_initial_load_53rz(&input, &limits()).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            InitialLoadError::Preparation {
+                coordinate: [4, 6],
+                context_coordinate: Some([4, 6]),
+                source: PreparationError::Split(SplitPreparationError::Height { context: 0, .. }),
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(before, input_bits(&input));
+}
+
+#[test]
+fn sparse_seams_preserve_raw_north_corner_without_direct_northeast_copy() {
+    // Cases are east-only, north-only, NE-only and an L with east absent.
+    for (present, right, top, corner) in [
+        ([true, false, false], 10.0, 0.0, 456.0),
+        ([false, true, false], 0.0, 20.0, 123.0),
+        ([false, false, true], 0.0, 0.0, 0.0),
+        ([false, true, true], 0.0, 20.0, 123.0),
+    ] {
+        let mut tiles = [
+            tile([0, 0], 0.0),
+            tile([1, 0], 10.0),
+            tile([0, 1], 20.0),
+            tile([1, 1], 30.0),
+        ];
+        for t in &mut tiles {
+            t.flags = [[4; 32]; 32];
+        }
+        tiles[1].heights[32][0] = 456.0;
+        tiles[2].heights[0][32] = 123.0;
+        tiles[3].heights[0][0] = 789.0;
+        let mut input = vec![tiles[0].clone()];
+        for (i, include) in present.into_iter().enumerate() {
+            if include {
+                input.push(tiles[i + 1].clone());
+            }
+        }
+        let before = input_bits(&input);
+        let output = prepare_initial_load_53rz(&input, &limits()).unwrap();
+        let first = &output[0];
+        assert_eq!(first.coordinate(), [0, 0]);
+        assert_eq!(first.heights()[12][32], right, "{present:?}");
+        assert_eq!(first.heights()[32][12], top, "{present:?}");
+        assert_eq!(first.heights()[32][32], corner, "{present:?}");
+        if present == [false, true, true] {
+            let north = output.iter().find(|t| t.coordinate() == [0, 1]).unwrap();
+            assert_eq!(north.heights()[0][32], 789.0);
+            assert_ne!(first.heights()[32][32], north.heights()[0][32]);
+        }
+        assert_eq!(before, input_bits(&input));
+        input.reverse();
+        let reversed_before = input_bits(&input);
+        let reversed = prepare_initial_load_53rz(&input, &limits()).unwrap();
+        assert_snapshots_equal(&output, &reversed);
+        assert_eq!(reversed_before, input_bits(&input));
+    }
+}
+
+#[test]
+fn identical_and_separated_duplicate_pairs_are_refused_in_any_input_order() {
+    for mut input in [
+        vec![tile([0, 1], 7.0), tile([0, 1], 7.0)],
+        vec![tile([0, 1], 7.0), tile([1, 0], 9.0), tile([0, 1], 7.0)],
+        vec![tile([0, 1], 7.0), tile([1, 0], 9.0), tile([0, 1], 11.0)],
+    ] {
+        for _ in 0..input.len() {
+            let before = input_bits(&input);
+            assert!(matches!(
+                prepare_initial_load_53rz(&input, &limits()),
+                Err(InitialLoadError::Duplicate { coordinate: [0, 1] })
+            ));
+            assert_eq!(before, input_bits(&input));
+            input.rotate_left(1);
+        }
+    }
+}
+
+#[test]
+fn tile_budget_precedes_coordinate_and_duplicate_validation() {
+    for input in [
+        vec![tile([200001, 0], 0.0)],
+        vec![tile([0, 0], 0.0), tile([0, 0], 0.0)],
+    ] {
+        let before = input_bits(&input);
+        assert!(
+            matches!(prepare_initial_load_53rz(&input, &Q32LoadLimits {max_tiles: 0, ..limits()}),
+            Err(InitialLoadError::TileLimit { requested, limit: 0 }) if requested == input.len())
+        );
+        assert_eq!(before, input_bits(&input));
+    }
 }

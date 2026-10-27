@@ -10,7 +10,7 @@ use super::{
     terrain_leaf_states::Q32QuadFlags,
     terrain_neighbors::Q32Neighbors,
     terrain_preparation::{prepare_self_53rz, PreparationError, Q32WorkingView},
-    terrain_split_stage::Q32HeightGrid,
+    terrain_split_stage::{Q32HeightGrid, SplitPreparationError},
 };
 
 /// One decoded input in source-grid XY coordinates. Input order is immaterial;
@@ -23,7 +23,13 @@ pub struct Q32TileInput {
 }
 
 /// Logical output budgets, excluding caller inputs, allocator overhead and RSS.
-/// Triangle usage is charged from actual emissions before compact reservation.
+/// Triangle usage is charged from actual emissions before compact reservation,
+/// after the current tile's bounded preparation and emission. The bound per
+/// update is [`Q32Emission::MAX_TRIANGLES`](super::terrain_emission::Q32Emission::MAX_TRIANGLES).
+/// A triangle budget does not bound preparation work or skip the whole-set
+/// working-copy/seam setup. Tile admission is checked before coordinates and
+/// duplicates; these logical budgets are not a total-memory guarantee.
+#[derive(Debug, Clone)]
 pub struct Q32LoadLimits {
     pub max_tiles: usize,
     pub max_triangles: usize,
@@ -101,12 +107,37 @@ pub enum InitialLoadError {
         requested: usize,
         limit: usize,
     },
-    #[error("preparation failed at {coordinate:?}: {source}")]
+    #[error("preparation failed during update {coordinate:?}; failing working context {context_coordinate:?}: {source}")]
     Preparation {
+        /// Coordinate of the self update that requested preparation.
         coordinate: [i32; 2],
+        /// Coordinate of the failing working view, not original sample provenance.
+        /// Seam copies can transfer samples between views before preparation.
+        /// Unknown or absent context indices are preserved as `None`, without
+        /// substituting the update coordinate; `source` retains the raw context.
+        context_coordinate: Option<[i32; 2]>,
         #[source]
         source: PreparationError,
     },
+}
+
+fn preparation_failure(
+    coordinate: [i32; 2],
+    contexts: [Option<[i32; 2]>; 4],
+    source: PreparationError,
+) -> InitialLoadError {
+    let context = match source {
+        PreparationError::Split(
+            SplitPreparationError::Height { context, .. }
+            | SplitPreparationError::Tolerance { context, .. },
+        ) => context,
+        PreparationError::Midpoint(_) => 0,
+    };
+    InitialLoadError::Preparation {
+        coordinate,
+        context_coordinate: contexts.get(context).copied().flatten(),
+        source,
+    }
 }
 
 /// Prepare the entire supplied set in signed ascending X, then Y order.
@@ -207,6 +238,7 @@ pub fn prepare_initial_load_53rz(
             find(&tiles, [x, y + 1]),
             find(&tiles, [x + 1, y + 1]),
         ];
+        let context_coordinates = indices.map(|index| index.map(|index| tiles[index].coordinate));
         let mut ordered = std::array::from_fn::<_, 4, _>(|context| {
             (indices[context].unwrap_or(usize::MAX), context)
         });
@@ -233,7 +265,7 @@ pub fn prepare_initial_load_53rz(
                 self_view.as_mut().expect("present self"),
                 &mut [east, north, northeast],
             )
-            .map_err(|source| InitialLoadError::Preparation { coordinate, source })?
+            .map_err(|source| preparation_failure(coordinate, context_coordinates, source))?
         };
         let count = emission.triangles().len();
         if count > limits.max_triangles.saturating_sub(total) {
@@ -248,4 +280,64 @@ pub fn prepare_initial_load_53rz(
         tiles[i].triangles.extend_from_slice(emission.triangles());
     }
     Ok(tiles)
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+    use crate::eqg::{
+        terrain_arithmetic::NonFiniteOperand, terrain_emission::MidpointError,
+        terrain_split_stage::ToleranceField,
+    };
+
+    // Synthetic errors exercise mapping arms not selected by fixed load controls.
+    #[test]
+    fn phase_mapping_retains_source_and_never_invents_absent_contexts() {
+        let contexts = [Some([4, 6]), Some([5, 6]), None, Some([5, 7])];
+        for (source, expected) in [
+            (
+                PreparationError::Split(SplitPreparationError::Tolerance {
+                    context: 3,
+                    field: ToleranceField::Local,
+                }),
+                Some([5, 7]),
+            ),
+            (
+                PreparationError::Midpoint(MidpointError {
+                    tree: 1,
+                    node: 11,
+                    operand: NonFiniteOperand::SecondEndpoint,
+                }),
+                Some([4, 6]),
+            ),
+            (
+                PreparationError::Split(SplitPreparationError::Tolerance {
+                    context: 2,
+                    field: ToleranceField::Override,
+                }),
+                None,
+            ),
+            (
+                PreparationError::Split(SplitPreparationError::Height {
+                    context: usize::MAX,
+                    tree: 0,
+                    node: 7,
+                    operand: NonFiniteOperand::MidpointSample,
+                }),
+                None,
+            ),
+        ] {
+            let InitialLoadError::Preparation {
+                coordinate,
+                context_coordinate,
+                source: actual,
+            } = preparation_failure([4, 6], contexts, source)
+            else {
+                panic!("expected preparation error")
+            };
+            assert_eq!(coordinate, [4, 6]);
+            assert_eq!(context_coordinate, expected);
+            assert_eq!(actual, source);
+        }
+    }
 }
