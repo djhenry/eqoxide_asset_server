@@ -2,7 +2,7 @@
 
 This is the proposed first runtime boundary for [issue #86](https://github.com/djhenry/eqoxide_asset_server/issues/86), refining the [membership investigation](wld-terrain-membership-inspection.md). It is a specification for human review, not an implemented API or an implementation plan. It neither selects geometry nor emits GLB. The existing source-independent collision format and the selected frontend's diagnosed coincident-position exclusion remain unchanged.
 
-The purpose is to answer **which modern mesh associations are exposed by this document's Regions, and what could not be inspected?** It must not answer whether a zone has available collision. Inspection produces no scene, enhancement owner identities, canonical query frames, package capability, source certification, native query agreement or complete-world claim. Materials, vertex/face data, actors, visibility contents and legacy geometry are not resolved.
+The purpose is to answer **which modern mesh associations are exposed by this document's Regions, and what could not be inspected?** It must not answer whether a zone has available collision. Inspection produces no scene, enhancement owner identities, source query-frame preservation assertion, package capability, source certification, native query agreement or complete-world claim. Materials, vertex/face data, actors, visibility contents and legacy geometry are not resolved.
 
 ## Input and parser boundary
 

@@ -487,16 +487,16 @@ fn json_padding_is_included_in_total_budget_for_both_profiles() {
 }
 
 #[test]
-fn canonical_query_units_preserve_local_vertices_and_instance_scale() {
+fn preserved_source_query_frames_preserve_local_vertices_and_instance_scale() {
     let mut scene = fixture();
     edit(&mut scene).1[0].matrix = Mat4::from_scale(Vec3::splat(4.)).to_cols_array_2d();
     let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("canonical.glb");
+    let out = dir.path().join("preserved.glb");
     let requirements = write_static_collision_with_query_units(
         &scene,
         &"a".repeat(64),
         InspectionQueryPolicy::FrontFaces,
-        QueryUnitFrames::DeclaredCanonical,
+        QueryUnitFrames::DeclaredSourceQueryFramesPreserved,
         &out,
         &CollisionWriteLimits::default(),
     )
@@ -504,7 +504,10 @@ fn canonical_query_units_preserve_local_vertices_and_instance_scale() {
     assert_eq!(requirements.reader_version, 2);
     assert_eq!(
         requirements.capabilities,
-        ["static-collision-query-unit-frames-v1", "static-collision-triangles-v1"]
+        [
+            "eqoxide-source-query-frames-preserved-v1",
+            "static-collision-triangles-v1"
+        ]
     );
     let bytes = std::fs::read(out).unwrap();
     let (doc, buffers, _) = gltf::import_slice(&bytes).unwrap();
@@ -524,7 +527,7 @@ fn canonical_query_units_preserve_local_vertices_and_instance_scale() {
     );
 }
 #[test]
-fn canonical_query_units_empty_budget_and_legacy_defaults() {
+fn preserved_source_query_frames_empty_budget_and_legacy_defaults() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("empty.glb");
     let mut limits = CollisionWriteLimits::default();
@@ -543,7 +546,7 @@ fn canonical_query_units_empty_budget_and_legacy_defaults() {
         &StaticCollisionScene::AvailableEmpty,
         &"a".repeat(64),
         InspectionQueryPolicy::BothFaces,
-        QueryUnitFrames::DeclaredCanonical,
+        QueryUnitFrames::DeclaredSourceQueryFramesPreserved,
         &out,
         &limits,
     )
@@ -555,23 +558,32 @@ fn canonical_query_units_empty_budget_and_legacy_defaults() {
         &StaticCollisionScene::AvailableEmpty,
         &"a".repeat(64),
         InspectionQueryPolicy::BothFaces,
-        QueryUnitFrames::DeclaredCanonical,
+        QueryUnitFrames::DeclaredSourceQueryFramesPreserved,
         &out,
         &limits,
     )
     .unwrap();
     assert_eq!(
         req.capabilities,
-        [CANONICAL_QUERY_UNIT_FRAMES_CAPABILITY, "static-collision-triangles-v1"]
+        [
+            SOURCE_QUERY_FRAMES_PRESERVED_CAPABILITY,
+            "static-collision-triangles-v1"
+        ]
     );
     let bytes = std::fs::read(&out).unwrap();
     let length = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
     assert_eq!(bytes.len(), 20 + length);
     let j = json(&bytes);
-    assert_eq!(j["extras"]["eqoxideCollision"]["availability"], "available-empty");
+    assert_eq!(
+        j["extras"]["eqoxideCollision"]["availability"],
+        "available-empty"
+    );
     for key in ["buffers", "bufferViews", "accessors", "nodes", "meshes"] {
         assert!(j.get(key).is_none());
     }
     assert_eq!(QueryUnitFrames::Unspecified.identifier(), "unspecified");
-    assert_eq!(QueryUnitFrames::DeclaredCanonical.identifier(), "declared-canonical");
+    assert_eq!(
+        QueryUnitFrames::DeclaredSourceQueryFramesPreserved.identifier(),
+        "declared-source-query-frames-preserved"
+    );
 }

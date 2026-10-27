@@ -46,9 +46,11 @@ fn rehash(manifest: &mut Manifest) -> Result<()> {
     Ok(())
 }
 fn main() -> Result<()> {
-    let mut args = std::env::args_os().skip(1);
+    run(std::env::args_os().skip(1))
+}
+fn run(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<()> {
     let output = PathBuf::from(args.next().context(
-        "usage: static_scene_descriptor_fixture OUTPUT_DIRECTORY [--canonical-query-units]",
+        "usage: static_scene_descriptor_fixture OUTPUT_DIRECTORY [--declare-preserved-source-query-frames]",
     )?);
     ensure!(
         !output.as_os_str().to_string_lossy().starts_with("--"),
@@ -56,7 +58,9 @@ fn main() -> Result<()> {
     );
     let query_unit_frames = match args.next() {
         None => QueryUnitFrames::Unspecified,
-        Some(flag) if flag == "--canonical-query-units" => QueryUnitFrames::DeclaredCanonical,
+        Some(flag) if flag == "--declare-preserved-source-query-frames" => {
+            QueryUnitFrames::DeclaredSourceQueryFramesPreserved
+        }
         Some(_) => anyhow::bail!("unknown fixture option"),
     };
     ensure!(args.next().is_none(), "unexpected fixture argument");
@@ -213,4 +217,69 @@ fn main() -> Result<()> {
         }))?
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+    #[test]
+    fn strict_arguments_refuse_before_writing() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(run(Vec::<std::ffi::OsString>::new().into_iter()).is_err());
+        let output = root.path().join("must-not-exist");
+        for tail in [
+            vec!["--canonical-query-units"], // Retired explicit flag is not an alias.
+            vec!["--unknown"],
+            vec![
+                "--declare-preserved-source-query-frames",
+                "--declare-preserved-source-query-frames",
+            ],
+            vec!["--declare-preserved-source-query-frames", "trailing"],
+            vec!["trailing"],
+        ] {
+            let args = std::iter::once(output.as_os_str().to_owned())
+                .chain(tail.into_iter().map(Into::into));
+            assert!(run(args).is_err());
+            assert!(!output.exists());
+        }
+        for flag in [
+            "--canonical-query-units",
+            "--declare-preserved-source-query-frames",
+        ] {
+            assert!(run([flag.into(), output.as_os_str().to_owned()].into_iter()).is_err());
+            assert!(!output.exists());
+        }
+    }
+    #[test]
+    fn default_and_declared_requirements_are_explicit() {
+        let root = tempfile::tempdir().unwrap();
+        for declare in [false, true] {
+            let output = root
+                .path()
+                .join(if declare { "preserved" } else { "unspecified" });
+            let mut args = vec![output.as_os_str().to_owned()];
+            if declare {
+                args.push("--declare-preserved-source-query-frames".into());
+            }
+            run(args.into_iter()).unwrap();
+            for name in FILES {
+                let bytes = std::fs::read(output.join(name)).unwrap();
+                let length = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+                let j: serde_json::Value = serde_json::from_slice(&bytes[20..20 + length]).unwrap();
+                let expected = if declare {
+                    serde_json::json!([
+                        "eqoxide-source-query-frames-preserved-v1",
+                        "static-collision-triangles-v1"
+                    ])
+                } else {
+                    serde_json::json!(["static-collision-triangles-v1"])
+                };
+                assert_eq!(
+                    j["extras"]["eqoxideAsset"]["requirements"]["capabilities"],
+                    expected
+                );
+            }
+        }
+    }
+    const FILES: &[&str] = &["collision.glb"];
 }
