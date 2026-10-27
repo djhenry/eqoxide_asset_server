@@ -138,29 +138,131 @@ pub fn load_object_models(
     Ok(models)
 }
 
-/// Read object placements from `main_s3d`'s WLD objects: `(base_name, matrix)`
-/// where `matrix` is the column-major 4x4 from [`placement_matrix`] (same
-/// scale/rotate-about-up/translate as [`place_instance`], built rather than
-/// baked into vertices).
+/// Analytic WLD actor transform in libeq's `(x,z,y)` basis. For libeq's
+/// `(u,v,w) = (-raw_y,-raw_z,-raw_x) * 360/512`, the visual composition is
+/// `Ry(v) * Rz(-u) * Rx(w) * scale`, then translation. The model loader has
+/// already included mesh center in the local vertices. This is not a native
+/// actor-eligibility resolver or bit-exact native interpolated trigonometry.
+fn wld_placement_matrix(
+    center: (f32, f32, f32),
+    rotation: (f32, f32, f32),
+    scale: f32,
+) -> anyhow::Result<[[f32; 4]; 4]> {
+    let (u, v, w) = rotation;
+    // Keep the established heading-only arithmetic (including signed zeros).
+    let matrix = if u == 0.0 && w == 0.0 {
+        placement_matrix(center, v, scale)
+    } else {
+        let (su, cu) = u.to_radians().sin_cos();
+        let (sv, cv) = v.to_radians().sin_cos();
+        let (sw, cw) = w.to_radians().sin_cos();
+        [
+            [scale * cv * cu, -scale * su, -scale * sv * cu, 0.0],
+            [
+                scale * (cv * su * cw + sv * sw),
+                scale * cu * cw,
+                scale * (-sv * su * cw + cv * sw),
+                0.0,
+            ],
+            [
+                scale * (-cv * su * sw + sv * cw),
+                -scale * cu * sw,
+                scale * (sv * su * sw + cv * cw),
+                0.0,
+            ],
+            [center.0, center.1, center.2, 1.0],
+        ]
+    };
+    anyhow::ensure!(
+        matrix.iter().flatten().all(|v| v.is_finite()),
+        "nonfinite placement matrix"
+    );
+    Ok(matrix)
+}
+
+/// Read legacy object placements as `(base_name, column-major matrix)`.
+/// Preserve the existing string-based model matching; this does not establish
+/// native actor activation or complete actor-definition graph resolution.
+///
+/// Selected records must have a finite location and explicit finite positive
+/// uniform scale. Unsupported records fail with source context instead of
+/// silently substituting radius, one, or an origin. Tiny positive scales are
+/// preserved; bounding radius does not control geometry. Refusal is this
+/// exporter's policy, not a claim about native rejection semantics.
 pub fn read_placements(main_s3d: &Path) -> anyhow::Result<Vec<(String, [[f32; 4]; 4])>> {
-    let main_file = std::fs::File::open(main_s3d).with_context(|| format!("open {}", main_s3d.display()))?;
+    use libeq_wld::parser::{Actor, FragmentType, WldDoc};
+
+    let main_file =
+        std::fs::File::open(main_s3d).with_context(|| format!("open {}", main_s3d.display()))?;
     let mut main_pfs = libeq_pfs::PfsReader::open(main_file)?;
     let main_names: Vec<String> = main_pfs.filenames()?;
     let mut placements = Vec::new();
-    for wn in main_names.iter().filter(|f| f.to_lowercase().ends_with(".wld")) {
+    for wn in main_names
+        .iter()
+        .filter(|f| f.to_lowercase().ends_with(".wld"))
+    {
         let bytes = match main_pfs.get(wn) {
             Ok(Some(b)) => b,
             Ok(None) => continue,
-            Err(e) => { eprintln!("zone: failed to read {wn}: {e}"); continue; }
+            Err(e) => {
+                eprintln!("zone: failed to read {wn}: {e}");
+                continue;
+            }
         };
-        let wld = match libeq_wld::load(&bytes) { Ok(w) => w, Err(_) => continue };
-        for obj in wld.objects() {
-            let base = match obj.model_name() { Some(n) => object_base_name(n), None => continue };
-            let (px, py, pz) = obj.center();
-            let (_rx, rz, _ry) = obj.rotation();
-            let (s_xz, s_y) = obj.scale();
-            let scale = if s_y > 0.01 { s_y } else if s_xz > 0.01 { s_xz } else { 1.0 };
-            placements.push((base, placement_matrix((px, py, pz), rz, scale)));
+        // Raw fields preserve absent location/scale. The parser tolerates malformed
+        // fragment bodies as Unknown placeholders retaining the original type/slot;
+        // reject unavailable Actor bodies below while tolerating unrelated kinds.
+        let doc = WldDoc::parse(&bytes)
+            .map_err(|e| anyhow::anyhow!("parse {} member {wn}: {e:?}", main_s3d.display()))?;
+        for (slot, fragment) in doc.iter().enumerate() {
+            if matches!(fragment, FragmentType::Unknown(unknown) if unknown.type_id == 0x15) {
+                anyhow::bail!(
+                    "{} member {wn} Actor slot {slot}: unavailable Actor body (original type 0x15)",
+                    main_s3d.display()
+                );
+            }
+            let Some(actor) = fragment.as_any().downcast_ref::<Actor>() else {
+                continue;
+            };
+            let Some(name) = doc.get_string(actor.actor_def_reference) else {
+                continue;
+            };
+            let matrix = (|| -> anyhow::Result<_> {
+                let location = actor.location.as_ref().context("missing location")?;
+                anyhow::ensure!(
+                    [location.x, location.y, location.z]
+                        .iter()
+                        .all(|v| v.is_finite()),
+                    "nonfinite location"
+                );
+                anyhow::ensure!(
+                    [location.rotate_x, location.rotate_y, location.rotate_z]
+                        .iter()
+                        .all(|v| v.is_finite()),
+                    "nonfinite rotation"
+                );
+                let scale = actor.scale_factor.context("missing scale")?;
+                anyhow::ensure!(
+                    scale.is_finite() && scale > 0.0,
+                    "scale must be finite and positive"
+                );
+                wld_placement_matrix(
+                    (location.x, location.z, location.y),
+                    (
+                        location.rotate_y / 512.0 * -360.0,
+                        location.rotate_z / 512.0 * -360.0,
+                        location.rotate_x / 512.0 * -360.0,
+                    ),
+                    scale,
+                )
+            })()
+            .with_context(|| {
+                format!(
+                    "{} member {wn} Actor slot {slot} ({name})",
+                    main_s3d.display()
+                )
+            })?;
+            placements.push((object_base_name(name), matrix));
         }
     }
     Ok(placements)
@@ -1245,3 +1347,7 @@ mod texture_precedence_tests {
         assert!(names.contains("ground.bmp"));
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/common/wld_placement_tests.rs"]
+mod wld_placement_tests;
