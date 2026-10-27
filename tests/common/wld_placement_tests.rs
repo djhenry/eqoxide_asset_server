@@ -353,3 +353,174 @@ fn wld_placement_unrelated_unknown_is_still_tolerated() {
     archive(&path, "objects.wld", &bytes);
     assert!(read_placements(&path).unwrap().is_empty());
 }
+
+fn reference_document(references: &[(i32, ActorSpec)], typed_definition: bool) -> Vec<u8> {
+    // Offset 1 names PROBE; fragment reference 1 instead targets DEFINITION.
+    let target = if typed_definition {
+        (0x14, words(&[(-16_i32) as u32, 0, 0, 0, 0, 0, 0]))
+    } else {
+        (0x16, words(&[0, 0])) // A typed Sphere, not an ActorDef.
+    };
+    let mut fragments = vec![target, (0x9999, vec![])];
+    for (reference, spec) in references {
+        let mut body = actor(spec);
+        body[4..8].copy_from_slice(&reference.to_le_bytes());
+        fragments.push((0x15, body));
+    }
+    document(&fragments, "\0PROBE_ACTORDEF\0DEFINITION\0")
+}
+
+#[test]
+fn wld_reference_positive_index_does_not_alias_named_placement() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("mixed-reference.s3d");
+    let bytes = reference_document(
+        &[(1, ActorSpec::default()), (-1, ActorSpec::default())],
+        true,
+    );
+    let doc = libeq_wld::parser::WldDoc::parse(&bytes).unwrap();
+    let Some(libeq_wld::parser::FragmentType::ActorDef(target)) = doc.at(0) else {
+        panic!("fixture must have a typed ActorDef at reference 1");
+    };
+    assert_eq!(doc.get_string(target.name_reference), Some("DEFINITION"));
+    assert_eq!(
+        doc.get_string(libeq_wld::parser::StringReference(1)),
+        Some("PROBE_ACTORDEF")
+    );
+    archive(&path, "objects.wld", &bytes);
+    let placements = read_placements(&path).unwrap();
+    assert_eq!(placements.len(), 1, "only the direct name is selected");
+    assert_eq!(placements[0].0, "PROBE");
+}
+
+#[test]
+fn wld_reference_positive_missing_and_wrong_kind_indexes_are_omitted() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("unsupported-reference.s3d");
+    for (reference, typed_definition) in [(1, false), (2, true), (16, true), (i32::MAX, true)] {
+        // Missing index 16 also aliases an occupied string offset (DEFINITION).
+        let bytes = reference_document(&[(reference, ActorSpec::default())], typed_definition);
+        archive(&path, "objects.wld", &bytes);
+        assert!(
+            read_placements(&path).unwrap().is_empty(),
+            "positive reference {reference}, typed definition {typed_definition}"
+        );
+    }
+}
+
+#[test]
+fn wld_reference_nonpositive_selection_is_unchanged() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("direct-reference.s3d");
+    for (reference, expected) in [
+        (-1, Some("PROBE")),
+        (0, Some("")),
+        (-2, None),
+        (-1_000_000, None),
+        (i32::MIN, None),
+    ] {
+        let bytes = reference_document(&[(reference, ActorSpec::default())], true);
+        archive(&path, "objects.wld", &bytes);
+        let placements = read_placements(&path).unwrap();
+        assert_eq!(
+            placements.iter().map(|p| p.0.as_str()).collect::<Vec<_>>(),
+            expected.into_iter().collect::<Vec<_>>(),
+            "nonpositive reference {reference}"
+        );
+    }
+}
+
+#[test]
+fn wld_reference_bake_has_no_false_node_and_preserves_direct_transform() {
+    let directory = tempfile::tempdir().unwrap();
+    let main = directory.path().join("mixed-reference.s3d");
+    let model = directory.path().join("model.s3d");
+    let glb = directory.path().join("visual.glb");
+    let direct = ActorSpec {
+        rotation: [73., 109., 47.],
+        scale: Some(0.005),
+        radius: Some(2.),
+        ..Default::default()
+    };
+    let bytes = reference_document(&[(1, ActorSpec::default()), (-1, direct.clone())], true);
+    archive(&main, "objects.wld", &bytes);
+    model_archive(&model);
+    bake_zone(&main, Some(&model), &glb).unwrap();
+    let (doc, buffers, _) = gltf::import(&glb).unwrap();
+    let nodes: Vec<_> = doc.nodes().collect();
+    assert_eq!(
+        nodes.len(),
+        1,
+        "positive alias must not create a false node"
+    );
+    let node = &nodes[0];
+    assert_eq!(node.mesh().unwrap().name(), Some("PROBE"));
+    let matrix = node.transform().matrix();
+    let primitive = node.mesh().unwrap().primitives().next().unwrap();
+    let reader = primitive.reader(|b| Some(&buffers[b.index()]));
+    let positions: Vec<_> = reader.read_positions().unwrap().collect();
+    assert_eq!(positions.len(), 3);
+    for (vertex, want) in positions.into_iter().zip(expected(&direct)) {
+        for axis in 0..3 {
+            let actual = matrix[0][axis] * vertex[0]
+                + matrix[1][axis] * vertex[1]
+                + matrix[2][axis] * vertex[2]
+                + matrix[3][axis];
+            assert!((actual - want[axis]).abs() < 0.00005);
+        }
+    }
+}
+
+#[test]
+fn wld_reference_omission_diagnostic_has_original_source_context() {
+    const CHILD_ARCHIVE: &str = "WLD_REFERENCE_DIAGNOSTIC_CHILD_ARCHIVE";
+    if let Some(path) = std::env::var_os(CHILD_ARCHIVE) {
+        assert!(read_placements(Path::new(&path)).unwrap().is_empty());
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("diagnostic-reference.s3d");
+    let references: Vec<_> = [1, 2, 16, i32::MAX]
+        .into_iter()
+        .map(|reference| (reference, ActorSpec::default()))
+        .collect();
+    archive(&path, "objects.wld", &reference_document(&references, true));
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "zone::wld_placement_tests::wld_reference_omission_diagnostic_has_original_source_context",
+            "--nocapture",
+        ])
+        .env(CHILD_ARCHIVE, &path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("diagnostic child exceeded 10 seconds");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(output.status.success(), "{stderr}");
+    for (slot, reference) in [(2, 1), (3, 2), (4, 16), (5, i32::MAX)] {
+        let line = stderr
+            .lines()
+            .find(|line| line.contains(&format!("Actor slot {slot}:")))
+            .unwrap_or_else(|| panic!("missing original Actor slot {slot}: {stderr}"));
+        for context in [
+            path.display().to_string(),
+            "objects.wld".to_string(),
+            format!("raw reference {reference}"),
+            "unsupported fragment-reference".to_string(),
+            "omitting".to_string(),
+        ] {
+            assert!(line.contains(&context), "expected {context}: {line}");
+        }
+    }
+}

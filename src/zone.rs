@@ -181,8 +181,9 @@ fn wld_placement_matrix(
 }
 
 /// Read legacy object placements as `(base_name, column-major matrix)`.
-/// Preserve the existing string-based model matching; this does not establish
-/// native actor activation or complete actor-definition graph resolution.
+/// Positive Actor definition fragment indexes are omitted with source diagnostics;
+/// nonpositive references retain the existing string lookup and model matching.
+/// This does not establish native actor activation or resolve actor-definition graphs.
 ///
 /// Selected records must have a finite location and explicit finite positive
 /// uniform scale. Unsupported records fail with source context instead of
@@ -224,6 +225,14 @@ pub fn read_placements(main_s3d: &Path) -> anyhow::Result<Vec<(String, [[f32; 4]
             let Some(actor) = fragment.as_any().downcast_ref::<Actor>() else {
                 continue;
             };
+            if actor.actor_def_reference.0 > 0 {
+                eprintln!(
+                    "zone: omitting {} member {wn} Actor slot {slot}: raw reference {} uses unsupported fragment-reference form; only direct model-name references are supported",
+                    main_s3d.display(),
+                    actor.actor_def_reference.0
+                );
+                continue;
+            }
             let Some(name) = doc.get_string(actor.actor_def_reference) else {
                 continue;
             };
