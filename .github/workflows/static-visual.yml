@@ -43,3 +43,35 @@ jobs:
         run: cargo test --manifest-path producer/Cargo.toml --all-targets --locked --offline
       - name: Regenerate and decode the common fixture
         run: consumer/scripts/check-static-visual-fixture.sh consumer producer
+
+  pbr-factors-conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RUSTC_WRAPPER: ""
+      RUSTFLAGS: ""
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: producer
+      - uses: actions/checkout@v4
+        with:
+          repository: djhenry/eqoxide
+          ref: 5e917c9284c448b8417edd342445a2ba5ab275ff
+          path: consumer
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            producer -> target
+            consumer -> target
+      - name: Fetch locked dependencies for both checkouts
+        run: |
+          cargo fetch --locked --manifest-path producer/Cargo.toml
+          cargo fetch --locked --manifest-path consumer/Cargo.toml
+      - name: Regenerate and decode the scalar PBR fixture
+        run: consumer/scripts/check-static-pbr-fixture.sh consumer producer
