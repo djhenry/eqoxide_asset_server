@@ -717,3 +717,45 @@ fn canonical_query_units_descriptor_union_and_refusals() {
     )
     .is_err());
 }
+
+#[test]
+fn pbr_factor_visual_capability_is_allowed_but_unknown_material_features_are_not() {
+    let mut v = visual();
+    if let VisualComponent::Available { requirements, .. } = &mut v {
+        requirements
+            .capabilities
+            .insert(0, "pbr-metallic-roughness-factors-v1".into());
+    }
+    let descriptor = SceneDescriptor::new(
+        "demo",
+        &"a".repeat(64),
+        v.clone(),
+        CollisionComponent::NotExtracted {},
+    )
+    .unwrap();
+    assert_eq!(
+        descriptor.requirements.capabilities,
+        [
+            "pbr-metallic-roughness-factors-v1",
+            "static-scene-package-v1",
+            "static-visual-v1",
+            "vertex-rgba-v1"
+        ]
+    );
+    let limits = DescriptorLimits::default();
+    let bytes = encode_scene_descriptor(&descriptor, &limits).unwrap();
+    assert_eq!(
+        decode_scene_descriptor(&bytes, &limits).unwrap(),
+        descriptor
+    );
+    if let VisualComponent::Available { requirements, .. } = &mut v {
+        requirements.capabilities.push("pbr-unknown-map-v1".into());
+    }
+    assert!(SceneDescriptor::new(
+        "demo",
+        &"a".repeat(64),
+        v,
+        CollisionComponent::NotExtracted {}
+    )
+    .is_err());
+}
