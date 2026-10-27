@@ -43,3 +43,7 @@ cargo run --example source_material_fixture -- source-materials.glb
 This example decodes a partially transparent 16-bit PNG and normalizes three tinted blend materials at 25/50/75-percent opacity, sharing one texture. It reopens the GLB, verifies original RGBA16 samples and reports the written factors. Inspect the result using the client's common GLB tools. It does not exercise native zone extraction, coordinates or server landmark alignment.
 
 Producer/consumer conformance is checked in CI from both repositories against explicitly pinned counterpart commits. The client script `scripts/check-static-visual-fixture.sh CLIENT_CHECKOUT PRODUCER_CHECKOUT` regenerates the synthetic artifact, compares it with the client fixture and runs the CPU decoder probe, using locked dependencies. Intentional contract or fixture changes require reviewing the counterpart pin and both fixture expectations together.
+
+The additive [scalar PBR material profile](static-pbr-materials.md) uses an opt-in
+material-policy writer and a distinct required capability. It preserves this
+compatibility writer and its existing fixture.

@@ -11,7 +11,9 @@ use glam::{DMat4, DVec3, Mat4, Vec3};
 
 use crate::{
     compatibility::{valid_hash, ReaderRequirements},
-    convert::{GlbMetadata, MeshData, NodeDef, PrimitiveColors, PrimitiveData, TextureData},
+    convert::{
+        GlbExtension, GlbMetadata, MeshData, NodeDef, PrimitiveColors, PrimitiveData, TextureData,
+    },
 };
 
 pub(crate) const MAX_TEXTURE_BYTES: usize = 64 * 1024 * 1024;
@@ -73,6 +75,114 @@ pub struct StaticInstance {
     pub matrix: [[f32; 4]; 4],
 }
 
+/// Explicit modern material intent, independent of source material naming.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub enum StaticSurfaceModel {
+    Pbr { metallic: f32, roughness: f32 },
+    Unlit,
+}
+
+/// Scene-local material choices. Indices refer to `StaticScene::materials`.
+#[derive(Debug, Clone)]
+pub struct StaticMaterialPolicy {
+    pub default: StaticSurfaceModel,
+    pub overrides: BTreeMap<usize, StaticSurfaceModel>,
+}
+impl Default for StaticMaterialPolicy {
+    fn default() -> Self {
+        Self {
+            default: StaticSurfaceModel::Pbr {
+                metallic: 0.,
+                roughness: 1.,
+            },
+            overrides: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum StaticMaterialPolicySource {
+    Default,
+    Override,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ResolvedStaticMaterialPolicy {
+    pub material_index: usize,
+    pub surface: StaticSurfaceModel,
+    pub source: StaticMaterialPolicySource,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StaticVisualPolicyReport {
+    pub requirements: ReaderRequirements,
+    pub materials: Vec<ResolvedStaticMaterialPolicy>,
+}
+
+/// Validate and publish the opt-in scalar PBR profile, reporting each material choice.
+///
+/// The default policy chooses rough nonmetal (0, 1); overrides replace it by scene
+/// material index. All entries, including unused materials and overrides, must be
+/// valid. PBR BLEND is unsupported by the first single-pass rendering profile;
+/// explicit unlit retains the existing alpha behavior. This policy does not infer
+/// material properties from source names or textures.
+pub fn write_static_visual_with_material_policy(
+    scene: &StaticScene,
+    policy: &StaticMaterialPolicy,
+    bake_revision: &str,
+    output: &Path,
+) -> Result<StaticVisualPolicyReport> {
+    validate_surface(policy.default).context("invalid default material policy")?;
+    for (&index, &surface) in &policy.overrides {
+        ensure!(
+            index < scene.materials.len(),
+            "material policy override {index} out of bounds"
+        );
+        validate_surface(surface)
+            .with_context(|| format!("invalid material policy override {index}"))?;
+    }
+    let materials: Vec<_> = scene
+        .materials
+        .iter()
+        .enumerate()
+        .map(|(material_index, material)| {
+            let (surface, source) = match policy.overrides.get(&material_index) {
+                Some(&surface) => (surface, StaticMaterialPolicySource::Override),
+                None => (policy.default, StaticMaterialPolicySource::Default),
+            };
+            ensure!(
+                !matches!(surface, StaticSurfaceModel::Pbr { .. })
+                    || material.alpha_mode != StaticAlphaMode::Blend,
+                "material {material_index} PBR BLEND is unsupported by the single-pass profile"
+            );
+            Ok(ResolvedStaticMaterialPolicy {
+                material_index,
+                surface,
+                source,
+            })
+        })
+        .collect::<Result<_>>()?;
+    let requirements = write_static_visual_profile(scene, Some(&materials), bake_revision, output)?;
+    Ok(StaticVisualPolicyReport {
+        requirements,
+        materials,
+    })
+}
+
+fn validate_surface(surface: StaticSurfaceModel) -> Result<()> {
+    if let StaticSurfaceModel::Pbr {
+        metallic,
+        roughness,
+    } = surface
+    {
+        ensure!(
+            normalized(metallic) && normalized(roughness),
+            "PBR factors must be finite and within 0..=1"
+        );
+    }
+    Ok(())
+}
+
 /// Validate, convert server `(x,y,z)` to `(x,z,-y)`, and atomically publish a GLB.
 ///
 /// The returned reader requirements reserve this new contract; current production
@@ -82,19 +192,32 @@ pub fn write_static_visual(
     bake_revision: &str,
     output: &Path,
 ) -> Result<ReaderRequirements> {
+    write_static_visual_profile(scene, None, bake_revision, output)
+}
+
+fn write_static_visual_profile(
+    scene: &StaticScene,
+    surfaces: Option<&[ResolvedStaticMaterialPolicy]>,
+    bake_revision: &str,
+    output: &Path,
+) -> Result<ReaderRequirements> {
     validate(scene, bake_revision)?;
     let has_colors = scene
         .meshes
         .iter()
         .flat_map(|m| &m.primitives)
         .any(|p| p.colors.is_some());
+    let mut capabilities = vec!["static-visual-v1".into()];
+    if has_colors {
+        capabilities.push("vertex-rgba-v1".into());
+    }
+    if surfaces.is_some() {
+        capabilities.push("pbr-metallic-roughness-factors-v1".into());
+        capabilities.sort();
+    }
     let requirements = ReaderRequirements {
         reader_version: 2,
-        capabilities: if has_colors {
-            vec!["static-visual-v1".into(), "vertex-rgba-v1".into()]
-        } else {
-            vec!["static-visual-v1".into()]
-        },
+        capabilities,
     };
     let meshes: Vec<_> = scene
         .meshes
@@ -131,7 +254,34 @@ pub fn write_static_visual(
             png_bytes: t.png_bytes.clone(),
         })
         .collect();
-    let materials: Vec<_> = scene.materials.iter().map(material_json).collect();
+    let materials: Vec<_> = scene
+        .materials
+        .iter()
+        .enumerate()
+        .map(|(index, material)| {
+            let mut json = material_json(material);
+            match surfaces.map(|s| s[index].surface) {
+                Some(StaticSurfaceModel::Pbr {
+                    metallic,
+                    roughness,
+                }) => {
+                    json["pbrMetallicRoughness"]["metallicFactor"] = serde_json::json!(metallic);
+                    json["pbrMetallicRoughness"]["roughnessFactor"] = serde_json::json!(roughness);
+                }
+                Some(StaticSurfaceModel::Unlit) => {
+                    json["extensions"] = serde_json::json!({"KHR_materials_unlit": {}});
+                }
+                None => {}
+            }
+            json
+        })
+        .collect();
+    let extensions =
+        if surfaces.is_some_and(|s| s.iter().any(|m| m.surface == StaticSurfaceModel::Unlit)) {
+            std::collections::BTreeSet::from([GlbExtension::MaterialsUnlit])
+        } else {
+            Default::default()
+        };
     let colors: BTreeMap<_, _> = scene
         .meshes
         .iter()
@@ -146,6 +296,8 @@ pub fn write_static_visual(
         .collect();
     // Header numeric values are mathematical values: unitScale 1.0 and 1 are equivalent.
     let metadata = GlbMetadata {
+        extensions_used: extensions.clone(),
+        extensions_required: extensions,
         extras: Some(serde_json::json!({"eqoxideAsset": {
             "schemaVersion": 1,
             "role": "visual",
@@ -176,7 +328,11 @@ pub fn write_static_visual(
 }
 
 /// Publish only the staged inode; failed replacement preserves the prior artifact.
-pub(crate) fn publish_static(temp: tempfile::NamedTempFile, output: &Path, label: &str) -> Result<()> {
+pub(crate) fn publish_static(
+    temp: tempfile::NamedTempFile,
+    output: &Path,
+    label: &str,
+) -> Result<()> {
     // tempfile starts at 0600 on Unix; artifacts must be readable by the serving user.
     // Change only the staging inode so failed publication cannot alter the old file.
     #[cfg(unix)]

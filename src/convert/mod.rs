@@ -2314,11 +2314,26 @@ pub(crate) fn write_glb_instanced_with_vertex_alpha(
     write_glb_instanced_metadata(output, meshes, materials, textures, nodes_in, vertex_alpha, None)
 }
 
-/// Optional document extras and explicit node names for isolated staging artifacts.
+/// Supported standard extensions for prepared GLB artifacts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum GlbExtension {
+    MaterialsUnlit,
+}
+impl GlbExtension {
+    fn name(self) -> &'static str {
+        match self {
+            Self::MaterialsUnlit => "KHR_materials_unlit",
+        }
+    }
+}
+
+/// Optional document extras, node names and typed extension declarations.
 #[derive(Default)]
 pub(crate) struct GlbMetadata {
     pub extras: Option<serde_json::Value>,
     pub node_names: std::collections::BTreeMap<usize, String>,
+    pub extensions_used: std::collections::BTreeSet<GlbExtension>,
+    pub extensions_required: std::collections::BTreeSet<GlbExtension>,
 }
 
 pub(crate) fn write_glb_instanced_metadata(
@@ -2581,6 +2596,24 @@ pub(crate) fn write_glb_instanced_prepared(
 
     if let Some(extras) = metadata.and_then(|m| m.extras.as_ref()) {
         gltf["extras"] = extras.clone();
+    }
+
+    if let Some(metadata) = metadata {
+        anyhow::ensure!(
+            metadata
+                .extensions_required
+                .is_subset(&metadata.extensions_used),
+            "required GLB extensions must also be declared used"
+        );
+        for (key, extensions) in [
+            ("extensionsUsed", &metadata.extensions_used),
+            ("extensionsRequired", &metadata.extensions_required),
+        ] {
+            if !extensions.is_empty() {
+                gltf[key] =
+                    serde_json::json!(extensions.iter().map(|e| e.name()).collect::<Vec<_>>());
+            }
+        }
     }
 
     let json_str = serde_json::to_string(&gltf)?;
