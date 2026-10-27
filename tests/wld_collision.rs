@@ -1008,7 +1008,7 @@ fn contributing_owners_keep_distinct_meshes_and_independently_charged_histograms
 }
 
 #[test]
-fn canonical_source_frames_decode_quantization_before_world_units() {
+fn preserved_source_query_frames_decode_quantization_before_world_units() {
     let mesh = MeshFixture {
         exponent: 2,
         ..Default::default()
@@ -1028,12 +1028,12 @@ fn canonical_source_frames_decode_quantization_before_world_units() {
     );
     assert_eq!(instances[0].matrix, glam::Mat4::IDENTITY.to_cols_array_2d());
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("canonical.glb");
+    let path = dir.path().join("preserved.glb");
     let requirements = write_static_collision_with_query_units(
         &normalized.scene,
         &"d".repeat(64),
         InspectionQueryPolicy::FrontFaces,
-        QueryUnitFrames::DeclaredCanonical,
+        QueryUnitFrames::DeclaredSourceQueryFramesPreserved,
         &path,
         &CollisionWriteLimits::default(),
     )
@@ -1041,7 +1041,7 @@ fn canonical_source_frames_decode_quantization_before_world_units() {
     assert_eq!(
         requirements.capabilities,
         [
-            CANONICAL_QUERY_UNIT_FRAMES_CAPABILITY,
+            SOURCE_QUERY_FRAMES_PRESERVED_CAPABILITY,
             "static-collision-triangles-v1"
         ]
     );

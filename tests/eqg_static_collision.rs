@@ -646,7 +646,7 @@ fn zero_candidate_owners_do_not_hide_nonfinite_or_invalid_matrices() {
 }
 
 #[test]
-fn canonical_source_frames_keep_model_locals_and_shared_instance_scale() {
+fn preserved_source_query_frames_keep_model_locals_and_shared_instance_scale() {
     use eqoxide_asset_server::static_collision::*;
     let mut s = source();
     s.placements.push(ZonePlacement {
@@ -697,12 +697,12 @@ fn canonical_source_frames_keep_model_locals_and_shared_instance_scale() {
         assert!((actual - want).abs() < 0.000001);
     }
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("canonical.glb");
+    let path = dir.path().join("preserved.glb");
     let requirements = write_static_collision_with_query_units(
         &b.scene,
         &"c".repeat(64),
         InspectionQueryPolicy::FrontFaces,
-        QueryUnitFrames::DeclaredCanonical,
+        QueryUnitFrames::DeclaredSourceQueryFramesPreserved,
         &path,
         &CollisionWriteLimits::default(),
     )
@@ -710,7 +710,7 @@ fn canonical_source_frames_keep_model_locals_and_shared_instance_scale() {
     assert_eq!(
         requirements.capabilities,
         [
-            CANONICAL_QUERY_UNIT_FRAMES_CAPABILITY,
+            SOURCE_QUERY_FRAMES_PRESERVED_CAPABILITY,
             "static-collision-triangles-v1"
         ]
     );

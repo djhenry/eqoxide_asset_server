@@ -123,17 +123,18 @@ fn main() -> Result<()> {
     run(std::env::args_os().skip(1))
 }
 fn run(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<()> {
-    let output = PathBuf::from(
-        args.next()
-            .context("usage: wld_collision_fixture OUTPUT_DIRECTORY [--canonical-query-units]")?,
-    );
+    let output = PathBuf::from(args.next().context(
+        "usage: wld_collision_fixture OUTPUT_DIRECTORY [--declare-preserved-source-query-frames]",
+    )?);
     anyhow::ensure!(
         !output.as_os_str().to_string_lossy().starts_with("--"),
         "output directory must precede the optional flag"
     );
     let query_unit_frames = match args.next() {
         None => QueryUnitFrames::Unspecified,
-        Some(flag) if flag == "--canonical-query-units" => QueryUnitFrames::DeclaredCanonical,
+        Some(flag) if flag == "--declare-preserved-source-query-frames" => {
+            QueryUnitFrames::DeclaredSourceQueryFramesPreserved
+        }
         Some(_) => anyhow::bail!("unknown fixture option"),
     };
     anyhow::ensure!(args.next().is_none(), "unexpected fixture argument");
@@ -161,9 +162,13 @@ mod cli_tests {
         assert!(run(Vec::<std::ffi::OsString>::new().into_iter()).is_err());
         let output = root.path().join("must-not-exist");
         for tail in [
+            vec!["--canonical-query-units"], // Retired explicit flag is not an alias.
             vec!["--unknown"],
-            vec!["--canonical-query-units", "--canonical-query-units"],
-            vec!["--canonical-query-units", "trailing"],
+            vec![
+                "--declare-preserved-source-query-frames",
+                "--declare-preserved-source-query-frames",
+            ],
+            vec!["--declare-preserved-source-query-frames", "trailing"],
             vec!["trailing"],
         ] {
             let args = std::iter::once(output.as_os_str().to_owned())
@@ -172,27 +177,27 @@ mod cli_tests {
             assert!(!output.exists());
         }
         assert!(run([
-            std::ffi::OsString::from("--canonical-query-units"),
+            std::ffi::OsString::from("--declare-preserved-source-query-frames"),
             output.into_os_string()
         ]
         .into_iter())
         .is_err());
     }
     #[test]
-    fn default_and_canonical_identity_capabilities_and_geometry_are_explicit() {
+    fn default_and_preserved_source_identity_capabilities_and_geometry_are_explicit() {
         let root = tempfile::tempdir().unwrap();
         let ordinary = root.path().join("ordinary");
-        let canonical = root.path().join("canonical");
+        let preserved = root.path().join("preserved");
         run([ordinary.as_os_str().to_owned()].into_iter()).unwrap();
         run([
-            canonical.as_os_str().to_owned(),
-            "--canonical-query-units".into(),
+            preserved.as_os_str().to_owned(),
+            "--declare-preserved-source-query-frames".into(),
         ]
         .into_iter())
         .unwrap();
         for name in FILES {
             let before = std::fs::read(ordinary.join(name)).unwrap();
-            let declared = std::fs::read(canonical.join(name)).unwrap();
+            let declared = std::fs::read(preserved.join(name)).unwrap();
             let a = json(&before);
             let b = json(&declared);
             assert_eq!(
@@ -202,7 +207,7 @@ mod cli_tests {
             assert_eq!(
                 b["extras"]["eqoxideAsset"]["requirements"]["capabilities"],
                 serde_json::json!([
-                    "static-collision-query-unit-frames-v1",
+                    "eqoxide-source-query-frames-preserved-v1",
                     "static-collision-triangles-v1"
                 ])
             );
@@ -225,13 +230,13 @@ mod cli_tests {
                 assert!(b.get("nodes").is_none());
             }
         }
-        let repeated = std::fs::read(canonical.join(FILES[0])).unwrap();
+        let repeated = std::fs::read(preserved.join(FILES[0])).unwrap();
         run([
-            canonical.as_os_str().to_owned(),
-            "--canonical-query-units".into(),
+            preserved.as_os_str().to_owned(),
+            "--declare-preserved-source-query-frames".into(),
         ]
         .into_iter())
         .unwrap();
-        assert_eq!(std::fs::read(canonical.join(FILES[0])).unwrap(), repeated);
+        assert_eq!(std::fs::read(preserved.join(FILES[0])).unwrap(), repeated);
     }
 }
