@@ -58,7 +58,20 @@ impl Fixture {
             let view = iter.next().unwrap();
             (self.neighbors & (1 << c) != 0).then_some(view)
         });
-        prepare_self_53rz(&hierarchy, &topology, self.global, &mut own, &mut neighbors)
+        let result =
+            prepare_self_53rz(&hierarchy, &topology, self.global, &mut own, &mut neighbors);
+        // Observe the caller-owned value fields on both success and refusal.
+        self.locals[0] = own.local_tolerance;
+        self.overrides[0] = own.override_tolerance;
+        self.neighbors = 0;
+        for (context, view) in neighbors.iter().enumerate() {
+            if let Some(view) = view {
+                self.neighbors |= 1 << context;
+                self.locals[context + 1] = view.local_tolerance;
+                self.overrides[context + 1] = view.override_tolerance;
+            }
+        }
+        result
     }
 }
 fn assert_heights(got: &Q32HeightGrid, want: &Q32HeightGrid) {
@@ -69,10 +82,14 @@ fn assert_heights(got: &Q32HeightGrid, want: &Q32HeightGrid) {
     }
 }
 fn assert_unchanged(got: &Fixture, want: &Fixture) {
+    assert_eq!(got.neighbors, want.neighbors);
     assert_eq!(got.states, want.states);
     assert_eq!(got.prepared, want.prepared);
     assert_eq!(got.flags, want.flags);
+    assert_eq!(got.global.to_bits(), want.global.to_bits());
     for c in 0..4 {
+        assert_eq!(got.locals[c].to_bits(), want.locals[c].to_bits());
+        assert_eq!(got.overrides[c].to_bits(), want.overrides[c].to_bits());
         assert_heights(&got.heights[c], &want.heights[c]);
     }
 }
@@ -215,24 +232,29 @@ fn late_split_refusal_publishes_none_of_the_preceding_context_work() {
 
 #[test]
 fn late_emission_refusal_rolls_back_cache_normalization_dependency_and_height_stores() {
-    let mut f = Fixture::new(1);
-    f.prepared = [128, 255, 0, 0];
-    f.states[0] = [[0; 2048]; 2];
-    f.states[1] = [[0; 2048]; 2];
-    f.states[0][0][1] = 1;
-    f.states[0][1][1] = 1;
-    f.heights[0] = corner_grid();
-    f.heights[0][16][16] = f32::NAN;
-    let before = f.clone();
-    assert_eq!(
-        f.run().unwrap_err(),
-        PreparationError::Midpoint(MidpointError {
-            tree: 0,
-            node: 4,
-            operand: NonFiniteOperand::SecondEndpoint,
-        })
-    );
-    assert_unchanged(&f, &before);
+    for mask in 0..8 {
+        let mut f = Fixture::new(mask);
+        f.prepared = [128, 255, 128, 255];
+        f.states = [[[0; 2048]; 2]; 4];
+        f.states[0][0][1] = 1;
+        f.states[0][1][1] = 1;
+        f.heights[0] = corner_grid();
+        f.heights[0][16][16] = f32::from_bits(0x7fc8_1313);
+        f.global = f32::NAN;
+        f.locals = [f32::NAN; 4];
+        f.overrides = [f32::NAN; 4];
+        let before = f.clone();
+        assert_eq!(
+            f.run().unwrap_err(),
+            PreparationError::Midpoint(MidpointError {
+                tree: 0,
+                node: 4,
+                operand: NonFiniteOperand::SecondEndpoint,
+            }),
+            "mask={mask}"
+        );
+        assert_unchanged(&f, &before);
+    }
 }
 
 #[test]
@@ -251,6 +273,171 @@ fn prepared_self_still_emits_and_rebuilds_flags_without_selecting_unused_control
     for y in 0..32 {
         for x in 0..32 {
             assert_eq!(f.flags[0][y][x], if x + y == 31 { 0x80 } else { 0 });
+        }
+    }
+}
+
+#[test]
+fn cached_neighbor_state_is_committed_before_its_later_self_emission() {
+    let mut f = Fixture::new(2);
+    f.states = [[[0; 2048]; 2]; 4];
+    f.states[0][1][2] = 9;
+    f.prepared = [255, 0, 255, 0];
+    f.global = f32::NAN;
+    f.locals = [f32::NAN; 4];
+    f.overrides = [f32::NAN; 4];
+    f.heights[2] = corner_grid();
+    f.flags[2] = [[0xa5; 32]; 32];
+    let before = f.clone();
+
+    f.run().unwrap();
+    let mut want_states = [[[0; 2048]; 2]; 4];
+    // This north W link and the root cross-links normalize raw 9 to 1.
+    for (context, tree, nodes) in [
+        (0, 0, &[0, 1][..]),
+        (0, 1, &[1, 2][..]),
+        (2, 0, &[0, 1, 2][..]),
+        (2, 1, &[0, 1][..]),
+    ] {
+        for &node in nodes {
+            want_states[context][tree][node] = 1;
+        }
+    }
+    assert_eq!(f.states, want_states);
+    assert_eq!(f.prepared, [1, 0, 1, 0]);
+    for c in 1..4 {
+        assert_heights(&f.heights[c], &before.heights[c]);
+        assert_eq!(f.flags[c], before.flags[c]);
+    }
+
+    // The synthetic cached north view now becomes self. Its marker skips only
+    // split preparation, while its current states drive fresh output and stores.
+    f.heights.swap(0, 2);
+    f.flags.swap(0, 2);
+    f.states.swap(0, 2);
+    f.prepared.swap(0, 2);
+    f.locals.swap(0, 2);
+    f.overrides.swap(0, 2);
+    f.neighbors = 0;
+    let before_self = f.clone();
+    let output = f.run().unwrap();
+    assert_eq!(
+        output.triangles(),
+        [
+            [0, 1056, 544],
+            [1088, 32, 544],
+            [1056, 1088, 544],
+            [544, 32, 16],
+            [0, 544, 16],
+        ]
+    );
+    // The zero tree-1 node 2 averages bottom corners 2 and 14. Its tree-0
+    // counterpart is nonzero, so the top midpoint is deliberately not stored.
+    assert_eq!(before_self.heights[0][32][16], 100.0);
+    assert_eq!(f.heights[0][32][16], 8.0);
+    assert_eq!(f.heights[0][0][16], 100.0);
+    assert_eq!(f.heights[0][16][16], 100.0);
+    assert_eq!(f.states, before_self.states);
+    assert_eq!(f.prepared, before_self.prepared);
+    for (y, row) in f.flags[0].iter().enumerate() {
+        for (x, &flag) in row.iter().enumerate() {
+            assert_eq!(flag, if x + y == 31 { 0xa5 } else { 0x25 });
+        }
+    }
+    for c in 1..4 {
+        assert_heights(&f.heights[c], &before_self.heights[c]);
+        assert_eq!(f.flags[c], before_self.flags[c]);
+    }
+}
+
+#[test]
+fn cached_neighbors_ignore_unused_nonfinite_controls_in_every_presence_pattern() {
+    for mask in 0..8 {
+        let mut f = Fixture::new(mask);
+        f.states = [[[0; 2048]; 2]; 4];
+        f.prepared = [128, 1, 255, 128];
+        f.global = f32::from_bits(0x7fc1_0101);
+        for c in 0..4 {
+            f.locals[c] = f32::from_bits(0x7fc2_0100 + c as u32);
+            f.overrides[c] = f32::from_bits(0x7fc3_0100 + c as u32);
+            f.heights[c] = [[f32::from_bits(0x7fc4_0100 + c as u32); 33]; 33];
+            f.states[c][0][0] = 0x31 + c as u8;
+            f.states[c][1][0] = 0x71 + c as u8;
+        }
+        f.heights[0] = corner_grid();
+        let before = f.clone();
+        let output = f.run().unwrap();
+        assert_eq!(output.triangles(), [[1056, 32, 0], [32, 1056, 1088]]);
+        assert_eq!(f.heights[0][16][16], 4.0);
+        assert_eq!(f.states, before.states);
+        for c in 0..4 {
+            let present = c == 0 || mask & (1 << (c - 1)) != 0;
+            assert_eq!(f.prepared[c], if present { 1 } else { before.prepared[c] });
+            assert_eq!(f.locals[c].to_bits(), before.locals[c].to_bits());
+            assert_eq!(f.overrides[c].to_bits(), before.overrides[c].to_bits());
+            if c != 0 {
+                assert_heights(&f.heights[c], &before.heights[c]);
+                assert_eq!(f.flags[c], before.flags[c]);
+            }
+        }
+        assert_eq!(f.global.to_bits(), before.global.to_bits());
+    }
+}
+
+#[test]
+fn used_neighbor_control_refusals_roll_back_every_presence_pattern() {
+    for mask in 0..8 {
+        for context in 1..4 {
+            if mask & (1 << (context - 1)) == 0 {
+                continue;
+            }
+            for field in [ToleranceField::Local, ToleranceField::Override] {
+                let mut f = Fixture::new(mask);
+                for c in 0..4 {
+                    f.flags[c] = [[4; 32]; 32];
+                    f.heights[c] = [[f32::from_bits(0x7fc5_0100 + c as u32); 33]; 33];
+                    f.locals[c] = f32::from_bits(0x7fc6_0100 + c as u32);
+                }
+                if field == ToleranceField::Local {
+                    f.overrides[context] = 0.5;
+                } else {
+                    f.overrides[context] = f32::from_bits(0x7fc7_0100 + context as u32);
+                }
+                let before = f.clone();
+                assert_eq!(
+                    f.run().unwrap_err(),
+                    PreparationError::Split(SplitPreparationError::Tolerance { context, field }),
+                    "mask={mask} context={context} field={field:?}"
+                );
+                assert_unchanged(&f, &before);
+            }
+        }
+    }
+}
+
+#[test]
+fn closed_hierarchy_edges_bound_the_diagonal_rebuild_walk() {
+    let hierarchy = Q32Hierarchy::try_new().unwrap();
+    for tree in 0..2 {
+        for node in 1..Q32Hierarchy::NODE_END {
+            let triangle = hierarchy.node(tree, node).unwrap();
+            for [x, y] in triangle {
+                assert!(x <= 32 && y <= 32, "tree={tree} node={node}");
+            }
+            for edge in 0..3 {
+                let [ax, ay] = triangle[edge];
+                let [bx, by] = triangle[(edge + 1) % 3];
+                let dx = ax.abs_diff(bx);
+                let dy = ay.abs_diff(by);
+                assert!(dx != 0 || dy != 0, "tree={tree} node={node}");
+                assert!(dx == 0 || dy == 0 || dx == dy, "tree={tree} node={node}");
+                // A negative diagonal's lower-Y endpoint plus its horizontal
+                // extent cannot leave the 32-by-32 quad grid.
+                if (ax < bx && ay > by) || (bx < ax && by > ay) {
+                    assert!(ay.min(by) + dx <= 32, "tree={tree} node={node}");
+                    assert!(ax.max(bx) >= dx, "tree={tree} node={node}");
+                }
+            }
         }
     }
 }

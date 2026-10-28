@@ -75,10 +75,14 @@ pub fn rebuild_diagonal_flags(emission: &Q32Emission, flags: &mut Q32QuadFlags) 
 /// First prepare all present split views using their pre-emission heights and
 /// flags, then run one dependency sweep, emit self and rebuild self diagonals.
 /// Dependency, emission and flag rebuilding still run for a prepared self.
+/// The prepared marker caches split preparation only, not emitted output.
+/// Neighbor state changes are retained for the caller's later update of that
+/// view as self; this call does not emit or rebuild neighbor heights/flags.
 ///
-/// Bounded scratch state makes the entire operation atomic: only success
-/// commits every present state/marker and self heights/flags. Neighbor heights,
-/// neighbor flags and control values remain unchanged. The existing phases'
+/// Bounded scratch state leaves every caller field unchanged on a returned
+/// `PreparationError`. Success commits all present states/markers and self
+/// heights/flags. Neighbor heights, neighbor flags and control values remain
+/// unchanged. The existing phases'
 /// lazy finite-used-input rules apply; no extra whole-grid validation is added.
 /// Scratch and output payloads are bounded and require no heap allocation;
 /// total compiler/ABI stack usage is not specified.
