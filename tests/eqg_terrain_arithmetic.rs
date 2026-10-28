@@ -97,3 +97,132 @@ fn nonfinite_operands_are_explicit_errors_instead_of_successful_answers() {
         );
     }
 }
+
+// These sweeps derive expected encodings from binary32 spacing and powers of
+// two, without reproducing the implementation's fixed-width integer arithmetic.
+#[test]
+fn midpoint_carry_and_cancellation_cover_every_normal_exponent() {
+    for exponent in 1..=254 {
+        for fraction in [1, 0x400001, 0x7fffff] {
+            for sign in [0, 0x80000000] {
+                let bits = sign | (exponent << 23) | fraction;
+                let p = f32::from_bits(bits);
+                assert_eq!(
+                    midpoint_53rz(p, p).unwrap().to_bits(),
+                    bits,
+                    "doubling then halving {bits:08x}"
+                );
+                assert_eq!(
+                    midpoint_53rz(p, f32::from_bits(bits ^ 0x80000000))
+                        .unwrap()
+                        .to_bits(),
+                    0,
+                    "exact cancellation {bits:08x}"
+                );
+
+                // Adjacent values within one binade differ by 2^(exponent-150).
+                // Their difference's mean is 2^(exponent-151); the first binade
+                // underflows to signed zero, then subnormal stores become exact.
+                let adjacent = f32::from_bits((bits - 1) ^ 0x80000000);
+                let magnitude = match exponent {
+                    1 => 0,
+                    2..=24 => 1 << (exponent - 2),
+                    _ => (exponent - 24) << 23,
+                };
+                for (p, q) in [(p, adjacent), (adjacent, p)] {
+                    assert_eq!(
+                        midpoint_53rz(p, q).unwrap().to_bits(),
+                        sign | magnitude,
+                        "adjacent cancellation {bits:08x}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn midpoint_wide_gaps_cover_input_and_store_word_boundaries() {
+    for exponent in 2..=254 {
+        for fraction in [0, 1, 0x7fffff] {
+            for sign in [0, 0x80000000] {
+                let bits = sign | (exponent << 23) | fraction;
+                let p = f32::from_bits(bits);
+                let half_magnitude = ((exponent - 1) << 23) | fraction;
+                // The exact half is representable. A same-sign minimum
+                // subnormal cannot reach the next binary32 store; an opposite
+                // one lies below this store and selects its predecessor.
+                for (tiny_sign, magnitude) in [
+                    (sign, half_magnitude),
+                    (sign ^ 0x80000000, half_magnitude - 1),
+                ] {
+                    let tiny = f32::from_bits(tiny_sign | 1);
+                    for (p, q) in [(p, tiny), (tiny, p)] {
+                        assert_eq!(
+                            midpoint_53rz(p, q).unwrap().to_bits(),
+                            sign | magnitude,
+                            "wide gap p={bits:08x} q={:08x}",
+                            tiny.to_bits()
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn deviation_wide_gap_borrow_preserves_first_rounding_deficit() {
+    for exponent in 2..=254 {
+        for sign in [0, 0x80000000] {
+            let p = f32::from_bits(sign | (exponent << 23));
+            let tiny = f32::from_bits((sign ^ 0x80000000) | 1);
+            let sample = f32::from_bits(sign | ((exponent - 1) << 23));
+            // For p = 2^(exponent-127), subtracting a minimum subnormal
+            // borrows through the low bits. With exponent >= 32, the 53-bit
+            // rounded mean falls below p/2 by exactly 2^(exponent-181).
+            // For smaller exponents the exact deficit is half a subnormal.
+            let thresholds = if exponent < 32 {
+                [(0, true), (1, false), (0x80000000, true)]
+            } else {
+                let deficit = if exponent <= 54 {
+                    1 << (exponent - 32)
+                } else {
+                    (exponent - 54) << 23
+                };
+                [(deficit - 1, true), (deficit, false), (deficit + 1, false)]
+            };
+            for (tolerance, want) in thresholds {
+                assert_eq!(
+                    deviation_exceeds_53rz(p, tiny, sample, f32::from_bits(tolerance)),
+                    Ok(want),
+                    "first rounding exponent={exponent} sign={sign:08x} tolerance={tolerance:08x}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn deviation_rounds_a_subnormal_tail_separately_at_every_wide_exponent() {
+    for exponent in 30..=254 {
+        for fraction in [0, 1, 0x7fffff] {
+            for sign in [0, 0x80000000] {
+                let sample_bits = sign | (exponent << 23) | fraction;
+                let sample = f32::from_bits(sample_bits);
+                let endpoint = f32::from_bits((sign ^ 0x80000000) | 1);
+                let tolerance = (exponent << 23) | fraction;
+                // The internal mean has magnitude half a minimum subnormal
+                // and opposes sample. Subtraction adds this positive tail to
+                // abs(sample); its separate 53-bit rounding discards the tail.
+                for (tolerance, want) in [(tolerance - 1, true), (tolerance, false)] {
+                    assert_eq!(
+                        deviation_exceeds_53rz(endpoint, 0.0, sample, f32::from_bits(tolerance)),
+                        Ok(want),
+                        "second rounding sample={sample_bits:08x} tolerance={tolerance:08x}"
+                    );
+                }
+            }
+        }
+    }
+}

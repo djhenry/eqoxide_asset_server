@@ -342,7 +342,7 @@ new manifests are emitted by this assessment slice.
 
 **Dependency-state prerequisite:** `eqg::terrain_dependencies::propagate_once` performs one ordered, in-place sweep over optional q32 split-state views ([issue #108](https://github.com/djhenry/eqoxide_asset_server/issues/108)). Tests pin target and parent writes, reserved slot zero, raw-byte normalization, missing views and the difference between one sweep and repeated closure. The helper allocates no memory and does not interpret prepared-cache markers. Caller-seeded state tests do not establish full preparation reachability, source admission or native surface agreement; no bake or query route is enabled.
 
-**Files:** Add `src/eqg/terrain.rs`, `src/eqg/material.rs`, and `src/eqg/object_group.rs`; extend `src/eqg/regions.rs`, `src/zone_scene.rs`, and build dispatch; add `tests/eqg_terrain.rs` and `tests/eqg_object_groups.rs`.
+**Files:** Add `src/eqg/terrain.rs`, `src/eqg/material.rs`, and `src/eqg/object_group.rs`; extend `src/eqg/regions.rs`, `src/zone_scene.rs`, and build dispatch; add `tests/eqg_terrain.rs` and `tests/eqg_object_groups.rs`. The conditional arithmetic prerequisite uses `src/eqg/terrain_arithmetic.rs` and `tests/eqg_terrain_arithmetic.rs`.
 
 **Conditional arithmetic prerequisite:** `eqg::terrain_arithmetic` models finite-input midpoint and deviation operations with 53-bit significand rounding toward zero ([issue #106](https://github.com/djhenry/eqoxide_asset_server/issues/106)). The allocation-free integer implementation preserves intermediate rounding and signed zeros without changing the host floating-point mode; nonfinite operands return explicit errors. This is a value-only conditional model, not proof of the arithmetic mode active at every native terrain entry. It selects no bake profile, admits no source dataset and activates no output or query route.
 
@@ -350,6 +350,7 @@ new manifests are emitted by this assessment slice.
 
 The [initial-load terrain preparation candidate](eqg-terrain-preparation-design.md), tracked in [issue #100](https://github.com/djhenry/eqoxide_asset_server/issues/100), separates raw DAT decoding from the working surface supplied to native collision. It defines the remaining bake-side proof gates without assuming a runtime client capability is necessary.
 
+- [x] Implement the finite-input, value-only conditional 53-bit toward-zero arithmetic prerequisite in issue #106; native arithmetic-mode verification and bake-profile selection remain separate gates.
 - [ ] Parse project metadata including project name, bounds, units per vertex, quads per tile, coverage/layer sizes, and version.
 - [ ] Contribute reusable project/DAT parsing to `libeq_eqg`; keep project resource resolution and terrain rendering policy in this repository.
 - [ ] Resolve DAT resources by project references. Distinguish terrain data from auxiliary files such as water and exclusion data.

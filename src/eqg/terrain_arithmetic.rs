@@ -20,9 +20,12 @@ pub enum NonFiniteOperand {
     Tolerance,
 }
 
-// Magnitudes are integers in units of 2^-150. A finite binary32 input uses at
-// most 278 bits; a pair sum or mean/sample difference uses at most 279. Five
-// limbs suffice, including the exact half of a minimum-subnormal sum.
+// Magnitudes are integers in units of 2^-150. Finite inputs are bounded by
+// (2^24 - 1) << 254 < 2^278. Endpoint sums and mean/sample differences are
+// strictly below 2^279: a rounded mean is no larger in magnitude than the
+// largest endpoint. Five limbs provide 320 bits, so reachable additions cannot
+// carry out. Subtraction is used only after ordering the two magnitudes.
+// These bounds concern these private call paths, not arbitrary 320-bit inputs.
 #[derive(Clone, Copy, Default)]
 struct Magnitude([u64; 5]);
 
@@ -95,8 +98,10 @@ impl Magnitude {
     }
 
     fn half(self) -> Self {
-        // Endpoint numerators start even. Significant-bit truncation either
-        // leaves them unchanged or clears low bits, so this half is exact.
+        // Only internal_mean calls half, on an endpoint sum. Every input
+        // numerator is even, and truncation either preserves it or clears low
+        // bits, so halving is exact. The result may be odd (half a minimum
+        // subnormal); the later deviation is never halved again.
         debug_assert_eq!(self.0[0] & 1, 0);
         let mut result = Self::default();
         for (index, word) in result.0.iter_mut().enumerate() {
@@ -169,7 +174,10 @@ impl Number {
             self.magnitude.shifted_u32(1)
         } else {
             let exponent = length - 24;
-            // A rounded mean cannot exceed the larger endpoint magnitude.
+            // Only a rounded endpoint mean reaches this store. Exact averaging
+            // cannot exceed the larger endpoint magnitude, and toward-zero
+            // rounding cannot increase it. Thus length <= 278 and exponent
+            // <= 254, even when both finite endpoints have maximum magnitude.
             debug_assert!(exponent < 255);
             ((exponent as u32) << 23) | (self.magnitude.shifted_u32(exponent) & 0x7fffff)
         };
