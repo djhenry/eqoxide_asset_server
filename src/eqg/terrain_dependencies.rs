@@ -9,6 +9,9 @@ use super::{terrain_hierarchy::Q32Hierarchy, terrain_neighbors::Q32Neighbors};
 /// Raw states for two trees, including reserved parent slot zero. Geometric
 /// node lookup still excludes zero. Nonzero source bytes trigger propagation;
 /// targeted bytes are assigned one, while other bytes retain their values.
+/// Raw nonzero values are triggers, not distinct metadata flags to merge.
+/// Slot zero is writable parent bookkeeping, separate from prepared markers;
+/// callers must not overlay other metadata there.
 pub type Q32SplitStates = [[u8; Q32Hierarchy::NODE_END]; 2];
 
 /// Visit internal nodes from 1023 down to 1, contexts self/east/north/northeast,
