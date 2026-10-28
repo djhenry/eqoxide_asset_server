@@ -350,12 +350,13 @@ new manifests are emitted by this assessment slice.
 
 **Conditional self-update transaction:** `eqg::terrain_preparation::prepare_self_53rz` composes split preparation, the dependency sweep, self emission and current diagonal reconstruction ([issue #116](https://github.com/djhenry/eqoxide_asset_server/issues/116)). Success commits all present split states/markers and only self heights/flags; typed refusal commits nothing. Diagonal reconstruction preserves low flag bits and replaces 0x80 from the opaque emission's negative diagonal edges, even clearing stale bits for empty output. The bounded, allocation-free helper still runs emission for prepared self views. It models supplied contexts under conditional arithmetic and does not establish source membership, project seam/cache scheduling, full surface equivalence, native control-mode persistence or a bake/query route.
 
-**Files:** Add `src/eqg/terrain.rs`, `src/eqg/material.rs`, and `src/eqg/object_group.rs`; extend `src/eqg/regions.rs`, `src/zone_scene.rs`, and build dispatch; add `tests/eqg_terrain.rs` and `tests/eqg_object_groups.rs`.
+**Files:** Add `src/eqg/terrain.rs`, `src/eqg/material.rs`, and `src/eqg/object_group.rs`; extend `src/eqg/regions.rs`, `src/zone_scene.rs`, and build dispatch; add `tests/eqg_terrain.rs` and `tests/eqg_object_groups.rs`. The conditional arithmetic prerequisite uses `src/eqg/terrain_arithmetic.rs` and `tests/eqg_terrain_arithmetic.rs`.
 
 **Conditional arithmetic prerequisite:** `eqg::terrain_arithmetic` models finite-input midpoint and deviation operations with 53-bit significand rounding toward zero ([issue #106](https://github.com/djhenry/eqoxide_asset_server/issues/106)). The allocation-free integer implementation preserves intermediate rounding and signed zeros without changing the host floating-point mode; nonfinite operands return explicit errors. This is a value-only conditional model, not proof of the arithmetic mode active at every native terrain entry. It selects no bake profile, admits no source dataset and activates no output or query route.
 
 **Dependencies:** M1 resource resolution, M2 shared scene/export infrastructure, and M3 publication contracts.
 
+- [x] Implement the finite-input, value-only conditional 53-bit toward-zero arithmetic prerequisite in issue #106; native arithmetic-mode verification and bake-profile selection remain separate gates.
 - [ ] Parse project metadata including project name, bounds, units per vertex, quads per tile, coverage/layer sizes, and version.
 - [ ] Contribute reusable project/DAT parsing to `libeq_eqg`; keep project resource resolution and terrain rendering policy in this repository.
 - [ ] Resolve DAT resources by project references. Distinguish terrain data from auxiliary files such as water and exclusion data.
