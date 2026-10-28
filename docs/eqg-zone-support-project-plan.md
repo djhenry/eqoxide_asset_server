@@ -348,12 +348,13 @@ new manifests are emitted by this assessment slice.
 
 **Conditional emission phase:** `eqg::terrain_emission::emit_53rz` returns ordered full-grid triangle indices and applies interleaved current-working-height midpoint stores ([issue #114](https://github.com/djhenry/eqoxide_asset_server/issues/114)). The bounded, allocation-free result supports arbitrary raw states without assuming the usual 2048-triangle limit; such states can produce overlapping geometry. Only used midpoint endpoints must be finite, and refusal leaves caller heights unchanged. The phase reuses conditional 53-bit/toward-zero arithmetic including destination rounding, but does not establish source admission, cache history, a complete prepared surface or the active native arithmetic mode. No bake or query route is enabled.
 
-**Files:** Add `src/eqg/terrain.rs`, `src/eqg/material.rs`, and `src/eqg/object_group.rs`; extend `src/eqg/regions.rs`, `src/zone_scene.rs`, and build dispatch; add `tests/eqg_terrain.rs` and `tests/eqg_object_groups.rs`.
+**Files:** Add `src/eqg/terrain.rs`, `src/eqg/material.rs`, and `src/eqg/object_group.rs`; extend `src/eqg/regions.rs`, `src/zone_scene.rs`, and build dispatch; add `tests/eqg_terrain.rs` and `tests/eqg_object_groups.rs`. The conditional arithmetic prerequisite uses `src/eqg/terrain_arithmetic.rs` and `tests/eqg_terrain_arithmetic.rs`.
 
 **Conditional arithmetic prerequisite:** `eqg::terrain_arithmetic` models finite-input midpoint and deviation operations with 53-bit significand rounding toward zero ([issue #106](https://github.com/djhenry/eqoxide_asset_server/issues/106)). The allocation-free integer implementation preserves intermediate rounding and signed zeros without changing the host floating-point mode; nonfinite operands return explicit errors. This is a value-only conditional model, not proof of the arithmetic mode active at every native terrain entry. It selects no bake profile, admits no source dataset and activates no output or query route.
 
 **Dependencies:** M1 resource resolution, M2 shared scene/export infrastructure, and M3 publication contracts.
 
+- [x] Implement the finite-input, value-only conditional 53-bit toward-zero arithmetic prerequisite in issue #106; native arithmetic-mode verification and bake-profile selection remain separate gates.
 - [ ] Parse project metadata including project name, bounds, units per vertex, quads per tile, coverage/layer sizes, and version.
 - [ ] Contribute reusable project/DAT parsing to `libeq_eqg`; keep project resource resolution and terrain rendering policy in this repository.
 - [ ] Resolve DAT resources by project references. Distinguish terrain data from auxiliary files such as water and exclusion data.
