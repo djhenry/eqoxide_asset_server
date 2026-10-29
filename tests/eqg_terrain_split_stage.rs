@@ -236,3 +236,164 @@ fn negative_tolerance_does_not_bypass_used_height_validation() {
     );
     assert_eq!(f.prepared[0], 0);
 }
+
+#[test]
+fn forced_and_w_preseeded_chain_preserves_skip_and_new_split_distinction() {
+    let mut f = Fixture::new(1);
+    let mut flags = [[0; 32]; 32];
+    flags[6][12] = 4;
+    f.flags[0] = Some(flags);
+    f.run().unwrap();
+
+    // Frozen geometry from recursive triangle bisection, not neighbor lookup:
+    // leaves 1024/1027 occupy cell (12,6), seeding parents 512/513.
+    // Node 512's P-Q is (14,6)-(12,6), opposite 515; node 513's is
+    // (12,6)-(12,8), opposite 526. Already nonzero parents skip W writes.
+    let hierarchy = Q32Hierarchy::try_new().unwrap();
+    for (node, triangle) in [
+        (512, [[14, 6], [12, 6], [13, 7]]),
+        (515, [[12, 6], [14, 6], [13, 5]]),
+        (513, [[12, 6], [12, 8], [13, 7]]),
+        (526, [[12, 8], [12, 6], [11, 7]]),
+        (256, [[12, 8], [14, 6], [12, 6]]),
+        (259, [[14, 6], [12, 8], [14, 8]]),
+        (129, [[12, 8], [16, 8], [14, 6]]),
+        (142, [[16, 8], [12, 8], [14, 10]]),
+        (71, [[12, 12], [16, 8], [12, 8]]),
+        (68, [[16, 8], [12, 12], [16, 12]]),
+        (34, [[16, 16], [16, 8], [12, 12]]),
+        (45, [[16, 8], [16, 16], [20, 12]]),
+    ] {
+        assert_eq!(hierarchy.node(0, node), Some(triangle));
+    }
+    let states = &f.states[0][0];
+    for (node, expected) in [
+        (512, 1),
+        (513, 1),
+        (515, 0),
+        (526, 0),
+        (256, 1),
+        (259, 1),
+        (129, 1),
+        (142, 1),
+        (71, 1),
+        (68, 1),
+        (136, 0),
+        (137, 0),
+        (34, 1),
+        (45, 1),
+    ] {
+        assert_eq!(states[node], expected, "node {node}");
+    }
+    // Newly forced 256 writes already-visited 259, forcing its parent 129 to
+    // write 142.
+    // Then 71 writes 68 before its visit. Node 68 keeps that preseeded 1 even
+    // with zero children and flat heights, and its parent 34 writes 45.
+    assert_eq!(f.prepared, [1, 0, 0, 0]);
+}
+
+#[test]
+fn earlier_height_refusal_precedes_later_tolerance_refusal_atomically() {
+    let mut f = Fixture::new(3);
+    f.heights[0][12][6] = f32::NAN;
+    f.overrides[1] = f32::INFINITY;
+    let states = f.states;
+    let markers = f.prepared;
+    let heights = f.heights.map(|grid| grid.map(|row| row.map(f32::to_bits)));
+    assert_eq!(
+        f.run(),
+        Err(SplitPreparationError::Height {
+            context: 0,
+            tree: 0,
+            node: 1023,
+            operand: NonFiniteOperand::FirstEndpoint,
+        })
+    );
+    assert_eq!(f.states, states);
+    assert_eq!(f.prepared, markers);
+    assert_eq!(
+        f.heights.map(|grid| grid.map(|row| row.map(f32::to_bits))),
+        heights
+    );
+
+    // Correcting only the earlier operand exposes the later control refusal;
+    // controls are checked lazily, not preflighted across all contexts.
+    f.heights[0][12][6] = 0.0;
+    assert_eq!(
+        f.run(),
+        Err(SplitPreparationError::Tolerance {
+            context: 1,
+            field: ToleranceField::Override,
+        })
+    );
+    assert_eq!(f.states, states);
+    assert_eq!(f.prepared, markers);
+    assert_eq!(f.heights[0][12][6].to_bits(), 0);
+    assert_eq!(f.heights[1], [[0.0; 33]; 33]);
+}
+
+#[test]
+fn negative_and_zero_tolerances_follow_each_selection_route_and_validate_heights() {
+    for route in 0..3 {
+        let select = |f: &mut Fixture, tolerance| match route {
+            0 => {
+                f.global = tolerance;
+                f.local[0] = f32::NAN;
+            }
+            1 => {
+                f.global = f32::NAN;
+                f.local[0] = tolerance;
+                f.overrides[0] = f32::MAX;
+            }
+            _ => {
+                f.global = f32::NAN;
+                f.local[0] = f32::MAX;
+                f.overrides[0] = tolerance;
+            }
+        };
+        for (bits, expected) in [
+            (0xbf80_0000, 1),
+            (0x8000_0001, 1),
+            (0x8000_0000, 0),
+            (0, 0),
+            (1, 0),
+        ] {
+            let mut f = Fixture::new(1);
+            select(&mut f, f32::from_bits(bits));
+            f.run().unwrap();
+            for tree in &f.states[0] {
+                assert!(
+                    tree[1..1024].iter().all(|&v| v == expected),
+                    "route {route}, bits {bits:x}"
+                );
+                assert!(tree[1024..].iter().all(|&v| v == 0));
+            }
+            assert_eq!(f.prepared, [1, 0, 0, 0]);
+        }
+        // First visited node 1023 has P=(6,12), Q=(6,14), M=(6,13).
+        // A negative tolerance still validates each actually used operand.
+        for (y, operand) in [
+            (12, NonFiniteOperand::FirstEndpoint),
+            (14, NonFiniteOperand::SecondEndpoint),
+            (13, NonFiniteOperand::MidpointSample),
+        ] {
+            let mut f = Fixture::new(1);
+            select(&mut f, -1.0);
+            f.heights[0][y][6] = f32::INFINITY;
+            let states = f.states;
+            let markers = f.prepared;
+            assert_eq!(
+                f.run(),
+                Err(SplitPreparationError::Height {
+                    context: 0,
+                    tree: 0,
+                    node: 1023,
+                    operand,
+                })
+            );
+            assert_eq!(f.states, states);
+            assert_eq!(f.prepared, markers);
+            assert_eq!(f.heights[0][y][6].to_bits(), f32::INFINITY.to_bits());
+        }
+    }
+}
