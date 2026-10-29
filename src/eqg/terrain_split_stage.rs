@@ -78,16 +78,9 @@ fn select_tolerance(
     let local = finite(local, context, ToleranceField::Local)?;
     // Order finite encodings without depending on host denormal/rounding modes.
     // Equal signed zeros must select the local value, preserving its sign bit.
-    let key = |bits: u32| {
-        if bits >> 31 != 0 {
-            !bits
-        } else {
-            bits ^ 0x8000_0000
-        }
-    };
     let l = local.to_bits();
     let o = override_value.to_bits();
-    if (l | o) & 0x7fff_ffff == 0 || key(l) <= key(o) {
+    if (l | o) & 0x7fff_ffff == 0 || local.total_cmp(&override_value).is_le() {
         Ok(local)
     } else {
         Ok(override_value)
@@ -101,6 +94,10 @@ fn select_tolerance(
 /// a nonzero child forces a split, or strict conditional error > tolerance does.
 /// A new split writes its own state and a present W target to 1, even when the
 /// target is prepared. It does not write the target's parent or revisit nodes.
+/// Success records this phase's output, not a closed mesh or certification of
+/// prepared-state consistency. The separate dependency sweep is a later
+/// composition step, not a certification of arbitrary caller states or a
+/// complete surface.
 ///
 /// Override equal to `USE_GLOBAL_TOLERANCE` selects global and ignores local;
 /// otherwise local <= override selects local (including zero ties), else
@@ -113,6 +110,8 @@ fn select_tolerance(
 /// marker becomes 1, including initially nonzero markers; absent views receive
 /// no writes. Errors follow context/node order, checking controls before nodes
 /// and numeric operands through `deviation_exceeds_53rz`'s validation order.
+/// This deterministic lazy first-error policy can report an earlier height
+/// refusal before a later context's invalid tolerance.
 /// Flags, working heights and reserved state slots are never changed.
 pub fn prepare_splits_53rz(
     hierarchy: &Q32Hierarchy,
@@ -198,7 +197,12 @@ mod tests {
 
     #[test]
     fn selector_preserves_local_zero_ties_and_orders_finite_extremes() {
-        for (local, override_value) in [(0, 0x8000_0000), (0x8000_0000, 0)] {
+        for (local, override_value) in [
+            (0, 0),
+            (0, 0x8000_0000),
+            (0x8000_0000, 0),
+            (0x8000_0000, 0x8000_0000),
+        ] {
             assert_eq!(
                 select_tolerance(
                     0,
@@ -214,10 +218,16 @@ mod tests {
         let ordered = [
             0xff7f_ffff,
             0xbf80_0000,
+            0x8080_0000,
+            0x807f_ffff,
             0x8000_0001,
             0,
             1,
+            0x007f_ffff,
+            0x0080_0000,
+            0x3f7f_ffff,
             0x3f80_0000,
+            0x3f80_0001,
             0x7f7f_ffff,
         ];
         for (l, &local) in ordered.iter().enumerate() {
