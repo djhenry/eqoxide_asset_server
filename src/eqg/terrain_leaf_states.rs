@@ -19,6 +19,11 @@ pub type Q32QuadFlags = [[u8; 32]; 32];
 /// this call for an absent whole state view and owns stage scheduling. This
 /// function does not mark a view prepared, mutate flags, propagate to further
 /// ancestors or neighbors, or allocate memory.
+///
+/// The marker must describe this same state view. Repeating this call with zero
+/// intentionally clears and reseeds active indices, including previously
+/// propagated states. Completing the remaining stages and retaining their
+/// prepared marker is the caller's responsibility.
 pub fn seed_if_unprepared(
     hierarchy: &Q32Hierarchy,
     flags: Option<&Q32QuadFlags>,
@@ -36,6 +41,8 @@ pub fn seed_if_unprepared(
     };
     for leaf in Q32Hierarchy::FIRST_LEAF..Q32Hierarchy::NODE_END {
         for (tree, tree_states) in states.iter_mut().enumerate() {
+            // A constructed hierarchy has both complete, immutable trees. This
+            // loop supplies only their valid leaf identifiers and tree indices.
             let [x, y] = hierarchy
                 .leaf_quad(tree, leaf)
                 .expect("fixed leaf is within the hierarchy");
@@ -43,6 +50,7 @@ pub fn seed_if_unprepared(
             if flag & 0x01 != 0 {
                 tree_states[leaf] = 0xff;
             }
+            // Leaf omission requests its parent even when mask 0x04 is clear.
             if flag & 0x05 != 0 {
                 tree_states[leaf / 2] = 1;
             }
