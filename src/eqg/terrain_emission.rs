@@ -15,15 +15,25 @@ use super::{
 /// Ordered full-grid triangle indices. Arbitrary raw states can produce
 /// overlapping coarse/fine triangles; this type does not certify a valid mesh.
 /// Storage has a fixed bound and uses no heap allocation.
-#[derive(Debug)]
 pub struct Q32Emission {
     triangles: [[u16; 3]; Self::MAX_TRIANGLES],
     len: usize,
 }
 
+impl std::fmt::Debug for Q32Emission {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Q32Emission")
+            .field("triangles", &self.triangles())
+            .finish()
+    }
+}
+
 impl Q32Emission {
     /// Each of the two trees' 2047 usable node identities can be emitted at most
-    /// once. This bound assumes neither ancestor consistency nor a 2048-face limit.
+    /// once: roots directly, other nodes only through their unique parent.
+    /// This conservative storage bound assumes neither ancestor consistency nor
+    /// a 2048-face limit; it is not the tight maximum of the current traversal.
     pub const MAX_TRIANGLES: usize = 2 * (Q32Hierarchy::NODE_END - 1);
 
     /// Indices are `33*y+x`, in emission order with stored P/Q/R corner order.
@@ -55,7 +65,9 @@ pub struct MidpointError {
 /// emits itself. Every zero internal node immediately stores its current P/Q
 /// mean at its odd child's R, even beneath an already emitted coarser ancestor.
 /// Nonzero nodes instead emit their zero-state children, odd then even, with
-/// no height reads or stores. There is no recursive traversal or ancestor prune.
+/// no height reads or stores. A leaf is emitted only when its state is zero and
+/// its parent is nonzero; any nonzero leaf byte suppresses that leaf. There is
+/// no recursive traversal or ancestor prune.
 ///
 /// Midpoints use `midpoint_53rz`, including destination binary32 rounding toward
 /// zero. Stores affect subsequent reads in the same working grid. Only used
@@ -76,9 +88,11 @@ pub fn emit_53rz(
         triangles: [[0; 3]; Q32Emission::MAX_TRIANGLES],
         len: 0,
     };
+    // The hierarchy constructor creates both complete immutable trees. All
+    // node/child indices supplied by these fixed loops are construction invariants.
     for node in 1..Q32Hierarchy::FIRST_LEAF {
-        for (tree, states) in states.iter().enumerate() {
-            if states[node] == 0 {
+        for (tree, tree_states) in states.iter().enumerate() {
+            if tree_states[node] == 0 {
                 let corners = hierarchy.node(tree, node).expect("fixed internal node");
                 if node == 1 {
                     output.push(corners);
@@ -95,7 +109,7 @@ pub fn emit_53rz(
                 working[usize::from(my)][usize::from(mx)] = midpoint;
             } else {
                 for child in [node * 2 + 1, node * 2] {
-                    if states[child] == 0 {
+                    if tree_states[child] == 0 {
                         output.push(hierarchy.node(tree, child).expect("fixed child"));
                     }
                 }
