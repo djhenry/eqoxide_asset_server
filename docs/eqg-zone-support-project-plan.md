@@ -345,7 +345,8 @@ The [initial-load terrain preparation candidate](eqg-terrain-preparation-design.
 - [ ] Parse project metadata including project name, bounds, units per vertex, quads per tile, coverage/layer sizes, and version.
 - [ ] Contribute reusable project/DAT parsing to `libeq_eqg`; keep project resource resolution and terrain rendering policy in this repository.
 - [ ] Resolve DAT resources by project references. Distinguish terrain data from auxiliary files such as water and exclusion data.
-- [ ] Establish supported terrain versions and decode each with explicit layout gates. Determine topology, seam handling, holes, and collision bits before meshing.
+- [ ] Complete the [initial-load preparation proof gates](eqg-terrain-preparation-design.md#proof-required-before-a-geometry-bake) in issue #100, including native membership, effective controls, numerical/store behavior, corner donors and independent native-output fixtures.
+- [ ] Establish supported terrain versions and decode each with explicit layout gates. Determine [topology, seam handling, holes, and collision bits](eqg-terrain-preparation-design.md#proof-required-before-a-geometry-bake) before meshing; the preparation proof checklist must also be complete.
 - [ ] Preserve terrain layer, coverage, blending, repeat, detail, and normal-map properties. Implement deterministic diffuse layer baking as the initial approximation, with the approximation recorded in the report.
 - [ ] Load object groups only through verified inclusion rules. Detect dependency cycles, compose transforms, and test that resources are not appended twice.
 - [ ] Resolve the inclusion rule for TOG resources associated with binary zones and enable those dependencies through the same resolver when verified.
