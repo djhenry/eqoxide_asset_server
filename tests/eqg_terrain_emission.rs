@@ -163,8 +163,18 @@ fn nonclosed_raw_states_can_emit_more_than_a_valid_mesh_capacity() {
         }
     }
     let output = emit_53rz(&hierarchy, &states, &mut [[0.0; 33]; 33]).unwrap();
-    assert_eq!(output.triangles().len(), 2730);
+    // An emitted node has zero state and its parent has nonzero state, except
+    // for roots. Thus emitted nodes form an independent set in each tree.
+    // The include/exclude recurrence counts that set without scanning states.
+    let (mut excluded, mut included) = (0, 1);
+    for _ in 0..10 {
+        (excluded, included) = (2 * excluded.max(included), 1 + 2 * excluded);
+    }
+    let maximum = 2 * excluded.max(included);
+    assert_eq!(maximum, 2730);
+    assert_eq!(output.triangles().len(), maximum);
     assert_eq!(Q32Emission::MAX_TRIANGLES, 4094);
+    assert!(maximum < Q32Emission::MAX_TRIANGLES);
 }
 
 #[test]
@@ -179,4 +189,108 @@ fn unselected_descendants_still_update_the_working_grid() {
     let output = emit_53rz(&hierarchy, &states, &mut heights).unwrap();
     assert_eq!(output.triangles(), [[1056, 32, 0], [32, 1056, 1088]]);
     assert_eq!(heights[8][8], 7.0);
+}
+
+#[test]
+fn used_endpoint_errors_preserve_exact_tree_node_operand_and_grid_bits() {
+    let hierarchy = Q32Hierarchy::try_new().unwrap();
+    for tree in 0..2 {
+        for node in [1, 2, 3, 4, 7, 32, 511, 1023] {
+            let [p, q, _] = hierarchy.node(tree, node).unwrap();
+            for (point, operand) in [
+                (p, NonFiniteOperand::FirstEndpoint),
+                (q, NonFiniteOperand::SecondEndpoint),
+            ] {
+                for bits in [0x7fc1_2345, 0x7f80_0001, 0x7f80_0000, 0xff80_0000] {
+                    let mut states: Q32SplitStates = [[1; 2048]; 2];
+                    states[tree][node] = 0;
+                    let before_states = states;
+                    let [x, y] = point.map(usize::from);
+                    let mut heights = corner_grid();
+                    heights[y][x] = f32::from_bits(bits);
+                    let before = heights;
+                    assert_eq!(
+                        emit_53rz(&hierarchy, &states, &mut heights).unwrap_err(),
+                        MidpointError {
+                            tree,
+                            node,
+                            operand
+                        },
+                        "tree={tree} node={node} bits={bits:08x} operand={operand:?}"
+                    );
+                    assert_height_bits(&heights, &before);
+                    assert_eq!(states, before_states);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn tree_one_late_refusals_roll_back_earlier_cross_tree_stores() {
+    let hierarchy = Q32Hierarchy::try_new().unwrap();
+    // With only these selected zero internal nodes, the earlier tree-0 store
+    // is finite. The later tree-1 read uses the opposite outer corner D=(32,32).
+    for (early_node, node, operand, [mx, my], midpoint) in [
+        (1, 2, NonFiniteOperand::SecondEndpoint, [16, 16], 4.0_f32),
+        (2, 3, NonFiniteOperand::FirstEndpoint, [16, 0], 8.0_f32),
+    ] {
+        for bits in [0x7fc1_2345, 0x7f80_0001, 0x7f80_0000, 0xff80_0000] {
+            let mut states: Q32SplitStates = [[1; 2048]; 2];
+            states[0][early_node] = 0;
+            states[1][node] = 0;
+            let before_states = states;
+            let mut heights = corner_grid();
+            heights[32][32] = f32::from_bits(bits);
+            let before = heights;
+
+            // A companion run skips just the later read and witnesses the
+            // actual earlier store, so rollback cannot pass by doing no work.
+            let mut skip_later = states;
+            skip_later[1][node] = 1;
+            let mut companion = before;
+            emit_53rz(&hierarchy, &skip_later, &mut companion).unwrap();
+            let mut after_earlier = before;
+            after_earlier[my][mx] = midpoint;
+            assert_height_bits(&companion, &after_earlier);
+            assert_ne!(companion[my][mx].to_bits(), before[my][mx].to_bits());
+
+            assert_eq!(
+                emit_53rz(&hierarchy, &states, &mut heights).unwrap_err(),
+                MidpointError {
+                    tree: 1,
+                    node,
+                    operand
+                },
+                "node={node} bits={bits:08x} operand={operand:?}"
+            );
+            assert_height_bits(&heights, &before);
+            assert_eq!(states, before_states);
+        }
+    }
+}
+
+#[test]
+fn overwritten_nonfinite_working_cells_do_not_refuse_before_later_reads() {
+    let hierarchy = Q32Hierarchy::try_new().unwrap();
+    let states: Q32SplitStates = [[0; 2048]; 2];
+    let expected = std::array::from_fn(|y| {
+        std::array::from_fn(|x| {
+            if x + y <= 32 {
+                (80 - x as i32 - 2 * y as i32) as f32 / 8.0
+            } else {
+                (3 * x as i32 + 2 * y as i32 - 48) as f32 / 8.0
+            }
+        })
+    });
+    for bits in [0x7fc1_2345, 0x7f80_0001, 0x7f80_0000, 0xff80_0000] {
+        let mut heights = [[f32::from_bits(bits); 33]; 33];
+        heights[32][0] = 2.0;
+        heights[0][32] = 6.0;
+        heights[0][0] = 10.0;
+        heights[32][32] = 14.0;
+        let output = emit_53rz(&hierarchy, &states, &mut heights).unwrap();
+        assert_eq!(output.triangles(), [[1056, 32, 0], [32, 1056, 1088]]);
+        assert_height_bits(&heights, &expected);
+    }
 }
