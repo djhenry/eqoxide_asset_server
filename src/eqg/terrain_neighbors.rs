@@ -8,7 +8,8 @@ use super::terrain_hierarchy::Q32Hierarchy;
 use std::collections::TryReserveError;
 
 /// Identity of a node in the fixed template. Returned identities always use
-/// contexts 0..4, trees 0..2 and node identifiers 1..2048.
+/// contexts 0 through 3, trees 0 or 1 and node identifiers at least 1 and less
+/// than `Q32Hierarchy::NODE_END`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NeighborNode {
     pub context: u8,
@@ -38,8 +39,8 @@ const ROOTS: [[Option<NeighborNode>; 3]; 8] = [
     [None, None, root(3, 0)],
 ];
 
-fn slot(context: u8, tree: u8, node: u16) -> usize {
-    (usize::from(context) * 2 + usize::from(tree)) * NODES + usize::from(node) - 1
+fn slot(context: usize, tree: usize, node: usize) -> usize {
+    (context * 2 + tree) * NODES + node - 1
 }
 
 fn child(link: Option<NeighborNode>, odd: bool) -> Option<NeighborNode> {
@@ -49,28 +50,31 @@ fn child(link: Option<NeighborNode>, odd: bool) -> Option<NeighborNode> {
     })
 }
 
-/// Immutable neighbor records for both trees in each of four canonical contexts.
+/// Immutable neighbor records for both trees in each of four fixed source-grid
+/// contexts: self, east, north and northeast.
 /// This is a topology prerequisite, not a prepared terrain surface or query mesh.
 pub struct Q32Neighbors {
     links: Vec<[Option<NeighborNode>; 3]>,
 }
 
 impl Q32Neighbors {
-    /// Allocate the bounded template with one fallible reservation for 16376
-    /// node records. No partial template is exposed on allocation failure.
+    /// Allocate the bounded template with one fallible reservation for
+    /// `RECORDS = 4 * 2 * (Q32Hierarchy::NODE_END - 1)` node records.
+    /// No partial template is exposed on allocation failure.
     pub fn try_new() -> Result<Self, TryReserveError> {
         let mut links = Vec::new();
         links.try_reserve_exact(RECORDS)?;
         links.resize(RECORDS, [None; 3]);
         for context in 0_u8..4 {
             for tree in 0_u8..2 {
-                links[slot(context, tree, 1)] = ROOTS[usize::from(context) * 2 + usize::from(tree)];
+                links[slot(context.into(), tree.into(), 1)] =
+                    ROOTS[usize::from(context) * 2 + usize::from(tree)];
             }
         }
         for context in 0_u8..4 {
             for parent in 1..Q32Hierarchy::FIRST_LEAF as u16 {
                 for tree in 0_u8..2 {
-                    let [u, v, w] = links[slot(context, tree, parent)];
+                    let [u, v, w] = links[slot(context.into(), tree.into(), parent.into())];
                     let even = NeighborNode {
                         context,
                         tree,
@@ -80,10 +84,15 @@ impl Q32Neighbors {
                         node: even.node + 1,
                         ..even
                     };
-                    links[slot(context, tree, even.node)] =
-                        [child(w, true), Some(odd), child(v, parent != 1)];
-                    links[slot(context, tree, odd.node)] =
-                        [Some(even), child(w, false), child(u, parent == 1)];
+                    let is_root = parent == 1;
+                    // Root side-edge orientations pair even.W with V's even
+                    // child and odd.W with U's odd child; deeper parents use
+                    // V's odd and U's even child. Across W, even.U and odd.V
+                    // always pair with W's odd and even child respectively.
+                    links[slot(context.into(), tree.into(), even.node.into())] =
+                        [child(w, true), Some(odd), child(v, !is_root)];
+                    links[slot(context.into(), tree.into(), odd.node.into())] =
+                        [Some(even), child(w, false), child(u, is_root)];
                 }
             }
         }
@@ -92,8 +101,9 @@ impl Q32Neighbors {
 
     /// Return U, V, W neighbors, corresponding to unordered edges R-P, Q-R, P-Q.
     /// Contexts 0,1,2,3 mean self,east,north,northeast; trees are 0 or 1 and node
-    /// identifiers are 1..2048. Invalid inputs return outer `None`. Inner `None`
-    /// means a valid edge exits this fixed window, not a missing source tile.
+    /// identifiers are at least 1 and less than `Q32Hierarchy::NODE_END`.
+    /// Invalid inputs return outer `None`. Inner `None` means a valid edge exits
+    /// this fixed window, not a missing source tile.
     pub fn neighbors(
         &self,
         context: usize,
@@ -103,6 +113,6 @@ impl Q32Neighbors {
         if context >= 4 || tree >= 2 || !(1..Q32Hierarchy::NODE_END).contains(&node) {
             return None;
         }
-        Some(self.links[(context * 2 + tree) * NODES + node - 1])
+        Some(self.links[slot(context, tree, node)])
     }
 }
