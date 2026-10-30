@@ -91,3 +91,29 @@ fn leaves_partition_every_quad_into_two_clockwise_unit_triangles() {
         }
     }
 }
+
+#[test]
+fn every_depth_preserves_clockwise_area_and_exact_parent_midpoints() {
+    let hierarchy = Q32Hierarchy::try_new().unwrap();
+    // Fixed-grid doubled areas halve at every bisection, through half-quad leaves.
+    let areas_by_depth = [-1024, -512, -256, -128, -64, -32, -16, -8, -4, -2, -1];
+    for tree in [0, 1] {
+        for node in 1_usize..2048 {
+            let corners = hierarchy.node(tree, node).unwrap();
+            assert!(corners.iter().flatten().all(|&coordinate| coordinate <= 32));
+            let [p, q, r] = corners.map(|point| point.map(i32::from));
+            let area = (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
+            let depth = node.ilog2() as usize;
+            assert_eq!(area, areas_by_depth[depth], "tree {tree}, node {node}");
+            if node < 1024 {
+                // Even coordinate sums make halving exact, not truncation.
+                let sum = [p[0] + q[0], p[1] + q[1]];
+                assert_eq!(sum.map(|coordinate| coordinate % 2), [0, 0]);
+                let midpoint = sum.map(|coordinate| (coordinate / 2) as u16);
+                let [p, q, r] = corners;
+                assert_eq!(hierarchy.node(tree, node * 2), Some([q, r, midpoint]));
+                assert_eq!(hierarchy.node(tree, node * 2 + 1), Some([r, p, midpoint]));
+            }
+        }
+    }
+}
