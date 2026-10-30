@@ -18,3 +18,5 @@ pub mod static_collision;
 pub mod terrain_hierarchy;
 
 pub mod terrain_neighbors;
+
+pub mod terrain_dependencies;
