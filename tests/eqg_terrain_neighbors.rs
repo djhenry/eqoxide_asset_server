@@ -63,7 +63,7 @@ fn every_template_link_matches_a_whole_geometric_edge_at_its_depth() {
     let mut edges = BTreeMap::<Edge, Vec<(NeighborNode, usize)>>::new();
     for (context, origin) in origins.into_iter().enumerate() {
         for tree in 0..2 {
-            for node in 1_usize..2048 {
+            for node in 1_usize..Q32Hierarchy::NODE_END {
                 let depth = usize::BITS - 1 - node.leading_zeros();
                 let [p, q, r] = hierarchy
                     .node(tree, node)
@@ -97,6 +97,34 @@ fn every_template_link_matches_a_whole_geometric_edge_at_its_depth() {
             boundaries += usize::from(expected.is_none());
         }
     }
-    assert_eq!(slots, 49128);
-    assert_eq!(boundaries, 752);
+    // Four contexts, two 2047-node trees and three edge slots per node.
+    assert_eq!(slots, 4 * 2 * 2047 * 3);
+    // The window perimeter has eight tile edges. At depth d, each has
+    // 2^(floor(d/2)) segments; sum the counts from depth 0 through depth 10.
+    let expected_boundaries = 8 * (0..=10).map(|depth| 1_usize << (depth / 2)).sum::<usize>();
+    assert_eq!(boundaries, expected_boundaries);
+}
+
+#[test]
+fn wide_invalid_indices_do_not_alias_valid_template_records() {
+    let graph = Q32Neighbors::try_new().unwrap();
+    assert!(graph.neighbors(0, 0, 1).is_some());
+    assert!(graph.neighbors(3, 1, 2047).is_some());
+    // These invalid usize inputs become valid indices if narrowed first.
+    for [context, tree, node] in [
+        [256, 0, 1],
+        [257, 1, 1024],
+        [259, 1, 2047],
+        [0, 256, 1],
+        [3, 257, 2047],
+        [0, 0, 65537],
+        [3, 1, 66560],
+        [3, 1, 67583],
+    ] {
+        assert_eq!(
+            graph.neighbors(context, tree, node),
+            None,
+            "context {context}, tree {tree}, node {node}"
+        );
+    }
 }
