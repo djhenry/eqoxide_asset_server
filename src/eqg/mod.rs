@@ -32,3 +32,5 @@ pub mod terrain_emission;
 pub mod terrain_preparation;
 
 pub mod terrain_initial_load;
+
+pub mod terrain_source;
