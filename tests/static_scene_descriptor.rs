@@ -668,9 +668,9 @@ fn failed_descriptor_replacement_preserves_destination_and_cleans_staging() {
 }
 
 #[test]
-fn canonical_query_units_descriptor_union_and_refusals() {
-    let cap = "static-collision-query-unit-frames-v1";
-    for empty in [false, true] {
+fn preserved_source_query_frames_descriptor_union_and_refusals() {
+    let cap = "eqoxide-source-query-frames-preserved-v1";
+    for (empty, reverse) in [(false, false), (false, true), (true, false), (true, true)] {
         let mut c = collision(empty);
         let req = match &mut c {
             CollisionComponent::Available { requirements, .. }
@@ -679,15 +679,24 @@ fn canonical_query_units_descriptor_union_and_refusals() {
         };
         // Component order is set-like; descriptor root remains sorted.
         req.capabilities.push(cap.into());
+        if reverse {
+            req.capabilities.reverse();
+        }
         let d = SceneDescriptor::new("demo", &"a".repeat(64), visual(), c).unwrap();
         assert_eq!(
             d.requirements.capabilities,
-            [cap, "static-collision-triangles-v1", "static-scene-package-v1",
-                "static-visual-v1", "vertex-rgba-v1"]
+            [
+                cap,
+                "static-collision-triangles-v1",
+                "static-scene-package-v1",
+                "static-visual-v1",
+                "vertex-rgba-v1"
+            ]
         );
         let bytes = encode_scene_descriptor(&d, &DescriptorLimits::default()).unwrap();
         assert_eq!(
-            decode_scene_descriptor(&bytes, &DescriptorLimits::default()).unwrap(), d
+            decode_scene_descriptor(&bytes, &DescriptorLimits::default()).unwrap(),
+            d
         );
         for invalid in [
             vec![cap, cap, "static-collision-triangles-v1"],
@@ -701,19 +710,84 @@ fn canonical_query_units_descriptor_union_and_refusals() {
         }
     }
     let d = SceneDescriptor::new(
-        "demo", &"a".repeat(64), visual(), CollisionComponent::NotExtracted {},
+        "demo",
+        &"a".repeat(64),
+        visual(),
+        CollisionComponent::NotExtracted {},
     )
     .unwrap();
     let mut stray = serde_json::to_value(&d).unwrap();
     stray["requirements"]["capabilities"]
-        .as_array_mut().unwrap().insert(0, cap.into());
+        .as_array_mut()
+        .unwrap()
+        .insert(0, cap.into());
     refused(&serde_json::to_vec(&stray).unwrap());
     let mut v = visual();
     if let VisualComponent::Available { requirements, .. } = &mut v {
         requirements.capabilities.push(cap.into());
     }
     assert!(SceneDescriptor::new(
-        "demo", &"a".repeat(64), v, CollisionComponent::NotExtracted {},
+        "demo",
+        &"a".repeat(64),
+        v,
+        CollisionComponent::NotExtracted {},
     )
     .is_err());
+}
+
+#[test]
+fn retired_explicit_query_frame_capability_is_refused_in_every_role() {
+    let old = "static-collision-query-unit-frames-v1";
+    for empty in [false, true] {
+        let mut c = collision(empty);
+        match &mut c {
+            CollisionComponent::Available { requirements, .. }
+            | CollisionComponent::AvailableEmpty { requirements, .. } => {
+                requirements.capabilities.push(old.into())
+            }
+            _ => unreachable!(),
+        }
+        assert!(SceneDescriptor::new("demo", &"a".repeat(64), visual(), c).is_err());
+        let d = SceneDescriptor::new("demo", &"a".repeat(64), visual(), collision(empty)).unwrap();
+        let mut bad = serde_json::to_value(&d).unwrap();
+        // A matching root union cannot legitimize the retired component declaration.
+        bad["requirements"]["capabilities"]
+            .as_array_mut()
+            .unwrap()
+            .insert(0, old.into());
+        bad["components"]["collision"]["requirements"]["capabilities"]
+            .as_array_mut()
+            .unwrap()
+            .push(old.into());
+        refused(&serde_json::to_vec(&bad).unwrap());
+    }
+    for cap in [old, "eqoxide-source-query-frames-preserved-v1"] {
+        for collision_role in [
+            CollisionComponent::NotExtracted {},
+            CollisionComponent::Unsupported {},
+        ] {
+            let d =
+                SceneDescriptor::new("demo", &"a".repeat(64), visual(), collision_role).unwrap();
+            let mut root_only = serde_json::to_value(&d).unwrap();
+            root_only["requirements"]["capabilities"]
+                .as_array_mut()
+                .unwrap()
+                .insert(0, cap.into());
+            refused(&serde_json::to_vec(&root_only).unwrap());
+            let mut smuggled = serde_json::to_value(&d).unwrap();
+            smuggled["components"]["collision"]["requirements"] = serde_json::json!({"readerVersion":2,"capabilities":[cap,"static-collision-triangles-v1"]});
+            refused(&serde_json::to_vec(&smuggled).unwrap());
+        }
+        let mut v = visual();
+        if let VisualComponent::Available { requirements, .. } = &mut v {
+            requirements.capabilities.push(cap.into());
+        }
+        assert!(SceneDescriptor::new(
+            "demo",
+            &"a".repeat(64),
+            v,
+            CollisionComponent::NotExtracted {}
+        )
+        .is_err());
+    }
 }

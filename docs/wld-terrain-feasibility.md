@@ -46,4 +46,4 @@ The process limits above were necessary safeguards for this inspection. A caller
 
 ## Evidence ceiling
 
-Author and independent inspection agree on all six per-input counts and aggregate classifications. The independent audit also checked the relevant native preparation source and assembly. This is raw-source feasibility and bounded synthetic API reproduction, not a source-normalizer regression suite, real producer-to-GLB conversion, native runtime agreement, server alignment or live client testing. Canonical-frame declaration, complete collision membership and numerical query acceptance remain distinct milestones.
+Author and independent inspection agree on all six per-input counts and aggregate classifications. The independent audit also checked the relevant native preparation source and assembly. This is raw-source feasibility and bounded synthetic API reproduction, not a source-normalizer regression suite, real producer-to-GLB conversion, native runtime agreement, server alignment or live client testing. Source query-frame preservation declaration, complete collision membership and numerical query acceptance remain distinct milestones.
