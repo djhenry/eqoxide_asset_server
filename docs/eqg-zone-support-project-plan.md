@@ -340,6 +340,8 @@ new manifests are emitted by this assessment slice.
 
 **Neighbor topology prerequisite:** `eqg::terrain_neighbors::Q32Neighbors` provides the immutable four-context neighbor template ([issue #104](https://github.com/djhenry/eqoxide_asset_server/issues/104)). Its complete edge graph is checked against geometric edge matching at each hierarchy depth, including the roots' distinct child rule. An edge outside the template window is distinct from an invalid lookup and says nothing about actual source-tile availability. Prepared-state reuse, split propagation, numerical rules and final surfaces remain separate work; this helper activates no bake or query route.
 
+**Dependency-state prerequisite:** `eqg::terrain_dependencies::propagate_once` performs one ordered, in-place sweep over optional q32 split-state views ([issue #108](https://github.com/djhenry/eqoxide_asset_server/issues/108)). Tests pin target and parent writes, reserved slot zero, raw-byte normalization, missing views and the difference between one sweep and repeated closure. The helper allocates no memory and does not interpret prepared-cache markers. Caller-seeded state tests do not establish full preparation reachability, source admission or native surface agreement; no bake or query route is enabled.
+
 **Files:** Add `src/eqg/terrain.rs`, `src/eqg/material.rs`, and `src/eqg/object_group.rs`; extend `src/eqg/regions.rs`, `src/zone_scene.rs`, and build dispatch; add `tests/eqg_terrain.rs` and `tests/eqg_object_groups.rs`.
 
 **Dependencies:** M1 resource resolution, M2 shared scene/export infrastructure, and M3 publication contracts.
