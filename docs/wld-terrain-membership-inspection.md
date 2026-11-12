@@ -66,7 +66,7 @@ Define an explicit supported Region layout/flag profile; a typed parse alone is 
 
 Preserve each region-to-mesh association in the report. Native imports a shared target repeatedly when multiple regions reference it; silent deduplication changes those source contributions. The selected frontend currently requires unique source slots, so feeding aliases into it needs a separately reviewed association/ownership contract. Contextual ordinals and slots do not create stable enhancement owner identities.
 
-The inspector should return bounded observations and explicit incomplete/unsupported coverage, rather than a collision scene or publication-ready selection. A later caller may supply verified bindings to the selected frontend after the source profile is accepted. No automatic source certification or canonical query-frame declaration follows from association inspection.
+The inspector should return bounded observations and explicit incomplete/unsupported coverage, rather than a collision scene or publication-ready selection. A later caller may supply verified bindings to the selected frontend after the source profile is accepted. No automatic source certification or source query-frame preservation declaration follows from association inspection.
 
 ## Limits and acceptance
 

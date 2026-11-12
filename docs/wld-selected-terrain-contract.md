@@ -77,7 +77,7 @@ Use distinct error categories for invalid limits, exhausted budget, invalid sele
 
 ## Package boundary and acceptance
 
-Normalization does not publish or activate a package. The first bridge uses the existing writer with query-unit frames unspecified; it must not automatically claim source certification. A later caller may explicitly declare canonical frames after source-frame provenance acceptance using [the declaration writer](https://github.com/djhenry/eqoxide_asset_server/pull/83). That declaration remains separate from ownership, world coverage and native query parity.
+Normalization does not publish or activate a package. The first bridge uses the existing writer with query-unit frames unspecified; it must not automatically claim source certification. A caller may explicitly assert preservation of supplied decoded source collision query frames using [the declaration writer](static-collision-contract.md); unknown source frames remain unspecified. This eqoxide bake assertion neither verifies importer provenance nor establishes universal EQ/RoF2 units or game identity. It remains separate from ownership, world coverage, implemented queries and native query parity.
 
 Use two fixture layers. Author bytes for `WldDoc::parse` to exercise positional selection and the full pipeline, including selected `Unknown` refusal. Separately pass direct `DmSpriteDef2` literals to the internal record-validation helper for declared/actual count disagreement. The pinned document constructor and fields are private, and successfully parsed arrays match their declared counts; malformed byte fixtures becoming `Unknown` cannot substitute for that helper test. Neither layer requires a new library API.
 
