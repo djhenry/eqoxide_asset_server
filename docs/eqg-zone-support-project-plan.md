@@ -336,6 +336,8 @@ new manifests are emitted by this assessment slice.
 
 ### M4 — EQTZP/DAT terrain and materials
 
+**Integer topology prerequisite:** `eqg::terrain_hierarchy::Q32Hierarchy` constructs the two ordered triangle trees for a fixed 32-by-32-quad tile, with bounded fallible allocation and checked node/leaf-quad lookup ([issue #102](https://github.com/djhenry/eqoxide_asset_server/issues/102)). Each tree stores 2047 nodes including 1024 leaf triangles: 4094 records span all levels, while the 2048 leaves partition 1024 quads. The requested element payload is 49,128 bytes, excluding vector headers, allocator overhead and excess capacity. Tests cover corner ordering, index boundaries, exact internal-edge midpoint parity, negative signed area with X right/Y up, and complete quad coverage. This helper does not prepare heights, refine triangles, link neighbors, produce a GLB or activate a bake route; the full preparation profile and native surface agreement remain unverified.
+
 **Files:** Add `src/eqg/terrain.rs`, `src/eqg/material.rs`, and `src/eqg/object_group.rs`; extend `src/eqg/regions.rs`, `src/zone_scene.rs`, and build dispatch; add `tests/eqg_terrain.rs` and `tests/eqg_object_groups.rs`.
 
 **Dependencies:** M1 resource resolution, M2 shared scene/export infrastructure, and M3 publication contracts.
