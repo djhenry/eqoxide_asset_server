@@ -28,3 +28,5 @@ pub mod terrain_arithmetic;
 pub mod terrain_split_stage;
 
 pub mod terrain_emission;
+
+pub mod terrain_preparation;
