@@ -52,26 +52,26 @@ impl InspectionQueryPolicy {
         }
     }
 }
-/// Explicit producer declaration of the collision mesh's query-unit frames.
-pub const CANONICAL_QUERY_UNIT_FRAMES_CAPABILITY: &str =
-    "static-collision-query-unit-frames-v1";
+/// Eqoxide bake assertion that the supplied source collision query frames are preserved.
+pub const SOURCE_QUERY_FRAMES_PRESERVED_CAPABILITY: &str =
+    "eqoxide-source-query-frames-preserved-v1";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueryUnitFrames {
     Unspecified,
-    DeclaredCanonical,
+    DeclaredSourceQueryFramesPreserved,
 }
 impl QueryUnitFrames {
     pub fn identifier(self) -> &'static str {
         match self {
             Self::Unspecified => "unspecified",
-            Self::DeclaredCanonical => "declared-canonical",
+            Self::DeclaredSourceQueryFramesPreserved => "declared-source-query-frames-preserved",
         }
     }
     pub fn required_capabilities(self) -> &'static [&'static str] {
         match self {
             Self::Unspecified => &["static-collision-triangles-v1"],
-            Self::DeclaredCanonical => &[
-                CANONICAL_QUERY_UNIT_FRAMES_CAPABILITY,
+            Self::DeclaredSourceQueryFramesPreserved => &[
+                SOURCE_QUERY_FRAMES_PRESERVED_CAPABILITY,
                 "static-collision-triangles-v1",
             ],
         }
@@ -146,10 +146,13 @@ pub fn write_static_collision(
         limits,
     )
 }
-/// Write with an explicit frame declaration. Canonical input must retain source query units:
-/// terrain world units, or model-local units with scale in the instance matrix.
-/// Callers establish source provenance and include the declaration in their bake identity;
-/// finite geometry alone cannot establish canonical units or native query behavior.
+/// Write with an explicit eqoxide assertion preserving supplied source collision query frames:
+/// decoded terrain world units, or decoded model-local units with scale in instance matrices.
+/// Raw quantization must be decoded first; the existing exact axis conversion is allowed.
+/// Include the declaration in the bake identity; leave unknown source frames unspecified.
+/// This asserts neither universal EQ/RoF2 units nor game identity, importer provenance verification,
+/// implemented queries or agreement with native query behavior. Bare coordinates cannot prove
+/// the supplied source frame history; folding scale into local pools violates this assertion.
 pub fn write_static_collision_with_query_units(
     scene: &StaticCollisionScene,
     bake_revision: &str,
