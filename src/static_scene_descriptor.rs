@@ -274,7 +274,7 @@ fn component_union(components: &SceneComponents, limits: &DescriptorLimits) -> R
             "static-collision-triangles-v1",
             &[
                 "static-collision-triangles-v1",
-                crate::static_collision::CANONICAL_QUERY_UNIT_FRAMES_CAPABILITY,
+                crate::static_collision::SOURCE_QUERY_FRAMES_PRESERVED_CAPABILITY,
             ],
         )?;
     }
