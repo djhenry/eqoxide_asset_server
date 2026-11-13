@@ -141,6 +141,7 @@ pub fn export_collision(scene: &BinaryZoneScene, out: &Path) -> Result<Collision
             "nodes": [0],
         }})),
         node_names: BTreeMap::from([(0, "__collision__".into())]),
+        ..Default::default()
     };
     let parent = out.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     let temp = tempfile::NamedTempFile::new_in(parent).context("create sibling collision staging file")?;

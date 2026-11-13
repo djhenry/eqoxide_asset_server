@@ -529,3 +529,263 @@ fn failed_publication_preserves_destination_and_removes_staging_file() {
     assert_eq!(std::fs::read(sentinel).unwrap(), b"last good");
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
 }
+
+fn glb_json(path: &std::path::Path) -> serde_json::Value {
+    let bytes = std::fs::read(path).unwrap();
+    let glb = gltf::binary::Glb::from_slice(&bytes).unwrap();
+    serde_json::from_slice(&glb.json).unwrap()
+}
+
+#[test]
+fn modern_policy_serializes_scalar_intent_and_reports_provenance() {
+    let mut s = scene();
+    for name in ["smooth dielectric", "rough metal", "smooth metal", "unlit"] {
+        let mut material = s.materials[0].clone();
+        material.name = name.into();
+        s.materials.push(material);
+    }
+    let mut policy = StaticMaterialPolicy::default();
+    for (index, surface) in [
+        (
+            1,
+            StaticSurfaceModel::Pbr {
+                metallic: 0.,
+                roughness: 0.08,
+            },
+        ),
+        (
+            2,
+            StaticSurfaceModel::Pbr {
+                metallic: 1.,
+                roughness: 0.8,
+            },
+        ),
+        (
+            3,
+            StaticSurfaceModel::Pbr {
+                metallic: 1.,
+                roughness: 0.08,
+            },
+        ),
+        (4, StaticSurfaceModel::Unlit),
+    ] {
+        policy.overrides.insert(index, surface);
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("modern.glb");
+    let report = write_static_visual_with_material_policy(&s, &policy, REVISION, &path).unwrap();
+    assert_eq!(report.requirements.reader_version, 2);
+    assert_eq!(
+        report.requirements.capabilities,
+        [
+            "pbr-metallic-roughness-factors-v1",
+            "static-visual-v1",
+            "vertex-rgba-v1"
+        ]
+    );
+    assert_eq!(report.materials.len(), 5);
+    assert_eq!(
+        report.materials[0].source,
+        StaticMaterialPolicySource::Default
+    );
+    assert_eq!(
+        report.materials[0].surface,
+        StaticSurfaceModel::Pbr {
+            metallic: 0.,
+            roughness: 1.
+        }
+    );
+    for (index, material) in report.materials.iter().enumerate() {
+        assert_eq!(material.material_index, index);
+        if index > 0 {
+            assert_eq!(material.source, StaticMaterialPolicySource::Override);
+        }
+    }
+    let json = glb_json(&path);
+    assert_eq!(
+        json["extras"]["eqoxideAsset"]["requirements"],
+        serde_json::to_value(&report.requirements).unwrap()
+    );
+    for (index, (metallic, roughness)) in [(0., 1.), (0., 0.08), (1., 0.8), (1., 0.08)]
+        .into_iter()
+        .enumerate()
+    {
+        let pbr = &json["materials"][index]["pbrMetallicRoughness"];
+        assert!((pbr["metallicFactor"].as_f64().unwrap() - metallic).abs() < 1e-6);
+        assert!((pbr["roughnessFactor"].as_f64().unwrap() - roughness).abs() < 1e-6);
+        assert!(json["materials"][index].get("extensions").is_none());
+    }
+    assert_eq!(
+        json["materials"][4]["extensions"]["KHR_materials_unlit"],
+        serde_json::json!({})
+    );
+    assert_eq!(
+        json["extensionsUsed"],
+        serde_json::json!(["KHR_materials_unlit"])
+    );
+    assert_eq!(
+        json["extensionsRequired"],
+        serde_json::json!(["KHR_materials_unlit"])
+    );
+    // Reopen the real GLB through the standard parser (without extension support flags).
+    let parsed = gltf::Gltf::from_slice_without_validation(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(
+        parsed
+            .materials()
+            .nth(3)
+            .unwrap()
+            .pbr_metallic_roughness()
+            .metallic_factor(),
+        1.
+    );
+}
+
+#[test]
+fn every_modern_profile_requires_capability_even_neutral_or_all_unlit() {
+    let mut s = scene();
+    for primitive in &mut s.meshes[0].primitives {
+        primitive.colors = None;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("modern.glb");
+    for surface in [
+        StaticSurfaceModel::Pbr {
+            metallic: 0.,
+            roughness: 1.,
+        },
+        StaticSurfaceModel::Unlit,
+    ] {
+        let policy = StaticMaterialPolicy {
+            default: surface,
+            overrides: Default::default(),
+        };
+        let report =
+            write_static_visual_with_material_policy(&s, &policy, REVISION, &path).unwrap();
+        assert_eq!(
+            report.requirements.capabilities,
+            ["pbr-metallic-roughness-factors-v1", "static-visual-v1"]
+        );
+        let json = glb_json(&path);
+        assert_eq!(
+            json.get("extensionsUsed").is_some(),
+            surface == StaticSurfaceModel::Unlit
+        );
+        assert_eq!(
+            json.get("extensionsRequired").is_some(),
+            surface == StaticSurfaceModel::Unlit
+        );
+    }
+}
+
+#[test]
+fn invalid_material_policy_checks_unused_entries_and_preserves_previous_file() {
+    let mut s = scene();
+    s.materials.push(s.materials[0].clone()); // Unused materials still participate in policy validation.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("existing.glb");
+    write_static_visual(&s, REVISION, &path).unwrap();
+    let original = std::fs::read(&path).unwrap();
+    for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.01, 1.01] {
+        for surface in [
+            StaticSurfaceModel::Pbr {
+                metallic: value,
+                roughness: 1.,
+            },
+            StaticSurfaceModel::Pbr {
+                metallic: 0.,
+                roughness: value,
+            },
+        ] {
+            for policy in [
+                StaticMaterialPolicy {
+                    default: surface,
+                    overrides: Default::default(),
+                },
+                StaticMaterialPolicy {
+                    overrides: std::collections::BTreeMap::from([(1, surface)]),
+                    ..Default::default()
+                },
+                StaticMaterialPolicy {
+                    default: surface,
+                    overrides: std::collections::BTreeMap::from([
+                        (0, StaticSurfaceModel::Unlit),
+                        (1, StaticSurfaceModel::Unlit),
+                    ]),
+                },
+            ] {
+                assert!(
+                    write_static_visual_with_material_policy(&s, &policy, REVISION, &path).is_err()
+                );
+                assert_eq!(std::fs::read(&path).unwrap(), original);
+                assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+            }
+        }
+    }
+    for index in [s.materials.len(), usize::MAX] {
+        let mut policy = StaticMaterialPolicy::default();
+        policy.overrides.insert(index, StaticSurfaceModel::Unlit);
+        assert!(write_static_visual_with_material_policy(&s, &policy, REVISION, &path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+}
+
+#[test]
+fn modern_lit_blend_refuses_but_explicit_unlit_and_legacy_preserve_coverage() {
+    let mut s = scene();
+    s.materials[0].alpha_mode = StaticAlphaMode::Blend;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("scene.glb");
+    write_static_visual(&s, REVISION, &path).unwrap();
+    let legacy = std::fs::read(&path).unwrap();
+    let error = write_static_visual_with_material_policy(
+        &s,
+        &StaticMaterialPolicy::default(),
+        REVISION,
+        &path,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("BLEND"), "{error:#}");
+    assert_eq!(std::fs::read(&path).unwrap(), legacy);
+    let policy = StaticMaterialPolicy {
+        default: StaticSurfaceModel::Unlit,
+        overrides: Default::default(),
+    };
+    write_static_visual_with_material_policy(&s, &policy, REVISION, &path).unwrap();
+    let json = glb_json(&path);
+    assert_eq!(json["materials"][0]["alphaMode"], "BLEND");
+    for channel in 0..4 {
+        assert!(
+            (json["materials"][0]["pbrMetallicRoughness"]["baseColorFactor"][channel]
+                .as_f64()
+                .unwrap()
+                - f64::from(s.materials[0].base_color[channel]))
+            .abs()
+                < 1e-7
+        );
+    }
+}
+
+#[test]
+fn modern_pbr_endpoints_are_valid_without_clamping_or_unlit_declarations() {
+    let policy = StaticMaterialPolicy {
+        default: StaticSurfaceModel::Pbr {
+            metallic: 1.,
+            roughness: 0.,
+        },
+        overrides: Default::default(),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("endpoints.glb");
+    write_static_visual_with_material_policy(&scene(), &policy, REVISION, &path).unwrap();
+    let json = glb_json(&path);
+    assert_eq!(
+        json["materials"][0]["pbrMetallicRoughness"]["metallicFactor"],
+        1.
+    );
+    assert_eq!(
+        json["materials"][0]["pbrMetallicRoughness"]["roughnessFactor"],
+        0.
+    );
+    assert!(json.get("extensionsUsed").is_none());
+    assert!(json.get("extensionsRequired").is_none());
+}
