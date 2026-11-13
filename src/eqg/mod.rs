@@ -1,4 +1,4 @@
-//! Binary EQG source assembly and explicit render-only staging exports.
+//! EQG source assembly, terrain prerequisites and explicit staging exports.
 pub mod report;
 mod zon;
 pub use zon::{BinaryZoneScene, DescriptorSource, ZoneMesh, ZonePlacement, load_binary_zone};
@@ -14,3 +14,23 @@ pub mod static_scene;
 pub mod lighting;
 
 pub mod static_collision;
+
+pub mod terrain_hierarchy;
+
+pub mod terrain_neighbors;
+
+pub mod terrain_dependencies;
+
+pub mod terrain_leaf_states;
+
+pub mod terrain_arithmetic;
+
+pub mod terrain_split_stage;
+
+pub mod terrain_emission;
+
+pub mod terrain_preparation;
+
+pub mod terrain_initial_load;
+
+pub mod terrain_source;
