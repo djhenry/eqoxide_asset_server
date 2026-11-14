@@ -119,6 +119,13 @@ pub struct StaticVisualPolicyReport {
     pub materials: Vec<ResolvedStaticMaterialPolicy>,
 }
 
+/// Explicit inspection semantics; the HDR profile requires a separately supported capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StaticMaterialProfile {
+    ScalarPbrV1,
+    ScalarPbrHdrBlendV1,
+}
+
 /// Validate and publish the opt-in scalar PBR profile, reporting each material choice.
 ///
 /// The default policy chooses rough nonmetal (0, 1); overrides replace it by scene
@@ -129,6 +136,27 @@ pub struct StaticVisualPolicyReport {
 pub fn write_static_visual_with_material_policy(
     scene: &StaticScene,
     policy: &StaticMaterialPolicy,
+    bake_revision: &str,
+    output: &Path,
+) -> Result<StaticVisualPolicyReport> {
+    write_static_visual_with_surface_profile(
+        scene,
+        policy,
+        StaticMaterialProfile::ScalarPbrV1,
+        bake_revision,
+        output,
+    )
+}
+
+/// Write editable materials with an explicit, independently negotiated display profile.
+///
+/// The HDR profile admits lit BLEND and always requires its capability, including
+/// opaque-only or all-unlit scenes. It preserves straight RGBA and uses the same
+/// material-policy validation and atomic publication as the historical profile.
+pub fn write_static_visual_with_surface_profile(
+    scene: &StaticScene,
+    policy: &StaticMaterialPolicy,
+    profile: StaticMaterialProfile,
     bake_revision: &str,
     output: &Path,
 ) -> Result<StaticVisualPolicyReport> {
@@ -152,7 +180,8 @@ pub fn write_static_visual_with_material_policy(
             };
             ensure!(
                 !matches!(surface, StaticSurfaceModel::Pbr { .. })
-                    || material.alpha_mode != StaticAlphaMode::Blend,
+                    || material.alpha_mode != StaticAlphaMode::Blend
+                    || profile == StaticMaterialProfile::ScalarPbrHdrBlendV1,
                 "material {material_index} PBR BLEND is unsupported by the single-pass profile"
             );
             Ok(ResolvedStaticMaterialPolicy {
@@ -162,7 +191,8 @@ pub fn write_static_visual_with_material_policy(
             })
         })
         .collect::<Result<_>>()?;
-    let requirements = write_static_visual_profile(scene, Some(&materials), bake_revision, output)?;
+    let requirements =
+        write_static_visual_profile(scene, Some((profile, &materials)), bake_revision, output)?;
     Ok(StaticVisualPolicyReport {
         requirements,
         materials,
@@ -197,7 +227,7 @@ pub fn write_static_visual(
 
 fn write_static_visual_profile(
     scene: &StaticScene,
-    surfaces: Option<&[ResolvedStaticMaterialPolicy]>,
+    surface_profile: Option<(StaticMaterialProfile, &[ResolvedStaticMaterialPolicy])>,
     bake_revision: &str,
     output: &Path,
 ) -> Result<ReaderRequirements> {
@@ -211,10 +241,14 @@ fn write_static_visual_profile(
     if has_colors {
         capabilities.push("vertex-rgba-v1".into());
     }
-    if surfaces.is_some() {
+    if let Some((profile, _)) = surface_profile {
         capabilities.push("pbr-metallic-roughness-factors-v1".into());
+        if profile == StaticMaterialProfile::ScalarPbrHdrBlendV1 {
+            capabilities.push("pbr-metallic-roughness-blend-v1".into());
+        }
         capabilities.sort();
     }
+    let surfaces = surface_profile.map(|(_, materials)| materials);
     let requirements = ReaderRequirements {
         reader_version: 2,
         capabilities,
