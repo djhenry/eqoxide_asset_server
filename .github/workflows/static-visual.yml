@@ -98,7 +98,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: djhenry/eqoxide
-          ref: 6a7661992f8de3b49a6489984e6edcd8393ca462
+          ref: 9abc8e9e8df9545d581fbdc3fa350d3c6dd8ad9a
           path: consumer
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -110,5 +110,7 @@ jobs:
         run: |
           cargo fetch --locked --manifest-path producer/Cargo.toml
           cargo fetch --locked --manifest-path consumer/Cargo.toml
-      - name: Regenerate and decode the scalar PBR fixture
-        run: consumer/scripts/check-static-pbr-fixture.sh consumer producer
+      - name: Regenerate and decode scalar and HDR PBR fixtures
+        run: |
+          consumer/scripts/check-static-pbr-fixture.sh consumer producer
+          consumer/scripts/check-static-pbr-fixture.sh consumer producer hdr
