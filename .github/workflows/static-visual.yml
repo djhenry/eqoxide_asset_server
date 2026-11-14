@@ -98,7 +98,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: djhenry/eqoxide
-          ref: 189c6709ed52392f450e49a8c0ffbe706c42fae4
+          ref: 23c4f11d40cda6ef57f9109e7a27e2a2f66b431b
           path: consumer
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
