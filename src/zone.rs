@@ -143,7 +143,7 @@ pub fn load_object_models(
 /// `Ry(v) * Rz(-u) * Rx(w) * scale`, then translation. The model loader has
 /// already included mesh center in the local vertices. This is not a native
 /// actor-eligibility resolver or bit-exact native interpolated trigonometry.
-fn wld_placement_matrix(
+pub(crate) fn wld_placement_matrix(
     center: (f32, f32, f32),
     rotation: (f32, f32, f32),
     scale: f32,
