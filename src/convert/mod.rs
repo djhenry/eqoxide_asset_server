@@ -2594,6 +2594,13 @@ pub(crate) fn write_glb_instanced_prepared(
         "textures": gltf_textures,
     });
 
+    // glTF optional collections require at least one entry when present.
+    for key in ["images", "textures"] {
+        if gltf.get(key).and_then(serde_json::Value::as_array).is_some_and(Vec::is_empty) {
+            gltf.as_object_mut().expect("GLB root is an object").remove(key);
+        }
+    }
+
     if let Some(extras) = metadata.and_then(|m| m.extras.as_ref()) {
         gltf["extras"] = extras.clone();
     }
