@@ -794,3 +794,5 @@ fn many_unused_bindings_obey_custom_caps_and_rgba_payload_is_charged_once() {
         assert!(format!("{err:#}").contains("input payload budget exceeded"));
     }
 }
+
+mod unapplied;
