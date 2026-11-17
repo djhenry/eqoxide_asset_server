@@ -406,7 +406,7 @@ fn old_scalar_profile_refuses_blend_without_replacing_existing_output() {
     let attempt = crate::static_scene::write_static_visual_with_material_policy(
         &resolved.scene,
         &crate::static_scene::StaticMaterialPolicy::default(),
-        &resolved.report.bake_revision,
+        &resolved.report.conversion_revision,
         &out,
     );
     let error = attempt.unwrap_err();
@@ -566,7 +566,7 @@ fn source_clockwise_faces_become_ccw_in_server_axes() {
     let r = load_wld_visual(&a, Some(&o), &WldVisualLimits::default()).unwrap();
     for m in &r.scene.meshes {
         for p in &m.primitives {
-            for t in p.indices.chunks_exact(3) {
+            for t in p.indices.as_chunks::<3>().0 {
                 let [a, b, c] =
                     [t[0], t[1], t[2]].map(|i| glam::Vec3::from_array(m.positions[i as usize]));
                 let n = glam::Vec3::from_array(m.normals[t[0] as usize]);
@@ -734,7 +734,7 @@ fn authored_source_pipeline_emits_the_common_pbr_artifact() {
     let policy = crate::static_scene::write_static_visual_with_material_policy(
         &r.scene,
         &crate::static_scene::StaticMaterialPolicy::default(),
-        &r.report.bake_revision,
+        &r.report.conversion_revision,
         &path,
     )
     .unwrap();
@@ -752,4 +752,584 @@ fn authored_source_pipeline_emits_the_common_pbr_artifact() {
         .materials()
         .all(|m| m.pbr_metallic_roughness().metallic_factor() == 0.
             && m.pbr_metallic_roughness().roughness_factor() == 1.));
+}
+
+fn append_fragment(mut b: Vec<u8>, kind: u32, body: Vec<u8>) -> Vec<u8> {
+    let count = u32::from_le_bytes(b[8..12].try_into().unwrap());
+    b[8..12].copy_from_slice(&(count + 1).to_le_bytes());
+    b.extend(words(&[body.len() as u32, kind]));
+    b.extend(body);
+    b
+}
+fn animated_texture_model(flags: u32, second_reference: u32) -> Vec<u8> {
+    let b = map_fragment(model(false, 0x80000001, false), 4, |_| {
+        let mut b = words(&[0, flags, 2]);
+        if flags & 0x20 != 0 {
+            b.extend(words(&[1]));
+        }
+        if flags & 0x18 == 0x18 {
+            b.extend(words(&[67]));
+        }
+        b.extend(words(&[1, second_reference]));
+        b
+    });
+    let name = encode(b"second.png\0");
+    let mut bitmap = words(&[0, 0]);
+    bitmap.extend((name.len() as u16).to_le_bytes());
+    bitmap.extend(name);
+    append_fragment(b, 3, bitmap)
+}
+fn snapshot(a: &Path, o: Option<&Path>) -> Result<ResolvedWldVisual> {
+    load_wld_visual_with_mode(
+        a,
+        o,
+        &WldVisualLimits::default(),
+        WldVisualMode::PreviewSnapshotV1,
+    )
+}
+#[test]
+fn snapshot_selects_first_declared_texture_and_preserves_all_frame_inputs() {
+    let d = tempfile::tempdir().unwrap();
+    let a = d.path().join("sample.s3d");
+    archive(
+        &a,
+        vec![
+            ("sample.wld", animated_texture_model(0x18, 7)),
+            ("tex.png", png([255, 0, 0, 255])),
+            ("second.png", png([0, 255, 0, 255])),
+        ],
+    );
+    assert!(load_wld_visual(&a, None, &WldVisualLimits::default()).is_err());
+    let r = snapshot(&a, None).expect("explicit snapshot accepts a coherent texture sequence");
+    assert_eq!(
+        image::load_from_memory(&r.scene.textures[0].png_bytes)
+            .unwrap()
+            .into_rgba8()
+            .get_pixel(0, 0)
+            .0,
+        [255, 0, 0, 255]
+    );
+    let report = serde_json::to_value(&r.report).unwrap();
+    assert_eq!(
+        report["materials"][0]["texture_frames"][1]["member"],
+        "second.png"
+    );
+    assert_eq!(
+        report["materials"][0]["texture_animation"]["sleep_word"],
+        67
+    );
+    let revision = r.report.conversion_revision;
+    archive(
+        &a,
+        vec![
+            ("sample.wld", animated_texture_model(0x18, 7)),
+            ("tex.png", png([255, 0, 0, 255])),
+            ("second.png", png([0, 0, 255, 255])),
+        ],
+    );
+    assert_ne!(
+        snapshot(&a, None).unwrap().report.conversion_revision,
+        revision
+    );
+}
+#[test]
+fn snapshot_fire_uses_standard_unlit_blend_and_linear_coverage() {
+    let d = tempfile::tempdir().unwrap();
+    let a = d.path().join("sample.s3d");
+    archive(
+        &a,
+        vec![
+            ("sample.wld", model(false, 0x8000000b, false)),
+            ("tex.png", png([128, 64, 0, 128])),
+        ],
+    );
+    assert!(load_wld_visual(&a, None, &WldVisualLimits::default()).is_err());
+    let r = snapshot(&a, None).expect("explicit snapshot accepts additive-unlit fire");
+    assert_eq!(
+        r.scene.materials[0].alpha_mode,
+        crate::static_scene::StaticAlphaMode::Blend
+    );
+    assert_eq!(r.scene.materials[0].base_color, [1.; 4]);
+    let im = image::load_from_memory(&r.scene.textures[0].png_bytes).unwrap();
+    assert_eq!(im.color(), image::ColorType::Rgba16);
+    let px = im.into_rgba16().get_pixel(0, 0).0;
+    // Hand-calculated sRGB linear ratio and max-channel coverage, rounded to16bit.
+    assert_eq!(px[0], 65535);
+    assert!((i32::from(px[1]) - 34379).abs() <= 2, "{px:?}");
+    assert_eq!(px[2], 0);
+    assert!((i32::from(px[3]) - 7101).abs() <= 2, "{px:?}");
+}
+fn vertex_track_model() -> Vec<u8> {
+    let b = edit_fragment(model(false, 0x80000001, false), 0x36, |b| {
+        b[12..16].copy_from_slice(&7u32.to_le_bytes())
+    });
+    let b = append_fragment(b, 0x2f, words(&[0, 8, 0]));
+    let mut track = words(&[0, 0]);
+    for x in [3u16, 2, 67, 0, 1] {
+        track.extend(x.to_le_bytes());
+    }
+    for _ in 0..6 {
+        for x in [1000i16, 2000, 3000] {
+            track.extend(x.to_le_bytes());
+        }
+    }
+    append_fragment(b, 0x37, track)
+}
+#[test]
+fn snapshot_validates_vertex_tracks_but_preserves_mesh_rest_positions_and_normals() {
+    let d = tempfile::tempdir().unwrap();
+    let a = d.path().join("sample.s3d");
+    archive(
+        &a,
+        vec![
+            ("sample.wld", vertex_track_model()),
+            ("tex.png", png([255, 0, 0, 255])),
+        ],
+    );
+    assert!(load_wld_visual(&a, None, &WldVisualLimits::default()).is_err());
+    let r =
+        snapshot(&a, None).expect("snapshot freezes valid vertex animation at source rest pose");
+    assert_eq!(
+        r.scene.meshes[0].positions,
+        [[22., 11., 33.], [24., 11., 33.], [22., 13., 33.]]
+    );
+    assert_eq!(r.scene.meshes[0].normals, [[0., 0., 1.]; 3]);
+    let report = serde_json::to_value(&r.report).unwrap();
+    assert_eq!(report["vertex_snapshots"][0]["frame_count"], 2);
+    assert_eq!(report["vertex_snapshots"][0]["timing_word"], 67);
+}
+#[test]
+fn snapshot_rejects_unselected_missing_wrongtype_layers_and_unavailable_flags() {
+    for (flags, reference, needle) in [
+        (0x18, 99, "bitmap"),
+        (0x18, 4, "bitmap"),
+        (0x38, 7, "current-frame"),
+        (0x58, 7, "flags"),
+        (0x10, 7, "animation flag"),
+    ] {
+        let d = tempfile::tempdir().unwrap();
+        let a = d.path().join("sample.s3d");
+        archive(
+            &a,
+            vec![
+                ("sample.wld", animated_texture_model(flags, reference)),
+                ("tex.png", png([255; 4])),
+                ("second.png", png([255; 4])),
+            ],
+        );
+        let e = snapshot(&a, None).unwrap_err();
+        assert!(format!("{e:#}").contains(needle), "{e:#}");
+    }
+    let d = tempfile::tempdir().unwrap();
+    let a = d.path().join("sample.s3d");
+    archive(
+        &a,
+        vec![
+            ("sample.wld", animated_texture_model(0x18, 7)),
+            ("tex.png", png([255; 4])),
+        ],
+    );
+    assert!(format!("{:#}", snapshot(&a, None).unwrap_err()).contains("missing required texture"));
+}
+#[test]
+fn snapshot_refuses_invalid_track_references_counts_flags_scale_and_control() {
+    for (kind, offset, bytes) in [
+        (0x36, 12, 99u32.to_le_bytes().to_vec()),
+        (0x36, 12, 4u32.to_le_bytes().to_vec()),
+        (0x2f, 4, 4u32.to_le_bytes().to_vec()),
+        (0x2f, 8, 1u32.to_le_bytes().to_vec()),
+        (0x37, 4, 1u32.to_le_bytes().to_vec()),
+        (0x37, 8, 2u16.to_le_bytes().to_vec()),
+        (0x37, 10, 0u16.to_le_bytes().to_vec()),
+        (0x37, 14, 1u16.to_le_bytes().to_vec()),
+        (0x37, 16, 32u16.to_le_bytes().to_vec()),
+    ] {
+        let d = tempfile::tempdir().unwrap();
+        let a = d.path().join("sample.s3d");
+        let b = edit_fragment(vertex_track_model(), kind, |b| {
+            b[offset..offset + bytes.len()].copy_from_slice(&bytes)
+        });
+        archive(&a, vec![("sample.wld", b), ("tex.png", png([255; 4]))]);
+        assert!(snapshot(&a, None).is_err(), "kind {kind:x} offset{offset}");
+    }
+}
+#[test]
+fn snapshot_metadata_and_vertex_traversal_obey_lowered_budgets() {
+    let d = tempfile::tempdir().unwrap();
+    let a = d.path().join("sample.s3d");
+    archive(
+        &a,
+        vec![
+            ("sample.wld", vertex_track_model()),
+            ("tex.png", png([255; 4])),
+        ],
+    );
+    let l = WldVisualLimits {
+        max_transform_visits: 5,
+        ..Default::default()
+    };
+    let e = load_wld_visual_with_mode(&a, None, &l, WldVisualMode::PreviewSnapshotV1).unwrap_err();
+    assert!(format!("{e:#}").contains("animation value visits"));
+    let l = WldVisualLimits {
+        max_resources: 2,
+        ..Default::default()
+    };
+    assert!(load_wld_visual_with_mode(&a, None, &l, WldVisualMode::PreviewSnapshotV1).is_err());
+}
+#[test]
+fn snapshot_opaque_and_fire_share_source_but_never_derived_pixels() {
+    let d = tempfile::tempdir().unwrap();
+    let a = d.path().join("sample.s3d");
+    let source = png([128, 64, 0, 128]);
+    let b = map_fragment(model(false, 0x80000001, false), 0x36, |mut b| {
+        b[88..90].copy_from_slice(&2u16.to_le_bytes());
+        b.extend([1u16, 1].into_iter().flat_map(u16::to_le_bytes));
+        b
+    });
+    let b = map_fragment(b, 0x31, |_| words(&[0, 0, 2, 4, 7]));
+    let b = append_fragment(
+        b,
+        0x30,
+        words(&[0, 1, 0x8000000b, 0, 1f32.to_bits(), 1f32.to_bits(), 3]),
+    );
+    // Two groups each need a face; duplicate positions are not duplicated geometry data.
+    let b = map_fragment(b, 0x36, |mut b| {
+        b[84..86].copy_from_slice(&2u16.to_le_bytes());
+        b.splice(
+            143..143,
+            [0u16, 0, 2, 1].into_iter().flat_map(u16::to_le_bytes),
+        );
+        b
+    });
+    archive(&a, vec![("sample.wld", b), ("tex.png", source.clone())]);
+    let r = snapshot(&a, None).unwrap();
+    assert_eq!(r.scene.textures.len(), 2);
+    assert_eq!(
+        image::load_from_memory(&r.scene.textures[0].png_bytes)
+            .unwrap()
+            .into_rgba8()
+            .get_pixel(0, 0)
+            .0,
+        [128, 64, 0, 128]
+    );
+    assert_eq!(
+        r.recommended_material_policy.overrides.get(&1),
+        Some(&static_scene::StaticSurfaceModel::Unlit)
+    );
+    assert!(!r.recommended_material_policy.overrides.contains_key(&0));
+    assert_eq!(
+        r.report.materials[0].source_texture_blake3,
+        r.report.materials[1].source_texture_blake3
+    );
+    assert_eq!(
+        r.report.materials[0].source_texture_blake3.as_deref(),
+        Some(blake3::hash(&source).to_hex().as_str())
+    );
+    assert_ne!(
+        r.report.materials[0].png_blake3,
+        r.report.materials[1].png_blake3
+    );
+}
+#[test]
+fn snapshot_fire_black_is_transparent_and_sixteen_bit_samples_survive() {
+    let mut image = image::ImageBuffer::<Rgba<u16>, Vec<u16>>::new(2, 1);
+    image.put_pixel(0, 0, Rgba([0, 0, 0, 65535]));
+    image.put_pixel(1, 0, Rgba([30001, 30001, 30001, 40003]));
+    let mut c = Cursor::new(Vec::new());
+    DynamicImage::ImageRgba16(image)
+        .write_to(&mut c, ImageFormat::Png)
+        .unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let a = d.path().join("sample.s3d");
+    archive(
+        &a,
+        vec![
+            ("sample.wld", model(false, 0x8000000b, false)),
+            ("tex.png", c.into_inner()),
+        ],
+    );
+    let r = snapshot(&a, None).unwrap();
+    let out = image::load_from_memory(&r.scene.textures[0].png_bytes)
+        .unwrap()
+        .into_rgba16();
+    assert_eq!(out.get_pixel(0, 0).0, [0, 0, 0, 0]);
+    assert_eq!(&out.get_pixel(1, 0).0[..3], &[65535; 3]);
+    assert!(
+        (i32::from(out.get_pixel(1, 0)[3]) - 7082).abs() <= 1,
+        "{:?}",
+        out.get_pixel(1, 0)
+    );
+}
+#[test]
+fn snapshot_refuses_other_additive_families_and_mode_changes_conversion_identity() {
+    let (_d, a, _) = fixture(0x80000017, false, 2.);
+    assert!(snapshot(&a, None).is_err());
+    let (_d, a, o) = fixture(0x80000001, false, 2.);
+    assert_ne!(
+        snapshot(&a, Some(&o)).unwrap().report.conversion_revision,
+        load_wld_visual(&a, Some(&o), &WldVisualLimits::default())
+            .unwrap()
+            .report
+            .conversion_revision
+    );
+}
+#[test]
+fn snapshot_refuses_extra_frame_body_data_hidden_by_declared_counts() {
+    let d = tempfile::tempdir().unwrap();
+    let a = d.path().join("sample.s3d");
+    let b = edit_fragment(vertex_track_model(), 0x37, |b| {
+        b[10..12].copy_from_slice(&1u16.to_le_bytes())
+    });
+    archive(&a, vec![("sample.wld", b), ("tex.png", png([255; 4]))]);
+    assert!(
+        snapshot(&a, None).is_err(),
+        "extra source track frame must not disappear as padding"
+    );
+    let b = edit_fragment(animated_texture_model(0x18, 7), 4, |b| {
+        b[8..12].copy_from_slice(&1u32.to_le_bytes())
+    });
+    archive(
+        &a,
+        vec![
+            ("sample.wld", b),
+            ("tex.png", png([255; 4])),
+            ("second.png", png([255; 4])),
+        ],
+    );
+    assert!(
+        snapshot(&a, None).is_err(),
+        "extra texture frame reference must not disappear as padding"
+    );
+}
+#[test]
+fn object_archive_unselected_objects_document_is_reported() {
+    let (_d, a, o) = fixture(0x80000001, false, 2.);
+    archive(
+        &o,
+        vec![
+            ("sample_obj.wld", model(true, 0x80000001, false)),
+            ("objects.wld", actors(2.)),
+            ("tex.png", png([255; 4])),
+        ],
+    );
+    let r = load_wld_visual(&a, Some(&o), &WldVisualLimits::default()).unwrap();
+    assert_eq!(r.report.sources[1].unselected_wld_members, ["objects.wld"]);
+    assert!(r.report.sources[0].unselected_wld_members.is_empty());
+}
+#[test]
+fn refuses_source_face_that_collapses_when_baked_to_float_positions() {
+    let (_d, a, _) = fixture(0x80000001, false, 2.);
+    let b = edit_fragment(model(false, 0x80000001, false), 0x36, |b| {
+        for at in [24, 28, 32] {
+            b[at..at + 4].copy_from_slice(&268435456f32.to_le_bytes());
+        }
+    });
+    archive(&a, vec![("sample.wld", b), ("tex.png", png([255; 4]))]);
+    let e = load_wld_visual(&a, None, &WldVisualLimits::default()).unwrap_err();
+    assert!(format!("{e:#}").contains("face collapses during conversion"));
+}
+#[test]
+fn large_instance_origin_bounds_keep_small_local_geometry_in_double_precision() {
+    let (_d, a, o) = fixture(0x80000001, false, 2.);
+    let placement = edit_fragment(actors(1.), 0x15, |b| {
+        for at in [16, 20, 24] {
+            b[at..at + 4].copy_from_slice(&268435456f32.to_le_bytes());
+        }
+        for at in [28, 32, 36] {
+            b[at..at + 4].copy_from_slice(&0f32.to_le_bytes());
+        }
+    });
+    archive(
+        &a,
+        vec![
+            ("sample.wld", model(false, 0x80000001, false)),
+            ("objects.wld", placement),
+            ("tex.png", png([255; 4])),
+        ],
+    );
+    let r = load_wld_visual(&a, Some(&o), &WldVisualLimits::default()).unwrap();
+    // Object rest vertices span source XY2..8 at scale1/2, then XYswap.
+    assert_eq!(
+        r.report.bounds.unwrap()[1],
+        [268435460., 268435459., 268435459.]
+    );
+}
+#[test]
+fn snapshot_layers_skinning_and_nonpadding_track_bytes_remain_explicit_refusals() {
+    let d = tempfile::tempdir().unwrap();
+    let a = d.path().join("sample.s3d");
+    let b = map_fragment(animated_texture_model(0x18, 7), 3, |mut b| {
+        b[4..8].copy_from_slice(&1u32.to_le_bytes());
+        let entry = b[8..].to_vec();
+        b.extend(entry);
+        b
+    });
+    archive(
+        &a,
+        vec![
+            ("sample.wld", b),
+            ("tex.png", png([255; 4])),
+            ("second.png", png([255; 4])),
+        ],
+    );
+    assert!(format!("{:#}", snapshot(&a, None).unwrap_err()).contains("layered"));
+    let b = map_fragment(model(false, 0x80000001, false), 0x36, |mut b| {
+        b[86..88].copy_from_slice(&1u16.to_le_bytes());
+        b.splice(143..143, [3u16, 0].into_iter().flat_map(u16::to_le_bytes));
+        b
+    });
+    archive(&a, vec![("sample.wld", b), ("tex.png", png([255; 4]))]);
+    assert!(format!("{:#}", snapshot(&a, None).unwrap_err()).contains("skinned"));
+    for (padding, valid) in [
+        (vec![0, 0], true),
+        (vec![0, 1], false),
+        (vec![0, 0, 0, 0], false),
+    ] {
+        let b = map_fragment(vertex_track_model(), 0x37, |mut b| {
+            b.extend(padding);
+            b
+        });
+        archive(&a, vec![("sample.wld", b), ("tex.png", png([255; 4]))]);
+        assert_eq!(snapshot(&a, None).is_ok(), valid);
+    }
+}
+#[test]
+fn snapshot_track_and_instance_work_share_one_aggregate_traversal_budget() {
+    let d = tempfile::tempdir().unwrap();
+    let a = d.path().join("sample.s3d");
+    archive(
+        &a,
+        vec![
+            ("sample.wld", vertex_track_model()),
+            ("tex.png", png([255; 4])),
+        ],
+    );
+    let mut l = WldVisualLimits {
+        max_transform_visits: 8,
+        ..Default::default()
+    };
+    let e = load_wld_visual_with_mode(&a, None, &l, WldVisualMode::PreviewSnapshotV1).unwrap_err();
+    assert!(format!("{e:#}").contains("transformed vertex visits"));
+    l.max_transform_visits = 9;
+    load_wld_visual_with_mode(&a, None, &l, WldVisualMode::PreviewSnapshotV1).unwrap();
+}
+
+fn map_last_fragment(mut b: Vec<u8>, edit: impl FnOnce(Vec<u8>) -> Vec<u8>) -> Vec<u8> {
+    let word = |at: usize| u32::from_le_bytes(b[at..at + 4].try_into().unwrap()) as usize;
+    let mut at = 28 + word(20);
+    for _ in 1..word(8) {
+        at += 8 + word(at);
+    }
+    let body = edit(b[at + 8..].to_vec());
+    b[at..at + 4].copy_from_slice(&(body.len() as u32).to_le_bytes());
+    b.truncate(at + 8);
+    b.extend(body);
+    b
+}
+fn encoded_bitmap_body(name: &[u8]) -> Vec<u8> {
+    let encoded = encode(name);
+    let mut b = words(&[0, 0]);
+    b.extend((encoded.len() as u16).to_le_bytes());
+    b.extend(encoded);
+    b
+}
+#[test]
+fn snapshot_refuses_hidden_filename_in_unselected_bitmap_frame() {
+    let d = tempfile::tempdir().unwrap();
+    let a = d.path().join("sample.s3d");
+    let b = map_last_fragment(animated_texture_model(0x18, 7), |mut b| {
+        let extra = encode(b"hidden.png\0");
+        b.extend((extra.len() as u16).to_le_bytes());
+        b.extend(extra);
+        b
+    });
+    archive(
+        &a,
+        vec![
+            ("sample.wld", b),
+            ("tex.png", png([255; 4])),
+            ("second.png", png([255; 4])),
+        ],
+    );
+    let e =
+        snapshot(&a, None).expect_err("undeclared unselected bitmap filenames must not disappear");
+    assert!(
+        format!("{e:#}").contains("bitmap frame body layout"),
+        "{e:#}"
+    );
+}
+#[test]
+fn snapshot_bitmap_body_layout_preserves_bounded_zero_padding() {
+    let d = tempfile::tempdir().unwrap();
+    let a = d.path().join("sample.s3d");
+    // Exercise every payload remainder and both source/serializer padding conventions.
+    for nul_count in 1..=4 {
+        for padding in 0..=3 {
+            let mut name = b"second.png".to_vec();
+            name.extend(vec![0; nul_count]);
+            let b = map_last_fragment(animated_texture_model(0x18, 7), |_| {
+                let mut b = encoded_bitmap_body(&name);
+                b.extend(vec![0; padding]);
+                b
+            });
+            archive(
+                &a,
+                vec![
+                    ("sample.wld", b),
+                    ("tex.png", png([255; 4])),
+                    ("second.png", png([255; 4])),
+                ],
+            );
+            let r = snapshot(&a, None).expect("zero padding up to three bytes remains supported");
+            assert_eq!(r.report.materials[0].texture_frames[1].member, "second.png");
+        }
+    }
+}
+#[test]
+fn snapshot_bitmap_body_checks_selected_frames_and_encoded_name_lengths() {
+    let d = tempfile::tempdir().unwrap();
+    let a = d.path().join("sample.s3d");
+    let b = map_fragment(model(false, 0x80000001, false), 3, |mut b| {
+        let extra = encode(b"hidden.png\0");
+        b.extend((extra.len() as u16).to_le_bytes());
+        b.extend(extra);
+        b
+    });
+    archive(&a, vec![("sample.wld", b), ("tex.png", png([255; 4]))]);
+    load_wld_visual(&a, None, &WldVisualLimits::default())
+        .expect("strict historical admission remains unchanged");
+    assert!(
+        snapshot(&a, None).is_err(),
+        "selected bitmap trailing data must also refuse"
+    );
+    for tail in [vec![1], vec![0, 0, 0, 0]] {
+        let b = map_last_fragment(animated_texture_model(0x18, 7), |mut b| {
+            b.extend(tail);
+            b
+        });
+        archive(
+            &a,
+            vec![
+                ("sample.wld", b),
+                ("tex.png", png([255; 4])),
+                ("second.png", png([255; 4])),
+            ],
+        );
+        assert!(snapshot(&a, None).is_err());
+    }
+    // Shortening the encoded length by one still decodes the same filename;
+    // the ignored encoded null byte must be rejected as non-padding.
+    let b = map_last_fragment(animated_texture_model(0x18, 7), |mut b| {
+        b[8..10].copy_from_slice(&10u16.to_le_bytes());
+        b
+    });
+    archive(
+        &a,
+        vec![
+            ("sample.wld", b),
+            ("tex.png", png([255; 4])),
+            ("second.png", png([255; 4])),
+        ],
+    );
+    assert!(snapshot(&a, None).is_err());
 }

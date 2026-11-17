@@ -7,7 +7,7 @@ use crate::{
     static_scene::{self, StaticInstance, StaticMesh, StaticPrimitive, StaticScene},
 };
 use anyhow::{bail, ensure, Context, Result};
-use glam::{DVec3, Mat4, Vec3};
+use glam::{DVec3, Mat4};
 use libeq_pfs::PfsReader;
 use libeq_wld::parser::{
     Actor, ActorDef, DmSprite, DmSpriteDef2, DrawStyle, Fragment, FragmentParser, FragmentRef,
@@ -23,6 +23,9 @@ use std::{
     panic::{catch_unwind, AssertUnwindSafe},
     path::Path,
 };
+
+mod snapshot;
+pub use snapshot::{WldTextureAnimation, WldTextureFrame, WldVertexSnapshot, WldVisualMode};
 
 /// Logical input, output and traversal limits; these are not peak-process-memory limits.
 #[derive(Debug, Clone)]
@@ -64,6 +67,9 @@ pub struct WldVisualSource {
 }
 #[derive(Debug, Serialize)]
 pub struct WldVisualMaterial {
+    pub texture_frames: Vec<WldTextureFrame>,
+    pub texture_animation: Option<WldTextureAnimation>,
+    pub approximation: Option<&'static str>,
     pub material_index: usize,
     pub document_role: &'static str,
     pub palette_reference: String,
@@ -94,6 +100,9 @@ pub struct WldVisualMesh {
 }
 #[derive(Debug, Serialize)]
 pub struct WldVisualReport {
+    pub mode: WldVisualMode,
+    pub vertex_snapshots: Vec<WldVertexSnapshot>,
+    pub animation_value_visits: usize,
     pub profile: &'static str,
     pub scope: &'static str,
     pub sources: Vec<WldVisualSource>,
@@ -114,11 +123,12 @@ pub struct WldVisualReport {
     pub input_member_bytes: usize,
     pub output_payload_bytes: usize,
     pub bounds: Option<[[f64; 3]; 2]>,
-    pub bake_revision: String,
+    pub conversion_revision: String,
     pub limitations: Vec<&'static str>,
 }
 #[derive(Debug)]
 pub struct ResolvedWldVisual {
+    pub recommended_material_policy: static_scene::StaticMaterialPolicy,
     pub scene: StaticScene,
     pub report: WldVisualReport,
 }
@@ -232,6 +242,7 @@ impl Archive {
 struct Document {
     doc: WldDoc,
     names: BTreeMap<(u32, String), Vec<usize>>,
+    snapshot_layouts: BTreeMap<usize, bool>,
 }
 impl Deref for Document {
     type Target = WldDoc;
@@ -287,17 +298,21 @@ fn parse_document(bytes: &[u8], total: &mut usize, l: &WldVisualLimits) -> Resul
         .checked_add(word(20) as usize)
         .context("WLD string size overflow")?;
     ensure!(p <= bytes.len(), "truncated WLD strings");
+    let mut layouts = Vec::with_capacity(n);
     for _ in 0..n {
         ensure!(
             p.checked_add(8).is_some_and(|x| x <= bytes.len()),
             "truncated WLD fragment header"
         );
         let size = word(p) as usize;
+        let kind = word(p + 4);
+        let body_start = p + 8;
         p = p
             .checked_add(8)
             .and_then(|x| x.checked_add(size))
             .context("WLD fragment size overflow")?;
         ensure!(p <= bytes.len(), "truncated WLD fragment body");
+        layouts.push(snapshot::valid_frame_layout(kind, &bytes[body_start..p]));
     }
     ensure!(
         bytes[p..].is_empty() || bytes[p..] == [255; 4],
@@ -330,20 +345,47 @@ fn parse_document(bytes: &[u8], total: &mut usize, l: &WldVisualLimits) -> Resul
             }
         }
     }
-    Ok(Document { doc, names })
+    let mut snapshot_layouts = BTreeMap::new();
+    for (slot, f) in doc.iter().enumerate() {
+        if let Some(v) = f.as_any().downcast_ref::<libeq_wld::parser::BmInfo>() {
+            snapshot_layouts.insert(v as *const _ as usize, layouts[slot]);
+        }
+        if let Some(v) = f
+            .as_any()
+            .downcast_ref::<libeq_wld::parser::SimpleSpriteDef>()
+        {
+            snapshot_layouts.insert(v as *const _ as usize, layouts[slot]);
+        }
+        if let Some(v) = f.as_any().downcast_ref::<libeq_wld::parser::DmTrack>() {
+            snapshot_layouts.insert(v as *const _ as usize, layouts[slot]);
+        }
+        if let Some(v) = f.as_any().downcast_ref::<libeq_wld::parser::DmTrackDef2>() {
+            snapshot_layouts.insert(v as *const _ as usize, layouts[slot]);
+        }
+    }
+    Ok(Document {
+        doc,
+        names,
+        snapshot_layouts,
+    })
 }
 
 fn null<T>(r: &FragmentRef<T>) -> bool {
     r.to_bytes() == [0, 0, 0, 0]
 }
+type TextureCacheKey = (&'static str, String, bool, bool);
+type TextureCacheValue = (usize, bool, String, String);
 struct Builder<'a> {
+    mode: WldVisualMode,
+    policy: static_scene::StaticMaterialPolicy,
+    raw_textures: BTreeMap<(&'static str, String), (Vec<u8>, String)>,
     main: Archive,
     objects: Option<Archive>,
     scene: StaticScene,
     report: WldVisualReport,
     l: &'a WldVisualLimits,
     material_cache: BTreeMap<(&'static str, Vec<u8>), (usize, bool)>,
-    texture_cache: BTreeMap<(&'static str, String, bool), (usize, bool, String, String)>,
+    texture_cache: BTreeMap<TextureCacheKey, TextureCacheValue>,
     vertices: usize,
     indices: usize,
     resources: usize,
@@ -365,7 +407,22 @@ impl Builder<'_> {
             mat.pair.is_none_or(|(a, b)| a == 0 && b == 0.),
             "unsupported material UV motion"
         );
+        let fire = self.mode == WldVisualMode::PreviewSnapshotV1
+            && matches!(
+                mat.render_method,
+                RenderMethod::UserDefined {
+                    material_type: MaterialType::TransparentAdditiveUnlit
+                }
+            );
         let (alpha, keyed, coverage, textured) = match mat.render_method {
+            RenderMethod::UserDefined {
+                material_type: MaterialType::TransparentAdditiveUnlit,
+            } if fire => (
+                AlphaMode::Blend(1000),
+                false,
+                "snapshot-additive-unlit-alpha-approximation",
+                true,
+            ),
             RenderMethod::UserDefined {
                 material_type:
                     MaterialType::Diffuse
@@ -420,6 +477,8 @@ impl Builder<'_> {
         let mut texture_provider = None;
         let mut source_texture_blake3 = None;
         let mut png_blake3 = None;
+        let mut texture_frames = Vec::new();
+        let mut texture_animation = None;
         if textured {
             let sprite = doc
                 .get(&mat.reference)
@@ -427,61 +486,29 @@ impl Builder<'_> {
             let texture = doc
                 .get(&sprite.reference)
                 .context("unresolved texture definition")?;
-            ensure!(
-                !texture.flags.is_animated()
-                    && texture.frame_references.len() == 1
-                    && texture.frame_count == 1,
-                "texture animation requires a separate profile"
-            );
-            let bitmap = doc
-                .get(&texture.frame_references[0])
-                .context("unresolved bitmap reference")?;
-            ensure!(
-                bitmap.entries.len() == 1,
-                "layered bitmap requires a separate profile"
-            );
-            ensure!(
-                bitmap.entries[0].file_name.len() <= 256,
-                "texture member name limit exceeded"
-            );
-            let requested = bitmap.entries[0].file_name.to_ascii_lowercase();
-            ensure!(!requested.is_empty(), "empty bitmap name");
-            // Explicit supplied-archive policy: terrain prefers main, objects prefer object.
-            // One provider supplies both the bytes and the V convention.
-            let prefer_object = role == "objects"
-                && self
-                    .objects
-                    .as_ref()
-                    .is_some_and(|a| a.names.contains_key(&requested));
-            let provider = if prefer_object {
-                self.objects.as_mut().unwrap()
-            } else if self.main.names.contains_key(&requested) {
-                &mut self.main
-            } else {
-                self.objects
-                    .as_mut()
-                    .filter(|a| a.names.contains_key(&requested))
-                    .context("missing required texture")?
-            };
-            let provider_role = provider.role;
-            let texture_key = (provider_role, requested.clone(), keyed);
+            let (frames, animation) = self.texture_frames(doc, texture, role)?;
+            let selected = &frames[0];
+            let provider_role = selected.provider;
+            let requested = selected.member.clone();
+            let texture_key = (provider_role, requested.clone(), keyed, fire);
             let (ti, orientation, raw_hash, png_hash) =
                 if let Some(v) = self.texture_cache.get(&texture_key) {
                     v.clone()
                 } else {
-                    let bytes =
-                        provider.read(&requested, &mut self.report.input_member_bytes, self.l)?;
+                    let (bytes, raw_hash) = &self.raw_textures[&(provider_role, requested.clone())];
                     let orientation = !bytes.starts_with(b"DDS ");
-                    let raw_hash = blake3::hash(&bytes).to_hex().to_string();
-                    let image = decode_static_texture(
+                    let mut image = decode_static_texture(
                         requested.clone(),
-                        &bytes,
+                        bytes,
                         if keyed {
                             TextureDecodePolicy::PaletteIndexZero
                         } else {
                             TextureDecodePolicy::PreserveRgba
                         },
                     )?;
+                    if fire {
+                        image = snapshot::derive_fire(image)?;
+                    }
                     charge(
                         &mut self.report.output_payload_bytes,
                         image.png_bytes.len(),
@@ -497,7 +524,7 @@ impl Builder<'_> {
                     let png_hash = blake3::hash(&image.png_bytes).to_hex().to_string();
                     let ti = self.scene.textures.len();
                     self.scene.textures.push(image);
-                    let v = (ti, orientation, raw_hash, png_hash);
+                    let v = (ti, orientation, raw_hash.clone(), png_hash);
                     self.texture_cache.insert(texture_key, v.clone());
                     v
                 };
@@ -507,6 +534,8 @@ impl Builder<'_> {
             texture_provider = Some(provider_role);
             source_texture_blake3 = Some(raw_hash);
             png_blake3 = Some(png_hash);
+            texture_frames = frames;
+            texture_animation = animation;
         }
         charge(
             &mut self.resources,
@@ -526,7 +555,14 @@ impl Builder<'_> {
                 double_sided: mat.flags.is_two_sided(),
                 texture_sequence: None,
             })?);
+        if fire {
+            self.policy
+                .overrides
+                .insert(mi, static_scene::StaticSurfaceModel::Unlit);
+        }
         self.report.materials.push(WldVisualMaterial {
+            texture_frames, texture_animation,
+            approximation: fire.then_some("Linear normalized RGB with alpha=max(RGB)*source alpha; alpha-over approximates addition only over black, filtering differs"),
             material_index: mi,
             document_role: role,
             palette_reference: format!("{:02x?}", r.to_bytes()),
@@ -558,9 +594,12 @@ impl Builder<'_> {
             .checked_add(mesh.faces.len())
             .context("source face count overflow")?;
         ensure!(
-            null(&mesh.animation_ref) && mesh.skin_assignment_groups.is_empty(),
+            mesh.skin_assignment_groups.is_empty() && mesh.skin_assignment_groups_count == 0,
             "animated or skinned WLD mesh requires a separate profile"
         );
+        if !null(&mesh.animation_ref) {
+            self.vertex_snapshot(doc, mesh, role)?;
+        }
         ensure!(mesh.scale <= 31, "unsupported WLD position scale");
         ensure!(
             mesh.center.0.is_finite() && mesh.center.1.is_finite() && mesh.center.2.is_finite(),
@@ -642,6 +681,20 @@ impl Builder<'_> {
                         .length_squared()
                         > 0.,
                     "other zero-area WLD face is unsupported"
+                );
+                let rounded = p.map(|v| {
+                    DVec3::new(
+                        f64::from((f64::from(v.1) * scale + f64::from(mesh.center.1)) as f32),
+                        f64::from((f64::from(v.0) * scale + f64::from(mesh.center.0)) as f32),
+                        f64::from((f64::from(v.2) * scale + f64::from(mesh.center.2)) as f32),
+                    )
+                });
+                ensure!(
+                    (rounded[1] - rounded[0])
+                        .cross(rounded[2] - rounded[0])
+                        .length_squared()
+                        > 0.,
+                    "WLD face collapses during conversion to float positions"
                 );
                 for i in source {
                     let key = (i, flip);
@@ -763,7 +816,9 @@ impl Builder<'_> {
         charge(
             &mut self.report.transformed_vertex_visits,
             self.scene.meshes[mesh_index].positions.len(),
-            self.l.max_transform_visits,
+            self.l
+                .max_transform_visits
+                .saturating_sub(self.report.animation_value_visits),
             "transformed vertex visits",
         )?;
         charge(
@@ -819,8 +874,22 @@ pub fn load_wld_visual(
     object_archive: Option<&Path>,
     limits: &WldVisualLimits,
 ) -> Result<ResolvedWldVisual> {
+    load_wld_visual_with_mode(
+        main_archive,
+        object_archive,
+        limits,
+        WldVisualMode::StrictStatic,
+    )
+}
+/// Select strict import or the explicit offline preview snapshot approximation.
+pub fn load_wld_visual_with_mode(
+    main_archive: &Path,
+    object_archive: Option<&Path>,
+    limits: &WldVisualLimits,
+    mode: WldVisualMode,
+) -> Result<ResolvedWldVisual> {
     catch_unwind(AssertUnwindSafe(|| {
-        load_inner(main_archive, object_archive, limits)
+        load_inner(main_archive, object_archive, limits, mode)
     }))
     .map_err(|_| anyhow::anyhow!("WLD visual source parser panicked"))?
 }
@@ -828,6 +897,7 @@ fn load_inner(
     main_archive: &Path,
     object_archive: Option<&Path>,
     l: &WldVisualLimits,
+    mode: WldVisualMode,
 ) -> Result<ResolvedWldVisual> {
     let hard = WldVisualLimits::default();
     for (actual, maximum) in [
@@ -889,7 +959,9 @@ fn load_inner(
             .names
             .keys()
             .filter(|v| {
-                v.ends_with(".wld") && **v != n.to_ascii_lowercase() && **v != "objects.wld"
+                v.ends_with(".wld")
+                    && **v != n.to_ascii_lowercase()
+                    && !(a.role == "main" && **v == "objects.wld")
             })
             .cloned()
             .collect(),
@@ -908,7 +980,62 @@ fn load_inner(
             }
         }
     }
-    let mut b=Builder{main,objects,scene:StaticScene::default(),report:WldVisualReport{profile:"wld-static-pbr-v1",scope:"selected-main-modern-meshes-and-static-object-actor-definitions",sources,materials:vec![],meshes:vec![],instances:0,source_actor_records:0,placements_wld_blake3:placement_bytes.as_ref().map(|v|blake3::hash(v).to_hex().to_string()),source_mesh_records:0,source_faces:0,source_meshes_without_visible_faces:0,source_actor_lighting_references:0,source_single_lod_actor_defs:0,invisible_faces_excluded:0,coincident_source_faces_excluded:0,normalized_vertex_normals:0,transformed_vertex_visits:0,input_member_bytes:bytes,output_payload_bytes:0,bounds:None,bake_revision:String::new(),limitations:vec!["Offline inspection only; no publication, collision, regions or gameplay activation","Original archive/WLD hashes retain source identity and lighting; prelighting is not applied","All supported surfaces use editable rough nonmetal PBR defaults; no physical-property recovery","Static named ActorDefs only; animated, additive and layered materials refuse","A sole static sprite ignores its source distance-culling threshold; alternative LODs refuse","Source BLEND intent is retained; writer admission separately checks rendering support","Main and object basename WLDs are explicitly selected; WorldTree/native visibility membership is not certified"]},l,material_cache:BTreeMap::new(),texture_cache:BTreeMap::new(),vertices:0,indices:0,resources:0,mesh_slots};
+    let mut b = Builder {
+        mode,
+        policy: static_scene::StaticMaterialPolicy::default(),
+        raw_textures: BTreeMap::new(),
+        main,
+        objects,
+        scene: StaticScene::default(),
+        report: WldVisualReport {
+            mode,
+            vertex_snapshots: vec![],
+            animation_value_visits: 0,
+            profile: "wld-static-pbr-v1",
+            scope: "selected-main-modern-meshes-and-static-object-actor-definitions",
+            sources,
+            materials: vec![],
+            meshes: vec![],
+            instances: 0,
+            source_actor_records: 0,
+            placements_wld_blake3: placement_bytes.as_ref().map(|v| blake3::hash(v).to_hex().to_string()),
+            source_mesh_records: 0,
+            source_faces: 0,
+            source_meshes_without_visible_faces: 0,
+            source_actor_lighting_references: 0,
+            source_single_lod_actor_defs: 0,
+            invisible_faces_excluded: 0,
+            coincident_source_faces_excluded: 0,
+            normalized_vertex_normals: 0,
+            transformed_vertex_visits: 0,
+            input_member_bytes: bytes,
+            output_payload_bytes: 0,
+            bounds: None,
+            conversion_revision: String::new(),
+            limitations: vec![
+                "Offline inspection only; no publication, collision, regions or gameplay activation",
+                "Original archive/WLD hashes retain source identity and lighting; prelighting is not applied",
+                "Editable rough nonmetal PBR defaults with explicit material overrides; no physical-property recovery",
+                "Static named ActorDefs only; animated, additive and layered materials refuse",
+                "A sole static sprite ignores its source distance-culling threshold; alternative LODs refuse",
+                "Source BLEND intent is retained; writer admission separately checks rendering support",
+                "Main and object basename WLDs are explicitly selected; WorldTree/native visibility membership is not certified",
+            ],
+        },
+        l,
+        material_cache: BTreeMap::new(),
+        texture_cache: BTreeMap::new(),
+        vertices: 0,
+        indices: 0,
+        resources: 0,
+        mesh_slots,
+    };
+    if mode == WldVisualMode::PreviewSnapshotV1 {
+        b.report.profile = "wld-preview-snapshot-v1";
+        b.report.limitations[3] = "Static named ActorDefs only; explicit texture/rest-vertex snapshots and additive-unlit fire approximation; layered materials refuse";
+        b.report.limitations.push("Texture animations select first declared frame, not native time zero; vertex tracks retain source mesh rest positions and normals");
+        b.report.limitations.push("Additive-unlit fire uses derived RGBA16 unlit BLEND; nonblack backgrounds attenuate and filtering differs from additive rendering");
+    }
     for m in terrain.fragment_iter::<DmSpriteDef2>() {
         if let Some(mi) = b.mesh(&terrain, m, "main")? {
             b.instance(mi, Mat4::IDENTITY.to_cols_array_2d())?;
@@ -1024,22 +1151,27 @@ fn load_inner(
     let mut min = DVec3::splat(f64::INFINITY);
     let mut max = DVec3::splat(f64::NEG_INFINITY);
     for i in &b.scene.instances {
-        let matrix = Mat4::from_cols_array_2d(&i.matrix);
+        let matrix = glam::DMat4::from_cols_array_2d(&i.matrix.map(|c| c.map(f64::from)));
         for p in &b.scene.meshes[i.mesh_index].positions {
-            let p = matrix.transform_point3(Vec3::from_array(*p));
+            let p = matrix.transform_point3(DVec3::from_array(p.map(f64::from)));
             ensure!(p.is_finite(), "transformed WLD position overflow");
-            min = min.min(p.as_dvec3());
-            max = max.max(p.as_dvec3());
+            min = min.min(p);
+            max = max.max(p);
         }
     }
     b.report.bounds = Some([min.to_array(), max.to_array()]);
     b.report.instances = b.scene.instances.len();
     let mut revision = blake3::Hasher::new();
-    revision.update(b"wld-static-pbr-v1-default-rough-nonmetal");
+    revision.update(b"wld-source-conversion-v2");
+    revision.update(&serde_json::to_vec(&mode)?);
+    revision.update(&serde_json::to_vec(&b.report.materials)?);
+    revision.update(&serde_json::to_vec(&b.report.vertex_snapshots)?);
     for policy in [
         include_bytes!("wld_visual.rs").as_slice(),
+        include_bytes!("wld_visual/snapshot.rs").as_slice(),
         include_bytes!("zone.rs").as_slice(),
         include_bytes!("source_material.rs").as_slice(),
+        include_bytes!("convert/mod.rs").as_slice(),
         include_bytes!("convert/texture.rs").as_slice(),
         include_bytes!("convert/dds.rs").as_slice(),
         include_bytes!("static_scene.rs").as_slice(),
@@ -1047,6 +1179,7 @@ fn load_inner(
     ] {
         revision.update(blake3::hash(policy).as_bytes());
     }
+    revision.update(&serde_json::to_vec(&b.report.sources)?);
     for s in &b.report.sources {
         revision.update(s.wld_blake3.as_bytes());
     }
@@ -1058,8 +1191,9 @@ fn load_inner(
             revision.update(h.as_bytes());
         }
     }
-    b.report.bake_revision = revision.finalize().to_hex().to_string();
+    b.report.conversion_revision = revision.finalize().to_hex().to_string();
     Ok(ResolvedWldVisual {
+        recommended_material_policy: b.policy,
         scene: b.scene,
         report: b.report,
     })
