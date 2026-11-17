@@ -1,5 +1,6 @@
 //! Bounded in-memory geometry bridge. Material, color and sampling decisions are supplied by callers.
 use super::{
+    lighting,
     surface::{self, RenderReference},
     BinaryZoneScene, ZoneMesh, ZonePlacement,
 };
@@ -93,16 +94,102 @@ pub struct BridgedStaticScene {
     pub scene: StaticScene,
     pub report: BridgeReport,
 }
+/// Geometry plus borrowed, unapplied descriptor-v2 source-lighting records.
+/// Count equality describes the current source pool, not a native consumer certificate.
+#[derive(Debug)]
+pub struct BridgedUnappliedLightingScene<'a> {
+    pub geometry: BridgedStaticScene,
+    pub lighting: lighting::LightingDiagnostics<'a>,
+}
+
 /// Convert raw source axes to server axes and emit terrain once at identity.
 /// Resolved resources are consumed; the source records remain unchanged.
 pub fn build_static_scene(
     source: &BinaryZoneScene,
-    mut resolved: ResolvedZoneVisual,
+    resolved: ResolvedZoneVisual,
     limits: &BridgeLimits,
 ) -> Result<BridgedStaticScene> {
-    preflight(source, &resolved, limits)?;
+    let validated = validate_bridge(source, &resolved, limits, ExtensionPolicy::Strict)?;
+    build_validated_geometry(source, resolved, validated)
+}
+
+/// Preserve every descriptor-v2 extension slice without applying source lighting.
+/// Terrain and included placements require nonempty word arrays matching their
+/// complete current vertex pools. Excluded records retain their diagnostic
+/// outcome; resolved mesh fields alone do not assign a lighting consumer.
+/// All resolved vertex colors, including unused bindings, are refused.
+/// Both independent logical budgets pass before report or geometry allocation.
+/// Success borrows the report from `source`; refusal returns no partial report.
+/// Neither result mutates source records or certifies native lighting semantics.
+pub fn build_static_scene_with_unapplied_v2_lighting<'a>(
+    source: &'a BinaryZoneScene,
+    resolved: ResolvedZoneVisual,
+    bridge_limits: &BridgeLimits,
+    lighting_limits: &lighting::DiagnosticLimits,
+) -> Result<BridgedUnappliedLightingScene<'a>> {
+    ensure!(
+        source.version == 2,
+        "unapplied lighting requires descriptor v2"
+    );
+    ensure!(
+        !source.placements.is_empty(),
+        "descriptor v2 requires record zero"
+    );
+    let validated = validate_bridge(
+        source,
+        &resolved,
+        bridge_limits,
+        ExtensionPolicy::PreserveV2Unapplied,
+    )?;
+    // diagnose preflights its own complete budget before allocating any report.
+    let lighting = lighting::diagnose(source, &[], lighting_limits)?;
+    for target in &lighting.targets {
+        match target.outcome {
+            lighting::TargetOutcome::Unassigned(_) => continue,
+            lighting::TargetOutcome::Words {
+                comparison: lighting::CountComparison::MatchesCurrentPoolOnly,
+                ..
+            } => {}
+            _ => bail!(
+                "lighting record {:?} must be nonempty and match the current vertex pool",
+                target.placement_ordinal
+            ),
+        }
+    }
+    let geometry = build_validated_geometry(source, resolved, validated)?;
+    Ok(BridgedUnappliedLightingScene { geometry, lighting })
+}
+
+#[derive(Clone, Copy)]
+enum ExtensionPolicy {
+    Strict,
+    PreserveV2Unapplied,
+}
+struct ValidatedBridge {
+    terrain_index: usize,
+    visits: usize,
+}
+
+// Check payload/work budgets and source/resource/transform validity without
+// allocating geometry or report arrays. Both public paths use these guards.
+fn validate_bridge(
+    source: &BinaryZoneScene,
+    resolved: &ResolvedZoneVisual,
+    limits: &BridgeLimits,
+    extensions: ExtensionPolicy,
+) -> Result<ValidatedBridge> {
+    preflight(source, resolved, limits)?;
+    if matches!(extensions, ExtensionPolicy::PreserveV2Unapplied) {
+        ensure!(
+            resolved
+                .bindings
+                .values()
+                .all(|b| matches!(b.colors, ResolvedColors::Unused)),
+            "unapplied lighting does not accept resolved vertex colors"
+        );
+    }
     validate_source(source)?;
-    validate_resources(source, &resolved)?;
+    validate_resources(source, resolved)?;
     let mut terrain = source
         .meshes
         .iter()
@@ -110,7 +197,6 @@ pub fn build_static_scene(
         .filter(|(_, m)| m.kind == MeshKind::Terrain);
     let terrain_index = terrain.next().context("missing terrain mesh")?.0;
     ensure!(terrain.next().is_none(), "multiple distinct terrain meshes");
-    // Estimate all repeated transformed-vertex work before allocating output/report arrays.
     let mut visits = source.meshes[terrain_index].vertices.len();
     for (pi, p) in source.placements.iter().enumerate() {
         if placement_role(source, pi, terrain_index)?.is_none() {
@@ -124,6 +210,46 @@ pub fn build_static_scene(
         visits <= limits.max_transform_visits,
         "transform visit budget exceeded"
     );
+    for (pi, p) in source.placements.iter().enumerate() {
+        if placement_role(source, pi, terrain_index)?.is_some() {
+            continue;
+        }
+        if matches!(extensions, ExtensionPolicy::Strict) {
+            ensure!(
+                p.extension_data.is_empty(),
+                "visual placement {pi} has unresolved extension data"
+            );
+        }
+        ensure!(
+            p.scale > 0.,
+            "visual placement {pi} must have positive scale"
+        );
+        let matrix = placement_matrix(p);
+        static_scene::validate_matrix(matrix)
+            .with_context(|| format!("placement {pi} unsupported transform"))?;
+        let mi = source.model_slots[p.model_index.unwrap() as usize].unwrap();
+        let transform = Mat4::from_cols_array_2d(&matrix);
+        ensure!(
+            source.meshes[mi].vertices.iter().all(|v| transform
+                .transform_point3(Vec3::from_array(swap(v.position)))
+                .is_finite()),
+            "placement {pi} transformed positions are nonfinite"
+        );
+    }
+    Ok(ValidatedBridge {
+        terrain_index,
+        visits,
+    })
+}
+
+fn build_validated_geometry(
+    source: &BinaryZoneScene,
+    mut resolved: ResolvedZoneVisual,
+    ValidatedBridge {
+        terrain_index,
+        visits,
+    }: ValidatedBridge,
+) -> Result<BridgedStaticScene> {
     // No geometry or grouping arrays are allocated until aggregate input/output preflight passes.
     let mut used = vec![false; source.meshes.len()];
     used[terrain_index] = true;
@@ -146,17 +272,7 @@ pub fn build_static_scene(
             continue;
         }
         let mi = source.model_slots[p.model_index.unwrap() as usize].unwrap();
-        ensure!(
-            p.extension_data.is_empty(),
-            "visual placement {pi} has unresolved extension data"
-        );
-        ensure!(
-            p.scale > 0.,
-            "visual placement {pi} must have positive scale"
-        );
         let matrix = placement_matrix(p);
-        static_scene::validate_matrix(matrix)
-            .with_context(|| format!("placement {pi} unsupported transform"))?;
         used[mi] = true;
         placements.push((pi, mi, matrix));
     }
@@ -223,14 +339,6 @@ pub fn build_static_scene(
     report.instance_sources.push(InstanceSource::Terrain);
     for (pi, mi, matrix) in placements {
         let mesh_index = report.source_to_visual_mesh[mi].unwrap();
-        let transform = Mat4::from_cols_array_2d(&matrix);
-        ensure!(
-            scene.meshes[mesh_index]
-                .positions
-                .iter()
-                .all(|p| transform.transform_point3(Vec3::from_array(*p)).is_finite()),
-            "placement {pi} transformed positions are nonfinite"
-        );
         scene.instances.push(StaticInstance { mesh_index, matrix });
         report.instance_sources.push(InstanceSource::Placement(pi));
     }
