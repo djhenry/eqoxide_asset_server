@@ -1,4 +1,5 @@
 //! Resolve declared source texture and material facts for the common static profile.
+pub mod portable;
 pub use crate::convert::AlphaMode;
 use crate::static_scene::{StaticAlphaMode, StaticMaterial, StaticTexture};
 use anyhow::Result;
