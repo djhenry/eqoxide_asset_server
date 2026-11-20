@@ -11,8 +11,21 @@ path = "src/lib.rs"
 name = "eqoxide-assets"
 path = "src/main.rs"
 
+[features]
+editable-visual = ["dep:eqoxide-assets", "serde_json/raw_value"]
+
+[[example]]
+name = "editable_visual"
+required-features = ["editable-visual"]
+
+[[test]]
+name = "editable_visual_contract"
+required-features = ["editable-visual"]
+
 [dependencies]
 anyhow = "1"
+# Optional: reuses the client's CPU visual reader only for the editable-visual exporter.
+eqoxide-assets = { optional = true, git = "https://github.com/djhenry/eqoxide", rev = "1f999026116cfe7f34403a6b4a3fcaa34702f753" }
 thiserror = "1"
 blake3 = "1"
 fastcdc = "3"
