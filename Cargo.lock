@@ -582,6 +582,7 @@ dependencies = [
  "crc32fast",
  "eqoxide-assets",
  "fastcdc",
+ "flate2",
  "glam",
  "gltf",
  "hex",

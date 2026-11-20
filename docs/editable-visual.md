@@ -77,6 +77,10 @@ supported edits, explicitly handle missing or ambiguous identities, and rebuild
 reports, hashes and affected component pairing. Adding the old header back to a
 Blender export does not establish those checks.
 
+A separate [selected material reimport workflow](material-edit-reimport.md) applies
+explicit material/PNG selections onto original geometry. It does not qualify or
+import the edited whole scene.
+
 ## Refusals and resource limits
 
 Portable export requires the common PBR-factors capability, including explicitly

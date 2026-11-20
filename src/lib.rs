@@ -3,6 +3,8 @@
 pub mod audio;
 #[cfg(feature = "editable-visual")]
 pub mod editable_visual;
+#[cfg(feature = "editable-visual")]
+pub mod material_edit;
 pub mod auth;
 pub mod zone;
 pub mod build;
@@ -17,6 +19,7 @@ pub mod sync_client;
 pub mod bsp_regions;
 pub mod zone_source;
 pub mod eqg;
+mod png_stream;
 pub mod static_scene;
 pub mod static_collision;
 pub mod static_scene_descriptor;
