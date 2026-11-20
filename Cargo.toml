@@ -22,9 +22,21 @@ required-features = ["editable-visual"]
 name = "editable_visual_contract"
 required-features = ["editable-visual"]
 
+[[example]]
+name = "editable_materials"
+required-features = ["editable-visual"]
+
+[[test]]
+name = "material_edit"
+required-features = ["editable-visual"]
+
+[[test]]
+name = "material_edit_cli"
+required-features = ["editable-visual"]
+
 [dependencies]
 anyhow = "1"
-# Optional: reuses the client's CPU visual reader only for the editable-visual exporter.
+# Optional: shared CPU visual reader for opt-in editable-visual tools.
 eqoxide-assets = { optional = true, git = "https://github.com/djhenry/eqoxide", rev = "1f999026116cfe7f34403a6b4a3fcaa34702f753" }
 thiserror = "1"
 blake3 = "1"
@@ -51,6 +63,7 @@ libeq_wld = { git = "https://github.com/cjab/libeq", package = "libeq_wld" }
 libeq_eqg = { git = "https://github.com/djhenry/libeq", rev = "686b74a1a82e8f4f207958ebbe8c06579046ce04" }
 image = { version = "0.25", default-features = false, features = ["bmp", "png", "dds"] }
 crc32fast = "1"
+flate2 = "1.1.9"
 gltf = { version = "1", features = ["import", "extras"] }
 glam = "0.29"
 rayon = "1"

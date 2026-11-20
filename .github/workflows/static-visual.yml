@@ -39,6 +39,8 @@ jobs:
         run: |
           cargo fetch --locked --manifest-path producer/Cargo.toml
           cargo fetch --locked --manifest-path consumer/Cargo.toml
+      - name: Check default server targets
+        run: cargo check --manifest-path producer/Cargo.toml --no-default-features --all-targets --locked --offline
       - name: Run writer tests
         run: cargo test --manifest-path producer/Cargo.toml --all-targets --all-features --locked --offline
       - name: Regenerate and decode the common fixture

@@ -2623,31 +2623,86 @@ pub(crate) fn write_glb_instanced_prepared(
         }
     }
 
-    let json_str = serde_json::to_string(&gltf)?;
-    let json_bytes = json_str.as_bytes();
-    let json_padded_len = json_bytes.len().checked_add(3).context("static GLB JSON size overflow")? & !3;
-    let bin_padded_len = buffer_data.len();
-    let total_len = json_padded_len.checked_add(bin_padded_len).and_then(|n| n.checked_add(28))
-        .context("static GLB size overflow")?;
-    anyhow::ensure!(total_len <= u32::MAX as usize, "static GLB exceeds 32-bit file size limit");
-
+    let json_bytes = serde_json::to_vec(&gltf)?;
+    let total = glb_layout(&json_bytes, &buffer_data, u32::MAX as usize)?.2;
     let mut out = fs::File::create(output)
         .with_context(|| format!("failed to create {}", output.display()))?;
-    out.write_all(&0x46546C67u32.to_le_bytes())?;
-    out.write_all(&2u32.to_le_bytes())?;
-    out.write_all(&(total_len as u32).to_le_bytes())?;
-    out.write_all(&(json_padded_len as u32).to_le_bytes())?;
-    out.write_all(&0x4E4F534Au32.to_le_bytes())?;
-    out.write_all(json_bytes)?;
-    for _ in json_bytes.len()..json_padded_len {
-        out.write_all(b" ")?;
-    }
-    out.write_all(&(bin_padded_len as u32).to_le_bytes())?;
-    out.write_all(&0x004E4942u32.to_le_bytes())?;
-    out.write_all(&buffer_data)?;
-
-    eprintln!("  wrote {} bytes to {}", total_len, output.display());
+    write_glb_document(&mut out, &json_bytes, &buffer_data, u32::MAX as usize)?;
+    eprintln!("  wrote {} bytes to {}", total, output.display());
     Ok(())
+}
+
+fn glb_layout(json: &[u8], bin: &[u8], limit: usize) -> Result<(usize, usize, usize)> {
+    let json_len = json
+        .len()
+        .checked_add(3)
+        .context("GLB JSON size overflow")?
+        & !3;
+    let bin_len = bin.len().checked_add(3).context("GLB BIN size overflow")? & !3;
+    let total = json_len
+        .checked_add(bin_len)
+        .and_then(|n| n.checked_add(28))
+        .context("GLB size overflow")?;
+    anyhow::ensure!(
+        total <= limit && total <= u32::MAX as usize,
+        "GLB output byte limit exceeded"
+    );
+    Ok((json_len, bin_len, total))
+}
+
+/// Shared streaming packaging boundary; validate the complete layout before writing.
+pub(crate) fn write_glb_document(
+    mut out: impl Write,
+    json: &[u8],
+    bin: &[u8],
+    limit: usize,
+) -> Result<()> {
+    let (json_len, bin_len, total) = glb_layout(json, bin, limit)?;
+    for word in [0x46546C67u32, 2, total as u32, json_len as u32, 0x4E4F534A] {
+        out.write_all(&word.to_le_bytes())?;
+    }
+    out.write_all(json)?;
+    out.write_all(&[b' '; 3][..json_len - json.len()])?;
+    out.write_all(&(bin_len as u32).to_le_bytes())?;
+    out.write_all(&0x004E4942u32.to_le_bytes())?;
+    out.write_all(bin)?;
+    out.write_all(&[0; 3][..bin_len - bin.len()])?;
+    Ok(())
+}
+
+/// Bounded in-memory wrapper for callers constructing a validated candidate.
+pub(crate) fn encode_glb_document(json: &[u8], bin: &[u8], limit: usize) -> Result<Vec<u8>> {
+    let total = glb_layout(json, bin, limit)?.2;
+    let mut out = Vec::new();
+    out.try_reserve_exact(total).context("reserve GLB output")?;
+    write_glb_document(&mut out, json, bin, limit)?;
+    Ok(out)
+}
+
+#[cfg(test)]
+mod document_packaging_tests {
+    #[test]
+    fn bounded_streaming_packaging_matches_vec_and_refuses_before_writing() {
+        let mut sink = b"existing".to_vec();
+        assert!(super::write_glb_document(&mut sink, b"{}", b"bin", 1).is_err());
+        assert_eq!(sink, b"existing");
+        let mut sink = Vec::new();
+        super::write_glb_document(&mut sink, b"{}", b"bin", 36).unwrap();
+        let expected = [
+            b"glTF".as_slice(),
+            &2u32.to_le_bytes(),
+            &36u32.to_le_bytes(),
+            &4u32.to_le_bytes(),
+            b"JSON",
+            b"{}  ",
+            &4u32.to_le_bytes(),
+            b"BIN\0",
+            b"bin\0",
+        ]
+        .concat();
+        assert_eq!(sink, expected);
+        assert_eq!(sink, super::encode_glb_document(b"{}", b"bin", 36).unwrap());
+    }
 }
 
 fn compute_bounds_f32x3(positions: &[[f32; 3]]) -> ([f32; 3], [f32; 3]) {
