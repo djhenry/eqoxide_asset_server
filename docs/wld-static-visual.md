@@ -13,11 +13,18 @@ cargo run --locked --offline --example wld_pbr_zone -- \
 Use `wld_pbr_zone --inspect MAIN.s3d [OBJECTS.s3d]` for CPU source inspection
 without writing a GLB or asserting writer/renderer compatibility.
 
+Add `--portable-png8` to explicitly prepare PNG16 base-color textures as PNG8.
+See [portable texture preparation](portable-textures.md) for quantization, MASK
+coverage protection, quotas, report stages and source retention. Without this
+option, the existing preserve-depth path remains available.
+
 Omit the final argument when the main archive has no placed objects and no
 required texture depends on that archive. Inputs must be regular local files.
 The example is offline: it neither publishes a manifest nor activates gameplay.
 It writes the GLB only after complete conversion and existing writer validation;
-source-conversion refusal preserves a prior output. The JSON report goes to
+source-conversion refusal preserves a prior output. Destinations aliasing either
+supplied source archive refuse before source parsing, including canonical-path
+aliases and, on Unix, hard links. This assumes a stable trusted local filesystem. The JSON report goes to
 standard output after successful writing.
 
 ## Selected inputs and geometry
