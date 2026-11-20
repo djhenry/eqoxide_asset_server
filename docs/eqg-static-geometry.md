@@ -61,3 +61,6 @@ cargo run --example eqg_geometry_fixture -- eqg-geometry.glb
 ```
 
 The example supplies authored materials, one terrain mesh and three rotated/scaled instances of one object mesh, using duplicate and nonidentity model slots. It also includes repeated-terrain and unassigned records to exercise exclusion reporting. It reopens the GLB and verifies shared geometry and winding. Its supplied materials are test inputs, not native shader translations.
+
+For the explicit archive material resolver and static HDR preview, see
+[Binary EQG static PBR preview](eqg-pbr-preview.md).
