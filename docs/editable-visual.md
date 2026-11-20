@@ -8,7 +8,7 @@ alpha modes and explicit `KHR_materials_unlit`; no source-specific shader is nee
 [the shared material policy](shared-material-policy-design.md).
 
 ```sh
-cargo run --locked --example editable_visual -- INPUT.glb NEW_DIRECTORY
+cargo run --locked --features editable-visual --example editable_visual -- INPUT.glb NEW_DIRECTORY
 ```
 
 The destination must not exist. The command does not publish assets or modify the

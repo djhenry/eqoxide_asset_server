@@ -40,7 +40,7 @@ jobs:
           cargo fetch --locked --manifest-path producer/Cargo.toml
           cargo fetch --locked --manifest-path consumer/Cargo.toml
       - name: Run writer tests
-        run: cargo test --manifest-path producer/Cargo.toml --all-targets --locked --offline
+        run: cargo test --manifest-path producer/Cargo.toml --all-targets --all-features --locked --offline
       - name: Regenerate and decode the common fixture
         run: consumer/scripts/check-static-visual-fixture.sh consumer producer
 

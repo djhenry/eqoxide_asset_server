@@ -1,6 +1,7 @@
 //! eqoxide_asset_server — derived-asset delivery for EQEmu.
 
 pub mod audio;
+#[cfg(feature = "editable-visual")]
 pub mod editable_visual;
 pub mod auth;
 pub mod zone;

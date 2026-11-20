@@ -199,23 +199,15 @@ pub fn export_editable_visual(
     );
     let reference_sha256 = sha256(glb);
     let mut identities = Vec::new();
-    let identity_count = [
-        visual.materials.len(),
-        visual.meshes.len(),
-        visual.instances.len(),
-    ]
-    .into_iter()
-    .try_fold(0usize, |sum, n| sum.checked_add(n))
-    .context("authoring identity count overflow")?;
-    identities
-        .try_reserve_exact(identity_count)
-        .context("cannot reserve authoring identities")?;
     for (collection, kind) in [
         ("materials", "material"),
         ("meshes", "mesh"),
         ("nodes", "node"),
     ] {
         let mut values = entries(&root, collection)?;
+        identities
+            .try_reserve(values.len())
+            .context("cannot reserve authoring identities")?;
         for (ordinal, entry) in values.iter_mut().enumerate() {
             let id = format!("{kind}-{ordinal:06}");
             identities.push(AuthoringIdentity {
