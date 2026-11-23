@@ -3,6 +3,8 @@ mod support {
 }
 use serde_json::{json, value::RawValue, Value};
 use support::*;
+#[allow(unused_imports)]
+use eqoxide_asset_server::static_scene::StaticAlphaMode as _Alpha;
 #[test]
 fn author_fixture_is_reader_admitted_and_editor_mapping_is_unambiguous() {
     let reference = reference();
@@ -544,4 +546,42 @@ fn reference_export_preserves_legal_compressed_png_padding() {
     .unwrap();
     assert_eq!(bundle.files["images/image-000000.png"], png);
     assert_eq!(bundle.files["reference.glb"], reference);
+}
+
+// Catches the blend capability surviving after the last BLEND material becomes OPAQUE.
+#[test]
+fn blend_capability_follows_the_final_material_set() {
+    use eqoxide_asset_server::static_scene::StaticAlphaMode::*;
+    let caps = |glb: &[u8]| {
+        unpack(glb).0["extras"]["eqoxideAsset"]["requirements"]["capabilities"].clone()
+    };
+    let blend = json!("pbr-metallic-roughness-blend-v1");
+    let reference = reference_with(Blend, Opaque, false);
+    let (edited, sidecar) = editor(&reference, [200, 17, 41, 91]);
+    let kept = apply(&reference, &sidecar, &edited, &Default::default()).unwrap();
+    assert!(caps(&kept.glb).as_array().unwrap().contains(&blend));
+    let to_opaque = rewrite(&edited, |j| j["materials"][1]["alphaMode"] = json!("OPAQUE"));
+    let result = apply(&reference, &sidecar, &to_opaque, &Default::default()).unwrap();
+    assert!(!caps(&result.glb).as_array().unwrap().contains(&blend));
+}
+
+// Catches unlit declarations being added or kept inconsistently with the final materials.
+#[test]
+fn unlit_extension_declarations_follow_the_final_material_set() {
+    use eqoxide_asset_server::static_scene::StaticAlphaMode::*;
+    let unlit = json!(["KHR_materials_unlit"]);
+    let reference = reference_with(Opaque, Opaque, true);
+    assert_eq!(unpack(&reference).0["extensionsUsed"], unlit);
+    let (edited, sidecar) = editor(&reference, [200, 17, 41, 91]);
+    let kept = apply(&reference, &sidecar, &edited, &Default::default()).unwrap();
+    let (j, _) = unpack(&kept.glb);
+    assert_eq!(j["extensionsUsed"], unlit);
+    assert_eq!(j["extensionsRequired"], unlit);
+    let lit = rewrite(&edited, |j| {
+        j["materials"][1]["extensions"] = json!({});
+        j["materials"][1].as_object_mut().unwrap().remove("extensions");
+    });
+    let result = apply(&reference, &sidecar, &lit, &Default::default()).unwrap();
+    let (j, _) = unpack(&result.glb);
+    assert!(j.get("extensionsUsed").is_none() && j.get("extensionsRequired").is_none());
 }

@@ -716,16 +716,24 @@ pub fn reimport_material_edits(
         .iter()
         .map(|v| serde_json::from_str(v.get()))
         .collect::<std::result::Result<_, _>>()?;
-    if all
+    let uses_unlit = all
         .iter()
-        .any(|m| m["extensions"].get("KHR_materials_unlit").is_some())
-    {
-        for key in ["extensionsUsed", "extensionsRequired"] {
-            root.insert(key.into(), to_raw_value(&json!(["KHR_materials_unlit"]))?);
+        .any(|m| m["extensions"].get("KHR_materials_unlit").is_some());
+    for key in ["extensionsUsed", "extensionsRequired"] {
+        let mut names: Vec<String> = match root.get(key) {
+            Some(raw) => serde_json::from_str(raw.get())?,
+            None => Vec::new(),
+        };
+        names.retain(|n| n != "KHR_materials_unlit");
+        if uses_unlit {
+            names.push("KHR_materials_unlit".into());
+            names.sort();
         }
-    } else {
-        root.remove("extensionsUsed");
-        root.remove("extensionsRequired");
+        if names.is_empty() {
+            root.remove(key);
+        } else {
+            root.insert(key.into(), to_raw_value(&names)?);
+        }
     }
     let implementation = sha(include_bytes!("material_edit.rs"));
     let revision = sha(&serde_json::to_vec(
@@ -734,18 +742,20 @@ pub fn reimport_material_edits(
     let mut extras: RawObject = serde_json::from_str(root["extras"].get())?;
     let mut header: Value = serde_json::from_str(extras["eqoxideAsset"].get())?;
     header["bakeRevision"] = json!(revision);
-    if all
+    let needs_blend = all
         .iter()
-        .any(|m| m["alphaMode"] == "BLEND" && m["extensions"].get("KHR_materials_unlit").is_none())
-    {
-        let caps = header["requirements"]["capabilities"]
-            .as_array_mut()
-            .context("reference capabilities")?;
-        let hdr = json!("pbr-metallic-roughness-blend-v1");
+        .any(|m| m["alphaMode"] == "BLEND" && m["extensions"].get("KHR_materials_unlit").is_none());
+    let caps = header["requirements"]["capabilities"]
+        .as_array_mut()
+        .context("reference capabilities")?;
+    let hdr = json!("pbr-metallic-roughness-blend-v1");
+    if needs_blend {
         if !caps.contains(&hdr) {
             caps.push(hdr);
             caps.sort_by_key(|v| v.as_str().unwrap_or_default().to_owned());
         }
+    } else {
+        caps.retain(|c| c != &hdr);
     }
     extras.insert("eqoxideAsset".into(), to_raw_value(&header)?);
     root.insert("extras".into(), to_raw_value(&extras)?);

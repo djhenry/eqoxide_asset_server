@@ -1,7 +1,7 @@
 use eqoxide_asset_server::editable_visual::export_editable_visual;
 use eqoxide_asset_server::static_scene::{
     write_static_visual_with_surface_profile, StaticAlphaMode, StaticInstance, StaticMaterial,
-    StaticMaterialPolicy, StaticMaterialProfile, StaticMesh, StaticPrimitive, StaticScene,
+    StaticMaterialPolicy, StaticMaterialProfile, StaticMesh, StaticSurfaceModel, StaticPrimitive, StaticScene,
     StaticTexture,
 };
 use glam::Mat4;
@@ -19,6 +19,15 @@ pub(crate) fn png(pixel: [u8; 4]) -> Vec<u8> {
 }
 
 pub(crate) fn reference() -> Vec<u8> {
+    reference_with(StaticAlphaMode::Opaque, StaticAlphaMode::Mask { cutoff: 0.35 }, false)
+}
+
+/// Reference with chosen alpha modes and optionally an explicitly unlit material 0.
+pub(crate) fn reference_with(
+    alpha0: StaticAlphaMode,
+    alpha1: StaticAlphaMode,
+    unlit0: bool,
+) -> Vec<u8> {
     let scene = StaticScene {
         meshes: vec![StaticMesh {
             name: "original mesh".into(),
@@ -50,14 +59,14 @@ pub(crate) fn reference() -> Vec<u8> {
                 name: "shared name".into(),
                 base_color: [0.25, 0.5, 0.75, 1.],
                 texture_index: Some(0),
-                alpha_mode: StaticAlphaMode::Opaque,
+                alpha_mode: alpha0,
                 double_sided: false,
             },
             StaticMaterial {
                 name: "shared name".into(),
                 base_color: [0.75, 0.5, 0.25, 0.625],
                 texture_index: Some(0),
-                alpha_mode: StaticAlphaMode::Mask { cutoff: 0.35 },
+                alpha_mode: alpha1,
                 double_sided: true,
             },
         ],
@@ -70,11 +79,15 @@ pub(crate) fn reference() -> Vec<u8> {
             matrix: Mat4::IDENTITY.to_cols_array_2d(),
         }],
     };
+    let mut policy = StaticMaterialPolicy::default();
+    if unlit0 {
+        policy.overrides.insert(0, StaticSurfaceModel::Unlit);
+    }
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("reference.glb");
     write_static_visual_with_surface_profile(
         &scene,
-        &StaticMaterialPolicy::default(),
+        &policy,
         StaticMaterialProfile::ScalarPbrHdrBlendV1,
         &"5".repeat(64),
         &path,
