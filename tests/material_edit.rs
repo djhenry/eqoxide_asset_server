@@ -3,8 +3,6 @@ mod support {
 }
 use serde_json::{json, value::RawValue, Value};
 use support::*;
-#[allow(unused_imports)]
-use eqoxide_asset_server::static_scene::StaticAlphaMode as _Alpha;
 #[test]
 fn author_fixture_is_reader_admitted_and_editor_mapping_is_unambiguous() {
     let reference = reference();
@@ -548,9 +546,9 @@ fn reference_export_preserves_legal_compressed_png_padding() {
     assert_eq!(bundle.files["reference.glb"], reference);
 }
 
-// Catches the blend capability surviving after the last BLEND material becomes OPAQUE.
+// An explicit HDR profile still selects HDR rendering after its last lit BLEND is removed.
 #[test]
-fn blend_capability_follows_the_final_material_set() {
+fn explicit_hdr_profile_survives_last_blend_becoming_opaque() {
     use eqoxide_asset_server::static_scene::StaticAlphaMode::*;
     let caps = |glb: &[u8]| {
         unpack(glb).0["extras"]["eqoxideAsset"]["requirements"]["capabilities"].clone()
@@ -560,9 +558,17 @@ fn blend_capability_follows_the_final_material_set() {
     let (edited, sidecar) = editor(&reference, [200, 17, 41, 91]);
     let kept = apply(&reference, &sidecar, &edited, &Default::default()).unwrap();
     assert!(caps(&kept.glb).as_array().unwrap().contains(&blend));
-    let to_opaque = rewrite(&edited, |j| j["materials"][1]["alphaMode"] = json!("OPAQUE"));
+    let to_opaque = rewrite(&edited, |j| {
+        j["materials"][1]["alphaMode"] = json!("OPAQUE")
+    });
     let result = apply(&reference, &sidecar, &to_opaque, &Default::default()).unwrap();
-    assert!(!caps(&result.glb).as_array().unwrap().contains(&blend));
+    assert!(caps(&result.glb).as_array().unwrap().contains(&blend));
+    assert_eq!(
+        eqoxide_assets::decode_static_visual(&result.glb, &Default::default())
+            .unwrap()
+            .render_profile(),
+        eqoxide_assets::static_visual::StaticRenderProfile::PbrHdrBlendReferenceLight
+    );
 }
 
 // Catches unlit declarations being added or kept inconsistently with the final materials.
@@ -579,9 +585,168 @@ fn unlit_extension_declarations_follow_the_final_material_set() {
     assert_eq!(j["extensionsRequired"], unlit);
     let lit = rewrite(&edited, |j| {
         j["materials"][1]["extensions"] = json!({});
-        j["materials"][1].as_object_mut().unwrap().remove("extensions");
+        j["materials"][1]
+            .as_object_mut()
+            .unwrap()
+            .remove("extensions");
     });
     let result = apply(&reference, &sidecar, &lit, &Default::default()).unwrap();
     let (j, _) = unpack(&result.glb);
     assert!(j.get("extensionsUsed").is_none() && j.get("extensionsRequired").is_none());
+}
+
+#[test]
+fn explicit_hdr_profile_is_retained_for_opaque_and_all_unlit_references() {
+    use eqoxide_asset_server::static_scene::StaticAlphaMode::Opaque;
+    for all_unlit in [false, true] {
+        let reference = reference_with(Opaque, Opaque, all_unlit);
+        let reference = if all_unlit {
+            rewrite(&reference, |j| {
+                j["materials"][1]["extensions"] = json!({"KHR_materials_unlit": {}});
+            })
+        } else {
+            reference
+        };
+        let (edited, sidecar) = editor(&reference, [200, 17, 41, 91]);
+        let result = apply(&reference, &sidecar, &edited, &Default::default()).unwrap();
+        let decoded =
+            eqoxide_assets::decode_static_visual(&result.glb, &Default::default()).unwrap();
+        assert_eq!(
+            decoded.render_profile(),
+            eqoxide_assets::static_visual::StaticRenderProfile::PbrHdrBlendReferenceLight
+        );
+    }
+}
+
+#[test]
+fn scalar_profile_upgrades_when_selected_lit_material_becomes_blend() {
+    let reference = rewrite(&reference(), |j| {
+        j["extras"]["eqoxideAsset"]["requirements"]["capabilities"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|c| c != "pbr-metallic-roughness-blend-v1");
+    });
+    let decoded = eqoxide_assets::decode_static_visual(&reference, &Default::default()).unwrap();
+    assert_ne!(
+        decoded.render_profile(),
+        eqoxide_assets::static_visual::StaticRenderProfile::PbrHdrBlendReferenceLight
+    );
+    let (edited, sidecar) = editor(&reference, [200, 17, 41, 91]);
+    let edited = rewrite(&edited, |j| j["materials"][1]["alphaMode"] = json!("BLEND"));
+    let result = apply(&reference, &sidecar, &edited, &Default::default()).unwrap();
+    assert_eq!(
+        eqoxide_assets::decode_static_visual(&result.glb, &Default::default())
+            .unwrap()
+            .render_profile(),
+        eqoxide_assets::static_visual::StaticRenderProfile::PbrHdrBlendReferenceLight
+    );
+}
+
+#[test]
+fn original_material_extras_and_unsupported_root_extensions_refuse_at_reference_admission() {
+    let reference = reference();
+    let (edited, sidecar) = editor(&reference, [200, 17, 41, 91]);
+    for extras in [
+        json!({"eqAdditive":true}),
+        json!({"colorKey":[0,0,0]}),
+        json!({"label":"metadata"}),
+    ] {
+        let bad = rewrite(&reference, |j| j["materials"][0]["extras"] = extras);
+        let err = apply(&bad, &sidecar, &edited, &Default::default())
+            .err()
+            .unwrap();
+        assert!(format!("{err:#}").contains("material: unsupported field extras"));
+    }
+    for key in ["extensionsUsed", "extensionsRequired"] {
+        let bad = rewrite(&reference, |j| j[key] = json!(["KHR_materials_clearcoat"]));
+        let err = apply(&bad, &sidecar, &edited, &Default::default())
+            .err()
+            .unwrap();
+        assert!(format!("{err:#}").contains("reference static visual refused"));
+    }
+}
+
+#[test]
+fn edited_json_budget_is_separate_from_retained_reference_and_output_json() {
+    let reference = reference();
+    let (edited, sidecar) = editor(&reference, [200, 17, 41, 91]);
+    let edited_json = gltf::binary::Glb::from_slice(&edited).unwrap().json.len();
+    let limits = MaterialEditLimits {
+        max_edited_json_bytes: edited_json,
+        ..Default::default()
+    };
+    let result = apply(&reference, &sidecar, &edited, &limits).unwrap();
+    assert!(
+        gltf::binary::Glb::from_slice(&result.glb)
+            .unwrap()
+            .json
+            .len()
+            > edited_json
+    );
+}
+
+#[test]
+fn raised_limits_do_not_bypass_edited_or_reference_native_json_ceiling() {
+    let reference = reference();
+    let (edited, sidecar) = editor(&reference, [200, 17, 41, 91]);
+    let huge_edited = rewrite(&edited, |j| {
+        j["nodes"] = json!([{"name":"x".repeat(8 << 20)}])
+    });
+    let mut limits = MaterialEditLimits {
+        max_edited_json_bytes: usize::MAX,
+        ..Default::default()
+    };
+    let err = apply(&reference, &sidecar, &huge_edited, &limits)
+        .err()
+        .unwrap();
+    assert!(format!("{err:#}").contains("edited JSON byte/alignment limit"));
+    let huge_reference = rewrite(&reference, |j| {
+        j["nodes"][0]["name"] = json!("x".repeat(8 << 20))
+    });
+    limits.reference.max_json_bytes = usize::MAX;
+    let err = apply(&huge_reference, &sidecar, &edited, &limits)
+        .err()
+        .unwrap();
+    assert!(format!("{err:#}").contains("reference static visual refused"));
+}
+
+#[test]
+fn unlit_declarations_add_selected_unlit_and_retain_unselected_unlit() {
+    let reference = reference();
+    let (edited, sidecar) = editor(&reference, [200, 17, 41, 91]);
+    let edited = rewrite(&edited, |j| {
+        j["materials"][1]["extensions"] = json!({"KHR_materials_unlit":{}})
+    });
+    let added = apply(&reference, &sidecar, &edited, &Default::default()).unwrap();
+    let (j, _) = unpack(&added.glb);
+    assert_eq!(j["extensionsUsed"], json!(["KHR_materials_unlit"]));
+    assert_eq!(j["extensionsRequired"], json!(["KHR_materials_unlit"]));
+    let reference = rewrite(&reference, |j| {
+        j["materials"][1]["extensions"] = json!({"KHR_materials_unlit":{}});
+        j["extensionsUsed"] = json!(["KHR_materials_unlit"]);
+        j["extensionsRequired"] = json!(["KHR_materials_unlit"]);
+    });
+    let (edited, sidecar) = editor(&reference, [200, 17, 41, 91]);
+    let kept = apply(&reference, &sidecar, &edited, &Default::default()).unwrap();
+    let (j, _) = unpack(&kept.glb);
+    assert_eq!(j["extensionsUsed"], json!(["KHR_materials_unlit"]));
+    assert_eq!(j["extensionsRequired"], json!(["KHR_materials_unlit"]));
+    assert_eq!(
+        j["materials"][1]["extensions"],
+        json!({"KHR_materials_unlit":{}})
+    );
+}
+
+#[test]
+fn used_only_unlit_reference_declaration_refuses_instead_of_widening_profile() {
+    use eqoxide_asset_server::static_scene::StaticAlphaMode::Opaque;
+    let reference = reference_with(Opaque, Opaque, true);
+    let (edited, sidecar) = editor(&reference, [200, 17, 41, 91]);
+    let bad = rewrite(&reference, |j| {
+        j.as_object_mut().unwrap().remove("extensionsRequired");
+    });
+    let err = apply(&bad, &sidecar, &edited, &Default::default())
+        .err()
+        .unwrap();
+    assert!(format!("{err:#}").contains("matching used/required KHR_materials_unlit"));
 }

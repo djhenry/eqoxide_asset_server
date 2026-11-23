@@ -9,23 +9,32 @@ use std::{
     io::{self, Read, Write},
     path::{Component, Path, PathBuf},
 };
-const USAGE:&str="usage: editable_materials --material material-NNNNNN [--material material-NNNNNN ...] BUNDLE_DIRECTORY EDITED.glb OUTPUT.glb";
+const USAGE:&str="usage: editable_materials --material material-NNNNNN [--material material-NNNNNN ...] [--] BUNDLE_DIRECTORY EDITED.glb OUTPUT.glb";
 fn arguments(
     args: impl IntoIterator<Item = OsString>,
 ) -> Result<(PathBuf, PathBuf, PathBuf, Vec<String>)> {
     let mut args = args.into_iter();
     let mut ids = Vec::new();
     let mut paths = Vec::new();
+    let mut options = true;
     while let Some(arg) = args.next() {
-        if arg == "--material" {
+        if options && arg == "--" {
+            options = false;
+        } else if options && arg == "--material" {
             let id = args
                 .next()
                 .context(USAGE)?
                 .into_string()
                 .map_err(|_| anyhow::anyhow!(USAGE))?;
+            ensure!(
+                id.strip_prefix("material-").is_some_and(
+                    |digits| digits.len() == 6 && digits.bytes().all(|b| b.is_ascii_digit())
+                ),
+                USAGE
+            );
             ids.push(id);
         } else {
-            ensure!(!arg.to_string_lossy().starts_with('-'), USAGE);
+            ensure!(!options || !arg.to_string_lossy().starts_with('-'), USAGE);
             paths.push(PathBuf::from(arg));
         }
     }
@@ -129,4 +138,44 @@ pub fn run(args: impl IntoIterator<Item = OsString>, mut stdout: impl Write) -> 
 #[allow(dead_code)]
 fn main() -> Result<()> {
     run(std::env::args_os().skip(1), io::stdout().lock())
+}
+
+#[cfg(test)]
+mod argument_tests {
+    use super::*;
+    fn parse(args: &[&str]) -> Result<(PathBuf, PathBuf, PathBuf, Vec<String>)> {
+        arguments(args.iter().map(OsString::from))
+    }
+    #[test]
+    fn end_of_options_admits_leading_dash_paths() {
+        let parsed = parse(&[
+            "--material",
+            "material-000000",
+            "--",
+            "-bundle",
+            "-edited.glb",
+            "-output.glb",
+        ])
+        .unwrap();
+        assert_eq!(parsed.0, PathBuf::from("-bundle"));
+        assert_eq!(parsed.1, PathBuf::from("-edited.glb"));
+        assert_eq!(parsed.2, PathBuf::from("-output.glb"));
+        assert_eq!(parsed.3, ["material-000000"]);
+    }
+    #[test]
+    fn selectors_require_exact_six_ascii_digits_before_file_io() {
+        for id in [
+            "--foo",
+            "--",
+            "material-0",
+            "material-0000000",
+            "material-００００００",
+            "mesh-000000",
+        ] {
+            assert!(parse(&["--material", id, "B", "E", "O"]).is_err(), "{id}");
+        }
+        assert!(parse(&["--material", "material-999999", "B", "E", "O"]).is_ok());
+        assert!(parse(&["--material", "material-000000", "B", "E", "O", "--unknown"]).is_err());
+        assert!(parse(&["--", "--material", "material-000000", "B", "E", "O"]).is_err());
+    }
 }

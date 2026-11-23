@@ -78,8 +78,11 @@ image payloads retain their meanings.
 A deterministic new bake revision binds the reference, effective selected fields
 and image identities, sampler policy, and emission implementation identity. Ignored editor
 geometry, names and resource ordering do not change effective visual identity;
-the audit report separately hashes the entire edited GLB. Required unlit and HDR
-blend declarations are generated from the resulting supported material state.
+the audit report separately hashes the entire edited GLB. Required unlit
+declarations follow the resulting supported materials. An existing HDR rendering
+profile is retained, including for opaque-only or all-unlit results; newly imported
+lit BLEND adds that profile. Removing the last BLEND never implicitly changes HDR
+compositing and display mapping.
 The final candidate passes the common CPU reader before atomic publication.
 Earlier refusal preserves an existing output. A stdout failure after successful
 publication reports that output was committed and cannot roll it back.
@@ -100,8 +103,20 @@ encoded and decoded RGBA, aggregate selected PNG 128 MiB encoded and decoded,
 image axis 8192, output GLB 128 MiB, and report 16 MiB. Distinct selected image
 ordinals charge once before content deduplication. Reference admission has its
 independent nested editable-export limits. Final combined output must also pass
-native common-reader ceilings, including 256 MiB decoded PNG aggregate and its
+native common-reader ceilings, including 8 MiB combined output JSON, 100,000
+entries per combined resource collection, 256 MiB decoded PNG aggregate and its
 existing coupled encoded/decoded 64 MiB single-image limit. Lower selected-input
-limits do not restrict retained original resource counts. These are logical
+limits do not restrict retained original resource counts or output JSON size.
+Caller settings can lower admission budgets; raising them cannot raise native
+profile ceilings. Report and reference-export output budgets are separate logical
+limits that may be raised independently. Original material extras and unsupported root extensions are
+refused by reference admission, before any replacement. They are not silently
+merged: extras may encode coverage, color-key or other policy that becomes stale
+after an edit. Editor authoring extras identify materials and are not imported as
+rendering policy. These are logical
 bounds, not hard process-memory guarantees. The API and standalone example do not
 launch an editor, renderer or client.
+
+The CLI accepts `--` after all `--material` selections to end option parsing and
+allow leading-dash paths. Selectors must spell `material-` followed by exactly six
+ASCII digits; the API additionally requires that ID to exist in the reference.
