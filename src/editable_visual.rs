@@ -177,6 +177,8 @@ pub fn export_editable_visual(
             image.png_bytes.get(24) == Some(&8),
             "image {index} requires an eight-bit portable PNG; original preserved"
         );
+        crate::static_scene::validate_png_stream(&image.png_bytes)
+            .with_context(|| format!("reference image {index} static PNG stream refused"))?;
     }
     let binary = gltf::binary::Glb::from_slice(glb).context("reference GLB packaging")?;
     // Raw values preserve unchanged numeric tokens. Parsing and reserializing a

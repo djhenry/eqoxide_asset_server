@@ -789,3 +789,89 @@ fn modern_pbr_endpoints_are_valid_without_clamping_or_unlit_declarations() {
     assert!(json.get("extensionsUsed").is_none());
     assert!(json.get("extensionsRequired").is_none());
 }
+
+#[allow(dead_code)]
+mod png_stream_fixture {
+    include!("support/png_stream.rs");
+}
+
+#[test]
+fn static_writer_refuses_extra_inflated_png_bytes_and_preserves_old_output() {
+    let mut scene = scene();
+    let mut raw = vec![0; 18];
+    raw.extend_from_slice(b"JUNK");
+    scene.textures.push(StaticTexture {
+        name: "extra inflated".into(),
+        png_bytes: png_stream_fixture::png(2, 2, 8, 6, 0, &raw, &[]),
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let output = directory.path().join("scene.glb");
+    std::fs::write(&output, b"PNG143 old output").unwrap();
+    assert!(write_static_visual(&scene, REVISION, &output).is_err());
+    assert_eq!(std::fs::read(output).unwrap(), b"PNG143 old output");
+}
+
+#[test]
+fn static_writer_preserves_png_legal_compressed_padding_and_adam7() {
+    for (label, image) in [
+        (
+            "compressed padding",
+            png_stream_fixture::png(2, 2, 8, 6, 0, &[0; 18], &[0; 4]),
+        ),
+        (
+            "Adam7 RGBA8",
+            png_stream_fixture::png(2, 2, 8, 6, 1, &[0; 19], &[]),
+        ),
+        (
+            "Adam7 RGB16",
+            png_stream_fixture::png(3, 5, 16, 2, 1, &[0; 100], &[]),
+        ),
+        (
+            "narrow Adam7 gray1",
+            png_stream_fixture::png(1, 17, 1, 0, 1, &[0; 34], &[]),
+        ),
+        (
+            "palette1",
+            png_stream_fixture::png(2, 2, 1, 3, 0, &[0; 4], &[]),
+        ),
+    ] {
+        let mut scene = scene();
+        scene.textures.push(StaticTexture {
+            name: label.into(),
+            png_bytes: image.clone(),
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("scene.glb");
+        write_static_visual(&scene, REVISION, &output).unwrap();
+        assert!(image::load_from_memory(&image).is_ok(), "{label}");
+    }
+}
+
+#[test]
+fn static_writer_keeps_native_gray_and_rgb16_quota_boundaries() {
+    for (color, height, accept) in [(0u8, 8192u32, true), (2, 1365, true), (2, 1366, false)] {
+        let image = if color == 0 {
+            image::DynamicImage::ImageLuma8(image::GrayImage::new(8192, height))
+        } else {
+            image::DynamicImage::ImageRgb16(image::ImageBuffer::<image::Rgb<u16>, Vec<u16>>::new(
+                8192, height,
+            ))
+        };
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        drop(image);
+        let mut scene = scene();
+        scene.textures.push(StaticTexture {
+            name: "native channel boundary".into(),
+            png_bytes: bytes.into_inner(),
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("scene.glb");
+        let result = write_static_visual(&scene, REVISION, &output);
+        assert_eq!(
+            result.is_ok(),
+            accept,
+            "color{color}/height{height}: {result:?}"
+        );
+    }
+}
