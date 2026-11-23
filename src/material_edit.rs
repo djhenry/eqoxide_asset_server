@@ -17,6 +17,12 @@ use std::{
 const POLICY: &str = "selected-material-original-geometry-single-mip-v1";
 type RawObject = BTreeMap<String, Box<RawValue>>;
 
+/// Logical caller budgets under the pinned static-visual profile's hard ceilings.
+/// Raising a field does not raise native admission ceilings. Edited-input budgets
+/// do not restrict retained reference resources; reference admission uses `reference`.
+/// Combined output independently obeys the native 8 MiB JSON/100,000-resource profile.
+/// Report and reference-export output budgets are separate logical limits, not
+/// native admission ceilings; those budgets may be raised independently.
 #[derive(Debug, Clone)]
 pub struct MaterialEditLimits {
     pub reference: EditableVisualLimits,
@@ -716,16 +722,24 @@ pub fn reimport_material_edits(
         .iter()
         .map(|v| serde_json::from_str(v.get()))
         .collect::<std::result::Result<_, _>>()?;
-    if all
+    let uses_unlit = all
         .iter()
-        .any(|m| m["extensions"].get("KHR_materials_unlit").is_some())
-    {
-        for key in ["extensionsUsed", "extensionsRequired"] {
-            root.insert(key.into(), to_raw_value(&json!(["KHR_materials_unlit"]))?);
+        .any(|m| m["extensions"].get("KHR_materials_unlit").is_some());
+    for key in ["extensionsUsed", "extensionsRequired"] {
+        let mut names: Vec<String> = match root.get(key) {
+            Some(raw) => serde_json::from_str(raw.get())?,
+            None => Vec::new(),
+        };
+        names.retain(|n| n != "KHR_materials_unlit");
+        if uses_unlit {
+            names.push("KHR_materials_unlit".into());
+            names.sort();
         }
-    } else {
-        root.remove("extensionsUsed");
-        root.remove("extensionsRequired");
+        if names.is_empty() {
+            root.remove(key);
+        } else {
+            root.insert(key.into(), to_raw_value(&names)?);
+        }
     }
     let implementation = sha(include_bytes!("material_edit.rs"));
     let revision = sha(&serde_json::to_vec(
@@ -734,19 +748,21 @@ pub fn reimport_material_edits(
     let mut extras: RawObject = serde_json::from_str(root["extras"].get())?;
     let mut header: Value = serde_json::from_str(extras["eqoxideAsset"].get())?;
     header["bakeRevision"] = json!(revision);
-    if all
+    let needs_blend = all
         .iter()
-        .any(|m| m["alphaMode"] == "BLEND" && m["extensions"].get("KHR_materials_unlit").is_none())
-    {
-        let caps = header["requirements"]["capabilities"]
-            .as_array_mut()
-            .context("reference capabilities")?;
-        let hdr = json!("pbr-metallic-roughness-blend-v1");
+        .any(|m| m["alphaMode"] == "BLEND" && m["extensions"].get("KHR_materials_unlit").is_none());
+    let caps = header["requirements"]["capabilities"]
+        .as_array_mut()
+        .context("reference capabilities")?;
+    let hdr = json!("pbr-metallic-roughness-blend-v1");
+    if needs_blend {
         if !caps.contains(&hdr) {
             caps.push(hdr);
             caps.sort_by_key(|v| v.as_str().unwrap_or_default().to_owned());
         }
     }
+    // An existing HDR requirement selects rendering/display semantics even when
+    // the final materials are all opaque or unlit. Never implicitly downgrade it.
     extras.insert("eqoxideAsset".into(), to_raw_value(&header)?);
     root.insert("extras".into(), to_raw_value(&extras)?);
     let json = serialize_bounded(&root, false, 8 << 20)?;
