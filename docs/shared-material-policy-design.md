@@ -1,6 +1,6 @@
 # Shared material policy: modern PBR, runtime lighting and editable assets
 
-Status: owner-directed design revision, not implemented runtime support. Tracks [interoperability revision #122](https://github.com/djhenry/eqoxide_asset_server/issues/122), [material policy #65](https://github.com/djhenry/eqoxide_asset_server/issues/65), [asset-format project #51](https://github.com/djhenry/eqoxide_asset_server/issues/51) and [client project #1126](https://github.com/djhenry/eqoxide/issues/1126). No publication capability changes in this document.
+Status: owner-directed target architecture with an implemented, limited offline subset described below. Tracks [interoperability revision #122](https://github.com/djhenry/eqoxide_asset_server/issues/122), [material policy #65](https://github.com/djhenry/eqoxide_asset_server/issues/65), [asset-format project #51](https://github.com/djhenry/eqoxide_asset_server/issues/51) and [client project #1126](https://github.com/djhenry/eqoxide/issues/1126). This document does not activate production support or change reader requirements.
 
 ## Decision and purpose
 
@@ -12,11 +12,20 @@ Use direct standard mappings where they are valid and documented modern interpre
 
 ## Current implementation boundary
 
-The existing [static visual contract](static-visual-contract.md) transports material RGBA, optional vertex RGBA, embedded textures, multiplication and opaque/mask/blend coverage. The inspector applies neutral unlit rendering as a viewer override; the writer does not yet declare `KHR_materials_unlit`. That override is not a portable material definition. The [geometry bridge](eqg-static-geometry.md) requires resolved inputs and does not resolve native shading or lighting.
+The [static visual contract](static-visual-contract.md) now has explicit modern material profiles alongside its compatibility inspection path. The latter's unlit viewer override remains distinct from a material that declares unlit intent. The implemented offline subset is:
 
-The current inspection profile also retains 16-bit PNG samples. Core glTF base-color textures use 8-bit channels. Existing precision support must not be silently removed: portable delivery needs an explicit conversion and its own acceptance, while high-precision originals remain authoring inputs. This revision does not claim that today's writer, decoder or renderer already satisfies the proposed portable profile.
+| Area | Implemented boundary and entry point |
+| --- | --- |
+| Standard materials | [Scalar PBR materials](static-pbr-materials.md): base-color factors/textures, optional vertex RGBA, mesh normals, scalar metallic/roughness, coverage and sidedness. Explicit `KHR_materials_unlit` is emitted and declared when selected. |
+| Shared reference lighting | The [HDR transparency profile](static-pbr-materials.md#explicit-hdr-transparency-profile) adds lit PBR BLEND, linear HDR compositing and shared exposure/display mapping in the supporting inspector. Its HDR requirement remains meaningful for opaque-only and all-unlit scenes. This is reference illumination, not a calibrated world environment. |
+| Source previews | [WLD static conversion and explicit snapshots](wld-static-visual.md) and [binary EQG descriptor-v2 previews](eqg-pbr-preview.md) resolve supported source inputs into the common profile. Unsupported required inputs still refuse; snapshot effects and water approximations remain explicit. |
+| Portable textures | [Explicit PNG8 preparation](portable-textures.md) reports quantization and keeps source files unchanged. The portable authoring workflow admits eight-bit PNGs; high-precision source inputs remain separate from its delivery-derived bundle. The compatibility inspection path has not been silently downgraded. |
+| Editable packaging | [Editable visual export](editable-visual.md) produces ordinary glTF with external resources plus an immutable reference and sidecar. The tested editor target is Blender 5.2.2 LTS; the complete edited-scene round trip remains unqualified. |
+| Selected edits | [Material and texture reimport](material-edit-reimport.md) applies explicit reference-scoped material selections to original geometry. Editor meshes, normals, UVs, colors, transforms and assignments are ignored. Supported factors and base-color PNG edits receive a new visual revision; package pairing and activation are separate. |
 
-Production advertisements remain unchanged until the package loader, renderer and publication gates actually support the selected fields and extensions. A valid GLB or a manifest capability declaration alone is not proof of eqoxide support.
+The current common material subset does not admit metallic/roughness maps, tangent-space normal maps, occlusion/emissive inputs, secondary UVs, texture transforms or arbitrary material graphs. Converted previews do not apply native prelighting as PBR albedo; source preservation is limited to the linked entry points. Sky/environment calibration, authored runtime lights, shadows and dynamic effects remain targets. Source preview support is bounded by the linked entry points, not a claim that all WLD/EQG archives or tiled DAT terrain can be baked.
+
+These are explicit offline tools and inspector profiles, not a production rollout. Full Blender geometry/RGB/alpha/normal roundtrip qualification, visual/collision component pairing, gameplay and publication gates remain separate. A valid GLB or a manifest capability declaration alone does not close those gates.
 
 ## Portable visual material profile
 
@@ -34,14 +43,16 @@ The [glTF material specification](https://registry.khronos.org/glTF/specs/2.0/gl
 
 For unlit materials, use the [Khronos extension definition](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_unlit). Declare it in `extensionsUsed`; also declare it in `extensionsRequired` when the artifact requires unlit interpretation. A core-PBR fallback may be optional only when its different lighting behavior is deliberately accepted and reported. Exact inspection fixtures require unlit support. An eqoxide inspection-only override for a PBR asset must remain visibly identified as an override, not exported as the asset's intended appearance.
 
+The currently admitted modern profile requires matching used/required unlit declarations. Optional fallback and other extensions in this design are not automatically admitted by the existing reader.
+
 Blender's [glTF importer/exporter](https://github.com/KhronosGroup/glTF-Blender-IO/blob/main/docs/blender_docs/scene_gltf2.rst) is the initial authoring interoperability target. Use its supported glTF material arrangements, not arbitrary Blender shader graphs. Pin the tested Blender version and export settings in acceptance evidence. A standard feature or extension is not automatically supported just because Blender or glTF defines it; the allowed set must match tested producer and client behavior.
 
 ## Modern runtime lighting target
 
-Build on the existing client renderer where practical. One shared lighting path must serve both source families and enhanced content. The implementation order is a bounded engineering proposal, not a claim that these features exist today:
+Build on the existing client renderer where practical. One shared lighting path must serve both source families and enhanced content. The remaining work extends the offline scalar/reference-lighting baseline; this order does not claim that the additional features are implemented:
 
-1. Establish standard base color, metallic/roughness, normals and tangent-space normal maps, occlusion and emissive inputs through the producer, actual client and Blender workflow. Keep color textures distinct from linear data textures and use consistent normal/tangent conventions. Start legacy conversions with documented rough, nonmetal defaults when no material-specific evidence or authored override exists; do not infer metalness from dark pixels or claim recovered physical measurements.
-2. Add calibrated sky/environment illumination and a directional sun, together with HDR lighting and controlled exposure/tone mapping. An environment map supplies surrounding illumination and reflections; it is not a second albedo texture. Define day/night and indoor/outdoor behavior at the renderer/environment boundary. The existing game-unit coordinate convention must be accounted for when calibrating light range and intensity, rather than silently rescaling geometry or collision.
+1. Extend standard base color, scalar metallic/roughness and mesh normals with metallic/roughness maps, tangent-space normal maps, occlusion and emissive inputs through the producer, actual client and Blender workflow. Keep color textures distinct from linear data textures and use consistent normal/tangent conventions. Start legacy conversions with documented rough, nonmetal defaults when no material-specific evidence or authored override exists; do not infer metalness from dark pixels or claim recovered physical measurements.
+2. Extend reference illumination and the HDR/exposure/display baseline with calibrated sky/environment illumination and a directional sun. An environment map supplies surrounding illumination and reflections; it is not a second albedo texture. Define day/night and indoor/outdoor behavior at the renderer/environment boundary. The existing game-unit coordinate convention must be accounted for when calibrating light range and intensity, rather than silently rescaling geometry or collision.
 3. Add bounded local lights and filtered shadows, beginning with a useful directional shadow and selected local lights. Standard [KHR_lights_punctual](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_lights_punctual) can transport supported authored directional, point and spot lights. It does not define our sky, fog, shadow implementation or complete world-clock behavior. Source light definitions need verified placement/meaning and explicit intensity conversion or authored replacement; copying legacy numeric intensities is not calibration.
 4. Improve environmental presentation and special surfaces after the baseline is playable: coherent fog, water and selected effects, followed by measured optional quality improvements such as ambient occlusion or reflections. Account for any static occlusion already supplied by materials. Graphics presets and bounded light/shadow/texture workloads must keep the common path usable on supported hardware. Ray tracing is not a prerequisite or an assumed hardware requirement.
 
@@ -87,6 +98,8 @@ Per-instance lighting can differ while geometry remains shared. The current glob
 
 ## Implementation and acceptance order
 
+Apply this order when extending the supported subset. Completed offline stages do not waive the remaining full-scene, delivery or gameplay requirements.
+
 1. Inventory the common writer, client loaders and existing renderer against the modern PBR subset and shared runtime-lighting target. Identify current differences, including unlit override and image depth, before changing advertisements. Raw lighting readers/diagnostics remain useful for preservation without applying native lighting; keep source interpretation and provider selection outside libeq.
 2. Create small source-independent PBR fixtures, plus explicitly unlit inspection fixtures. Check the Khronos glTF validator and pinned Blender import, edit, export and reimport, then the actual eqoxide decoder and renderer. Establish the standard material path before expanding zone shading coverage.
 3. Verify geometry, UVs, normals, vertex tint, alpha modes/non-default cutoff, sidedness, instance transforms and material assignments across that round trip. Compare under controlled lighting and color management. Validator success alone does not establish matching appearance. Include metadata loss/reordering, unsupported-extension and stale-pairing negative controls.
@@ -94,4 +107,4 @@ Per-instance lighting can differ while geometry remains shared. The current glob
 5. Convert source materials with documented defaults and authored overrides, retaining editable inputs. Judge accepted mappings by modern appearance, functional coverage and resource budgets; unresolved required features stay unsupported. Use the same output profile for enhanced older content, without requiring native shader parity.
 6. Validate representative actual assets through authoring, packaging, delivery and the lit client. Check playability, visual quality and measured performance, with human scene review. Material correctness, lighting, collision and gameplay remain distinct gates. Human review remains required before every merge.
 
-This is a design revision only: no new bake, renderer, package publication or readiness claim is implemented here.
+This document records the implemented offline boundary and the remaining design. Updating this snapshot changes no bake, renderer, package publication or readiness state.
