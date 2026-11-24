@@ -86,6 +86,8 @@ pub(super) struct Archive {
     pfs: PfsReader<File>,
     pub members: BTreeMap<String, (String, usize)>,
     pub advertised_bytes: usize,
+    #[cfg(test)]
+    pub(super) read_calls: usize,
 }
 impl Archive {
     pub fn open(path: &Path, l: &EqgPbrLimits) -> Result<Self> {
@@ -143,6 +145,8 @@ impl Archive {
             pfs,
             members,
             advertised_bytes,
+            #[cfg(test)]
+            read_calls: 0,
         })
     }
     pub fn exact(&self, name: &str, l: &EqgPbrLimits) -> Result<(String, usize)> {
@@ -153,6 +157,10 @@ impl Archive {
             .with_context(|| format!("missing archive member {name:?}"))
     }
     pub fn read(&mut self, name: &str, cap: usize) -> Result<Vec<u8>> {
+        #[cfg(test)]
+        {
+            self.read_calls += 1;
+        }
         let declared = self
             .members
             .get(&name.to_ascii_lowercase())

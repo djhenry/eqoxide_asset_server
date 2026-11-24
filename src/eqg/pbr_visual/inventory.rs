@@ -78,16 +78,13 @@ pub fn inspect_eqg_pbr_materials(
     l.validate()?;
     let mut archive = archive::Archive::open(path, l)?;
     let (bytes, identity, mut loose, selected) = read_descriptor(&mut archive, descriptor, l)?;
-    let parsed = libeq_eqg::zone::parse(&bytes)?;
-    for offset in parsed.models.iter().flatten() {
-        archive::safe_name(std::str::from_utf8(parsed.string(*offset)?)?, l)?;
-    }
-    let source = load_binary_zone(
+    let (source, models) = assemble_source(
         path,
-        match descriptor {
-            DescriptorSource::Loose(p) => DescriptorSource::Loose(p),
-            DescriptorSource::Archive(_) => DescriptorSource::Archive(selected.as_deref().unwrap()),
-        },
+        descriptor,
+        &bytes,
+        selected.as_deref(),
+        &mut archive,
+        l,
     )?;
     let mut budget = source_budget(&source, l)?;
     budget.archive_bytes = std::fs::metadata(path)?.len();
@@ -196,15 +193,6 @@ pub fn inspect_eqg_pbr_materials(
             });
         }
     }
-    let mut models = Vec::new();
-    for (mesh_index, mesh) in source.meshes.iter().enumerate() {
-        let bytes = archive.read(&mesh.source_name, l.max_member_bytes)?;
-        models.push(report::SourceModelIdentity {
-            mesh_index,
-            exact_name: mesh.source_name.clone(),
-            blake3: hash(&bytes),
-        });
-    }
     archive.snapshot.verify()?;
     if let Some(snapshot) = &mut loose {
         snapshot.verify()?;
@@ -228,6 +216,82 @@ pub fn inspect_eqg_pbr_materials(
     bounded_json(&report, l.max_report_json_bytes)?;
     Ok(report)
 }
+pub(super) fn assemble_source(
+    path: &Path,
+    descriptor: DescriptorSource<'_>,
+    bytes: &[u8],
+    selected: Option<&str>,
+    archive: &mut archive::Archive,
+    l: &EqgPbrLimits,
+) -> Result<(BinaryZoneScene, Vec<report::SourceModelIdentity>)> {
+    let (name, location) = match descriptor {
+        DescriptorSource::Loose(p) => (p.display().to_string(), "loose"),
+        DescriptorSource::Archive(_) => (
+            selected.context("missing selected descriptor")?.to_owned(),
+            "archive",
+        ),
+    };
+    struct Members<'a> {
+        archive: &'a mut archive::Archive,
+        limits: &'a EqgPbrLimits,
+        models: Vec<report::SourceModelIdentity>,
+        model_records: usize,
+        model_string_bytes: usize,
+    }
+    impl super::super::zon::ZoneMembers for Members<'_> {
+        fn exact(&self, requested: &str) -> Result<String> {
+            self.archive
+                .exact(requested, self.limits)
+                .map(|(name, _)| name)
+        }
+        fn read(&mut self, exact: &str) -> Result<Vec<u8>> {
+            // Streaming identities precede the full source projection preflight.
+            charge(
+                &mut self.model_records,
+                1,
+                self.limits.max_report_records,
+                "inventory model record",
+            )?;
+            charge(
+                &mut self.model_string_bytes,
+                exact.len(),
+                self.limits.max_total_name_bytes,
+                "inventory model string",
+            )?;
+            charge(
+                &mut self.model_string_bytes,
+                64,
+                self.limits.max_total_name_bytes,
+                "inventory model string",
+            )?;
+            let bytes = self.archive.read(exact, self.limits.max_member_bytes)?;
+            self.models.push(report::SourceModelIdentity {
+                mesh_index: self.models.len(),
+                exact_name: exact.to_owned(),
+                blake3: hash(&bytes),
+            });
+            Ok(bytes)
+        }
+    }
+    let mut members = Members {
+        archive,
+        limits: l,
+        models: Vec::new(),
+        model_records: 0,
+        model_string_bytes: 0,
+    };
+    let source =
+        super::super::zon::assemble_binary_zone(path, name.clone(), location, bytes, &mut members)
+            .with_context(|| {
+                format!(
+                    "binary zone descriptor {name:?} in archive {}",
+                    path.display()
+                )
+            })?;
+    let models = members.models;
+    Ok((source, models))
+}
+
 fn implementation_revision() -> String {
     let mut h = blake3::Hasher::new();
     h.update(b"eqg-pbr-material-inventory-implementation-v1");
@@ -240,7 +304,7 @@ fn implementation_revision() -> String {
         include_bytes!("../zon.rs"),
         include_bytes!("../surface.rs"),
         include_bytes!("../../../Cargo.lock"),
-        include_bytes!("../../../examples/eqg_pbr_inventory.rs"),
+        include_bytes!("../mod.rs"),
     ] {
         h.update(&(bytes.len() as u64).to_le_bytes());
         h.update(bytes);

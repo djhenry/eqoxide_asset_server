@@ -118,8 +118,11 @@ kind-2 strings receive safe-name and ASCII-case-folded archive lookup facts,
 including missing and unsafe names, even if their shader schema is unsupported.
 These facts assign no texture role or meaning to unknown shaders. Ambiguous
 archive member names, parse/assembly errors, and invalid required material
-references remain hard failures. Exactly one distinct terrain mesh is required;
-repeated model slots referencing the same terrain remain valid. Unselected
+references remain hard failures. Invalid shader, property-name, and kind-2 string
+offsets are structural parse failures even in unused or unknown-shader rows;
+uninterpreted means structurally valid records without assigned semantics.
+Exactly one distinct terrain mesh is required; repeated model slots referencing
+the same terrain remain valid. Unselected
 triangle material references and geometry completeness are not checked.
 
 **Readiness is always not evaluated.** Schema compatibility and advertised member
@@ -131,10 +134,29 @@ existing v2-only preview.
 The inventory uses the preview's archive/snapshot guards and reduced-only
 `EqgPbrLimits`. Every advertised archive member counts before assembly, including
 unused members. Source-record limits apply after assembler allocations; report
-projection rows/strings and final formatted JSON are bounded. Texture decoding,
-retained image, geometry bridge, and GLB budgets perform no work in this API.
+projection rows/strings and final formatted JSON are bounded. Before projecting
+material rows, the shared source budget charges every material/property record,
+material name, shader, property name and kind-2 string, plus conservative projection
+reserves. `max_total_name_bytes` independently bounds archive directory names and
+source/report strings; repeated output strings incur repeated charges. Texture
+decoding, retained image, geometry bridge, and GLB budgets perform no work in this API.
 These logical bounds do not establish peak RAM limits or remove the existing PFS
-inflation ceiling; trusted stable regular files are required. Archive, explicit
-descriptor, model content, implementation sources, and dependency lock contribute
-to inventory identity. Paths and timestamps do not. Observed source changes are
-refused; hostile concurrent mutate-and-restore detection is not guaranteed.
+inflation ceiling; trusted stable regular files are required. Inventory assembles
+from the already-selected descriptor bytes and retained bounded archive reader,
+using the generic loader's shared assembly logic. Each distinct exact model is
+read once; its identity hashes the same bytes passed to the mesh parser. Streaming
+model identity rows and their name/hash strings are charged before allocation;
+the shared source budget still reserves the complete projection after assembly.
+Final original-handle and reopened-path content checks still refuse observed
+source changes; hostile concurrent mutate-and-restore detection is not guaranteed.
+
+Archive, explicit descriptor, model content, implementation sources (including
+module wiring), and dependency lock contribute to inventory identity. Paths and
+timestamps do not. The implementation revision is a conservative source
+fingerprint, not executable attestation: formatting production source may change
+it. Selected source files are hashed verbatim, including comments and inline
+`cfg(test)` code. The CLI example and separate `pbr_visual/tests.rs` source do not
+contribute to the library report fingerprint. The standard Cargo package includes the lockfile and CLI
+example; manually pruned source distributions are not a supported packaging path.
+The existing v2 preview continues to refuse multiple distinct terrain meshes,
+as its geometry bridge already required.
