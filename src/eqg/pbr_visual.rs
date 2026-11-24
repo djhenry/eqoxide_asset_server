@@ -5,6 +5,7 @@
 //! Inputs must be trusted, stable local regular files. The existing PFS inflater
 //! remains a dependency ceiling; these guards do not establish peak process RAM.
 mod archive;
+mod inventory;
 mod materials;
 mod report;
 use super::{
@@ -20,6 +21,10 @@ use crate::{
     static_scene::{StaticMaterialPolicy, StaticScene},
 };
 use anyhow::{bail, ensure, Context, Result};
+pub use inventory::{
+    inspect_eqg_pbr_materials, ArchiveMemberLookup, EqgPbrMaterialInventory, MaterialInventoryRow,
+    MaterialPropertyInventory, MaterialSchemaAssessment,
+};
 use libeq_eqg::mesh::MeshKind;
 pub use report::{bounded_json, DescriptorIdentity, EqgPbrReport};
 use serde::Serialize;
@@ -304,13 +309,18 @@ fn source_budget(s: &BinaryZoneScene, l: &EqgPbrLimits) -> Result<report::Budget
     Ok(b)
 }
 fn used_materials(s: &BinaryZoneScene) -> Result<BTreeSet<(usize, usize)>> {
-    let terrain = s
+    let mut terrains = s
         .meshes
         .iter()
-        .position(|m| m.kind == MeshKind::Terrain)
-        .context("missing terrain")?;
+        .enumerate()
+        .filter(|(_, m)| m.kind == MeshKind::Terrain);
+    let terrain = terrains.next().context("missing terrain")?.0;
+    ensure!(
+        terrains.next().is_none(),
+        "requires exactly one terrain mesh"
+    );
     let mut used = BTreeSet::from([terrain]);
-    for p in s.placements.iter().skip(1) {
+    for p in s.placements.iter().skip(usize::from(s.version == 2)) {
         if let Some(slot) = p.model_index {
             if let Some(mi) = s.model_slots.get(slot as usize).copied().flatten() {
                 used.insert(mi);
@@ -334,6 +344,36 @@ fn used_materials(s: &BinaryZoneScene) -> Result<BTreeSet<(usize, usize)>> {
     }
     Ok(keys)
 }
+fn read_descriptor(
+    archive: &mut archive::Archive,
+    descriptor: DescriptorSource<'_>,
+    l: &EqgPbrLimits,
+) -> Result<(
+    Vec<u8>,
+    DescriptorIdentity,
+    Option<archive::Snapshot>,
+    Option<String>,
+)> {
+    match descriptor {
+        DescriptorSource::Loose(p) => {
+            let mut snapshot = archive::Snapshot::open(p, l.max_descriptor_bytes)?;
+            let bytes = snapshot.bytes()?;
+            let identity = DescriptorIdentity::Loose {
+                content_hash: snapshot.hash.clone(),
+            };
+            Ok((bytes, identity, Some(snapshot), None))
+        }
+        DescriptorSource::Archive(n) => {
+            let (exact, _) = archive.exact(n, l)?;
+            let bytes = archive.read(&exact, l.max_descriptor_bytes)?;
+            let identity = DescriptorIdentity::ArchiveMember {
+                exact_name: exact.clone(),
+                content_hash: hash(&bytes),
+            };
+            Ok((bytes, identity, None, Some(exact)))
+        }
+    }
+}
 /// Load only an explicitly selected descriptor/archive under the static preview policy.
 /// The original parsed records and selected raw texture bytes remain owned and unchanged.
 pub fn load_eqg_pbr_preview(
@@ -343,27 +383,8 @@ pub fn load_eqg_pbr_preview(
 ) -> Result<ResolvedEqgPbrPreview> {
     l.validate()?;
     let mut archive = archive::Archive::open(path, l)?;
-    let mut loose = None;
-    let (descriptor_bytes, identity, selected) = match descriptor {
-        DescriptorSource::Loose(p) => {
-            let mut snapshot = archive::Snapshot::open(p, l.max_descriptor_bytes)?;
-            let bytes = snapshot.bytes()?;
-            let id = DescriptorIdentity::Loose {
-                content_hash: snapshot.hash.clone(),
-            };
-            loose = Some(snapshot);
-            (bytes, id, None)
-        }
-        DescriptorSource::Archive(n) => {
-            let (exact, _) = archive.exact(n, l)?;
-            let bytes = archive.read(&exact, l.max_descriptor_bytes)?;
-            let id = DescriptorIdentity::ArchiveMember {
-                exact_name: exact.clone(),
-                content_hash: hash(&bytes),
-            };
-            (bytes, id, Some(exact))
-        }
-    };
+    let (descriptor_bytes, identity, mut loose, selected) =
+        read_descriptor(&mut archive, descriptor, l)?;
     let parsed = libeq_eqg::zone::parse(&descriptor_bytes)?;
     ensure!(
         parsed.version == 2,

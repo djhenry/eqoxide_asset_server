@@ -85,3 +85,56 @@ writer output through an outer closed temporary pathname, checks encoded GLB and
 complete report sizes, reopens and syncs the resulting file, and only then
 persists it to the destination. Every precommit refusal preserves an existing
 output. An stdout failure after persistence cannot roll back that artifact.
+
+## Read-only material inventory
+
+The separate `eqg_pbr_inventory` example accepts explicit binary descriptors v1
+and v2 and emits only JSON on stdout:
+
+```sh
+cargo run --locked --offline --example eqg_pbr_inventory -- \
+  --descriptor-member zone.zon zone.eqg
+cargo run --locked --offline --example eqg_pbr_inventory -- \
+  --descriptor-file zone.zon zone.eqg
+```
+
+Exactly one descriptor selector and one archive positional are required. Unknown,
+duplicate, conflicting, missing-value, and extra arguments refuse. There is no
+output pathname or artifact writer. Use `--` before positional filenames starting
+with a dash, or `--descriptor-file=--zone.zon` for a dash-prefixed selector value.
+
+`eqg::pbr_visual::inspect_eqg_pbr_materials` returns an
+`EqgPbrMaterialInventory`. It retains every material keyed by mesh and table
+ordinal, including duplicate declared IDs, raw offsets, shader names or nulls,
+and ordered properties with exact kind/value words and kind-2 strings. Repeated
+model slots refer to one mesh. Required materials are those referenced by
+nonsentinel terrain triangles and selected object placements. Descriptor v1
+includes placement zero; v2 excludes its terrain-lighting metadata record.
+
+Every required material is checked against the same exact typed schema policy
+as the preview. All incompatible rows are reported together, including unknown
+and null required shaders. Unused materials remain uninterpreted. Required
+kind-2 strings receive safe-name and ASCII-case-folded archive lookup facts,
+including missing and unsafe names, even if their shader schema is unsupported.
+These facts assign no texture role or meaning to unknown shaders. Ambiguous
+archive member names, parse/assembly errors, and invalid required material
+references remain hard failures. Exactly one distinct terrain mesh is required;
+repeated model slots referencing the same terrain remain valid. Unselected
+triangle material references and geometry completeness are not checked.
+
+**Readiness is always not evaluated.** Schema compatibility and advertised member
+presence do not validate texture decoding, geometry, lighting, conversion, or
+native appearance. No texture bytes are decoded, no geometry is bridged, and no
+lighting is evaluated. In particular, v1 inventory does not admit v1 into the
+existing v2-only preview.
+
+The inventory uses the preview's archive/snapshot guards and reduced-only
+`EqgPbrLimits`. Every advertised archive member counts before assembly, including
+unused members. Source-record limits apply after assembler allocations; report
+projection rows/strings and final formatted JSON are bounded. Texture decoding,
+retained image, geometry bridge, and GLB budgets perform no work in this API.
+These logical bounds do not establish peak RAM limits or remove the existing PFS
+inflation ceiling; trusted stable regular files are required. Archive, explicit
+descriptor, model content, implementation sources, and dependency lock contribute
+to inventory identity. Paths and timestamps do not. Observed source changes are
+refused; hostile concurrent mutate-and-restore detection is not guaranteed.
