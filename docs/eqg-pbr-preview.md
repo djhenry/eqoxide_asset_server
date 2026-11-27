@@ -31,10 +31,10 @@ placements are reported as exclusions.
 The exact supported shader names are `Opaque_MPLFull2UV.fx`, `Opaque_MPLBump.fx`,
 `Opaque_MPLBasic.fx`, `Opaque_MPLSB.fx`, `Opaque_MaxCB1.fx`,
 `Opaque_MaxCBSGE1.fx`, `Opaque_MaxC1.fx`, `Opaque_MaxCBSG1.fx`,
-`Opaque_MaxCBS1.fx`, `Chroma_MaxC1.fx`, `Chroma_MaxCB1.fx`, and
+`Opaque_MaxCBS1.fx`, `Chroma_MaxC1.fx`, `Chroma_MaxCB1.fx`,
 `Opaque_MaxWater.fx`, `Opaque_OpaqueSModelCB1Max.fx`, and
-`Opaque_OpaqueSModelCBGG1Max.fx`. Each has a mandatory exact typed property set. Missing,
-extra, duplicate, wrong-kind, and unknown required shader/property semantics
+`Opaque_OpaqueSModelCBGG1Max.fx`. Each has a mandatory exact typed property set.
+Missing, extra, duplicate, wrong-kind, and unknown required shader/property semantics
 refuse. Unknown unused material semantics remain retained and uninterpreted;
 structural source validity is still required globally.
 

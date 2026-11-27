@@ -78,6 +78,12 @@ fn exact_none_optional_normal_bakes_without_archive_image() {
         let f = with_texture(shader, props, "e_TextureNormal0", "None", extra);
         let r = f.load().unwrap();
         assert_eq!(r.preserved_resources.len(), 1);
+        for row in &r.report.materials {
+            assert!(matches!(
+                row.normal_source_absence,
+                Some(crate::eqg::pbr_visual::NormalSourceAbsence::ExactNone)
+            ));
+        }
         let report = serde_json::to_value(&r.report).unwrap();
         for row in report["materials"].as_array().unwrap() {
             assert_eq!(row["normal_source_absence"], "ExactNone");

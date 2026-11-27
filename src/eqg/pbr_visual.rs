@@ -26,7 +26,7 @@ pub use inventory::{
     MaterialPropertyInventory, MaterialSchemaAssessment,
 };
 use libeq_eqg::mesh::MeshKind;
-pub use report::{bounded_json, DescriptorIdentity, EqgPbrReport};
+pub use report::{bounded_json, DescriptorIdentity, EqgPbrReport, NormalSourceAbsence};
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
