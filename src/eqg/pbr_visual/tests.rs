@@ -6,6 +6,8 @@ use crate::{
 use libeq_pfs::PfsWriter;
 use std::{io::Cursor, path::PathBuf};
 
+mod cbse_profile;
+
 // These fixtures author source bytes independently of the resolver's schema table.
 const FAMILIES: &[(&str, &[(&str, u32)])] = &[
     (
@@ -88,6 +90,16 @@ const FAMILIES: &[(&str, &[(&str, u32)])] = &[
             ("e_fSlide2Y", 0),
             ("e_fWaterColor1", 3),
             ("e_fWaterColor2", 3),
+        ],
+    ),
+    (
+        "Opaque_MaxCBSE1.fx",
+        &[
+            ("e_fShininess0", 0),
+            ("e_TextureDiffuse0", 2),
+            ("e_TextureNormal0", 2),
+            ("e_fEnvMapStrength0", 0),
+            ("e_TextureEnvironment0", 2),
         ],
     ),
 ];

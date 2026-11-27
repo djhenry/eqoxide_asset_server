@@ -14,7 +14,7 @@ pub(super) fn schema(shader: &str) -> Result<&'static [(&'static str, u32)]> {
         "Opaque_MPLBasic.fx" | "Opaque_MaxC1.fx" | "Chroma_MaxC1.fx" => &[D],
         "Opaque_MPLSB.fx" => &[C, D, N, CS, S],
         "Opaque_MaxCB1.fx" | "Chroma_MaxCB1.fx" => &[D, N],
-        "Opaque_MaxCBSGE1.fx" => &[
+        "Opaque_MaxCBSGE1.fx" | "Opaque_MaxCBSE1.fx" => &[
             D,
             ("e_TextureEnvironment0", 2),
             N,
