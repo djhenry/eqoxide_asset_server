@@ -26,6 +26,10 @@ pub struct PropertyReport {
     pub resource_index: Option<usize>,
 }
 #[derive(Debug, Serialize)]
+pub enum NormalSourceAbsence {
+    ExactNone,
+}
+#[derive(Debug, Serialize)]
 pub struct MaterialReport {
     pub source_mesh_index: usize,
     pub source_material_ordinal: usize,
@@ -41,6 +45,8 @@ pub struct MaterialReport {
     pub coverage: String,
     pub cutoff: Option<f32>,
     pub decisions: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub normal_source_absence: Option<NormalSourceAbsence>,
     pub base_color_factor: Option<[f32; 4]>,
     pub surface: Option<crate::static_scene::StaticSurfaceModel>,
     pub double_sided: Option<bool>,

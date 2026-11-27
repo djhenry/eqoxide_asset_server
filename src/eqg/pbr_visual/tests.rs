@@ -1,3 +1,5 @@
+mod source_profiles;
+
 use super::*;
 use crate::{
     eqg::DescriptorSource,
@@ -88,6 +90,19 @@ const FAMILIES: &[(&str, &[(&str, u32)])] = &[
             ("e_fSlide2Y", 0),
             ("e_fWaterColor1", 3),
             ("e_fWaterColor2", 3),
+        ],
+    ),
+    (
+        "Opaque_OpaqueSModelCB1Max.fx",
+        &[("e_TextureDiffuse0", 2), ("e_TextureNormal0", 2)],
+    ),
+    (
+        "Opaque_OpaqueSModelCBGG1Max.fx",
+        &[
+            ("e_TextureDiffuse0", 2),
+            ("e_TextureNormal0", 2),
+            ("e_fBumpiness0", 0),
+            ("e_fShininess0", 0),
         ],
     ),
 ];
