@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use libeq_eqg::{mesh, zone};
 use libeq_pfs::PfsReader;
 use std::{
@@ -120,7 +120,43 @@ fn load(archive: &Path, descriptor: DescriptorSource<'_>) -> Result<BinaryZoneSc
             )
         }
     };
-    let parsed = zone::parse(&bytes).context("parse binary zone descriptor")?;
+    struct Members {
+        index: BTreeMap<String, Vec<String>>,
+        pfs: PfsReader<File>,
+    }
+    impl ZoneMembers for Members {
+        fn exact(&self, requested: &str) -> Result<String> {
+            member(&self.index, requested).map(str::to_owned)
+        }
+        fn read(&mut self, exact: &str) -> Result<Vec<u8>> {
+            self.pfs.get(exact)?.context("model member disappeared")
+        }
+    }
+    assemble_binary_zone(
+        archive,
+        descriptor_name,
+        descriptor_location,
+        &bytes,
+        &mut Members { index, pfs },
+    )
+}
+
+pub(crate) trait ZoneMembers {
+    fn exact(&self, requested: &str) -> Result<String>;
+    fn read(&mut self, exact: &str) -> Result<Vec<u8>>;
+}
+
+/// Assemble the same owned records from the caller's selected descriptor and members.
+/// Resolution precedes deduplication; each distinct exact member is read once.
+/// The provider owns member policy, so the generic loader keeps its existing scope.
+pub(crate) fn assemble_binary_zone(
+    archive: &Path,
+    descriptor_name: String,
+    descriptor_location: &'static str,
+    bytes: &[u8],
+    members: &mut impl ZoneMembers,
+) -> Result<BinaryZoneScene> {
+    let parsed = zone::parse(bytes).context("parse binary zone descriptor")?;
     let mut placements = Vec::with_capacity(parsed.placements.len());
     for (i, p) in parsed.placements.iter().enumerate() {
         if !p
@@ -152,14 +188,15 @@ fn load(archive: &Path, descriptor: DescriptorSource<'_>) -> Result<BinaryZoneSc
         let raw_name = parsed.string(*offset)?;
         let name = std::str::from_utf8(raw_name)
             .with_context(|| format!("model slot {slot} name is not UTF-8"))?;
-        let exact = member(&index, name)
+        let exact = members
+            .exact(name)
             .with_context(|| format!("model slot {slot} requested {name:?}"))?;
-        if let Some(&mesh_index) = loaded.get(exact) {
+        if let Some(&mesh_index) = loaded.get(&exact) {
             model_slots.push(Some(mesh_index));
             continue;
         }
         let geometry = (|| -> Result<ZoneMesh> {
-            let bytes = pfs.get(exact)?.context("model member disappeared")?;
+            let bytes = members.read(&exact)?;
             let m = mesh::parse(&bytes).context("parse model geometry")?;
             for (i, v) in m.vertices.iter().enumerate() {
                 if !v

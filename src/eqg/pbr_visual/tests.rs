@@ -212,6 +212,43 @@ fn descriptor() -> Vec<u8> {
     }
     b
 }
+fn sole_object_descriptor(version: u32) -> Vec<u8> {
+    let mut strings = Vec::new();
+    let ter = string(&mut strings, "terrain.ter");
+    let obj = string(&mut strings, "object.mod");
+    let nm = string(&mut strings, "instance");
+    let mut b = b"EQGZ".to_vec();
+    for n in [version, strings.len() as u32, 3, 1, 0, 0] {
+        word(&mut b, n);
+    }
+    b.extend(strings);
+    for n in [ter, obj, obj, 2, nm] {
+        word(&mut b, n);
+    }
+    for f in [0f32, 0., 0., 0., 0., 0., 1.] {
+        word(&mut b, f.to_bits());
+    }
+    if version == 2 {
+        word(&mut b, 0);
+    }
+    b
+}
+#[test]
+fn inventory_selection_includes_v1_sole_placement_zero_but_excludes_v2_metadata() {
+    let f = Fixture::new(FAMILIES[2].0, FAMILIES[2].1);
+    for version in [1, 2] {
+        std::fs::write(&f.descriptor, sole_object_descriptor(version)).unwrap();
+        let source = load_binary_zone(&f.archive, DescriptorSource::Loose(&f.descriptor)).unwrap();
+        let used = used_materials(&source).unwrap();
+        assert_eq!(used.contains(&(0, 0)), true);
+        assert_eq!(
+            used.contains(&(1, 0)),
+            version == 1,
+            "descriptor v{version}"
+        );
+        assert_eq!(used.len(), if version == 1 { 2 } else { 1 });
+    }
+}
 struct Fixture {
     _tmp: tempfile::TempDir,
     archive: PathBuf,
@@ -726,4 +763,706 @@ fn world_bounds_use_indexed_vertices_and_actual_instances() {
     let b = report::indexed_bounds(&s).unwrap();
     assert_eq!(b.min, [8., 20., 31.]);
     assert_eq!(b.max, [14., 25., 36.]);
+}
+
+fn inventory(f: &Fixture) -> EqgPbrMaterialInventory {
+    inspect_eqg_pbr_materials(
+        &f.archive,
+        DescriptorSource::Loose(&f.descriptor),
+        &EqgPbrLimits::default(),
+    )
+    .unwrap()
+}
+fn null_shader(mut b: Vec<u8>) -> Vec<u8> {
+    let sl = u32::from_le_bytes(b[8..12].try_into().unwrap()) as usize;
+    let start = if &b[..4] == b"EQGM" { 28 } else { 24 };
+    b[start + sl + 8..start + sl + 12].copy_from_slice(&u32::MAX.to_le_bytes());
+    b
+}
+#[test]
+fn inventory_collects_all_required_gaps_and_preserves_null_unknown_and_typed_words() {
+    let f = Fixture::members(vec![
+        (
+            "terrain.ter".into(),
+            model("UnknownOne.fx", &[("raw", 3)], true),
+        ),
+        (
+            "object.mod".into(),
+            null_shader(model("UnknownTwo.fx", &[("raw", 0)], false)),
+        ),
+    ]);
+    let r = inventory(&f);
+    assert_eq!(r.readiness, "not-evaluated");
+    assert_eq!(r.required_materials, 2);
+    assert_eq!(r.unsupported_required_materials, 2);
+    assert_eq!(r.materials.len(), 2);
+    assert_eq!(r.materials[0].shader.as_deref(), Some("UnknownOne.fx"));
+    assert_eq!(r.materials[1].shader, None);
+    for row in &r.materials {
+        assert!(row.required);
+        assert!(matches!(
+            row.schema,
+            MaterialSchemaAssessment::Unsupported { .. }
+        ));
+        assert_eq!(row.source_declared_id, 77);
+        assert_eq!(row.properties[0].value_word, 0x7fc01234);
+        assert_eq!(row.properties[0].string_value, None);
+    }
+}
+#[test]
+fn inventory_unused_null_and_unknown_are_uninterpreted_and_repeated_slots_deduplicate() {
+    for null in [false, true] {
+        let mut obj = model("UnknownUnused.fx", &[("unknown", 2)], false);
+        if null {
+            obj = null_shader(obj);
+        }
+        let f = Fixture::members(vec![
+            (
+                "terrain.ter".into(),
+                model(FAMILIES[2].0, FAMILIES[2].1, true),
+            ),
+            ("object.mod".into(), obj),
+        ]);
+        std::fs::write(&f.descriptor, sole_object_descriptor(2)).unwrap();
+        let r = inventory(&f);
+        assert_eq!(r.materials.len(), 2);
+        assert_eq!(r.model_slots, [Some(0), Some(1), Some(1)]);
+        assert_eq!(r.required_materials, 1);
+        let row = &r.materials[1];
+        assert!(!row.required);
+        assert!(matches!(
+            row.schema,
+            MaterialSchemaAssessment::UninterpretedUnused
+        ));
+        assert!(row.properties[0].archive_lookup.is_none());
+    }
+}
+#[test]
+fn inventory_matching_schemas_and_member_presence_do_not_evaluate_readiness_or_decode() {
+    let f = Fixture::members(vec![
+        (
+            "terrain.ter".into(),
+            model(FAMILIES[2].0, FAMILIES[2].1, true),
+        ),
+        (
+            "object.mod".into(),
+            model(FAMILIES[2].0, FAMILIES[2].1, false),
+        ),
+        ("asymmetric.png".into(), b"not an image".to_vec()),
+    ]);
+    let r = inventory(&f);
+    assert_eq!(r.unsupported_required_materials, 0);
+    assert_eq!(r.required_materials, 2);
+    assert_eq!(r.readiness, "not-evaluated");
+    assert_eq!(r.materials.len(), 2);
+    for m in &r.materials {
+        assert!(matches!(m.schema, MaterialSchemaAssessment::Compatible));
+        assert_eq!(
+            m.properties[0].string_value.as_deref(),
+            Some("Asymmetric.PNG")
+        );
+        assert!(
+            matches!(&m.properties[0].archive_lookup, Some(ArchiveMemberLookup::Present { exact_name, advertised_bytes }) if exact_name == "asymmetric.png" && *advertised_bytes == 12)
+        );
+    }
+}
+#[test]
+fn inventory_missing_and_unsafe_texture_names_are_facts_without_schema_short_circuit() {
+    let (shader, props) = FAMILIES[2];
+    for unsafe_name in [false, true] {
+        let mut ter = model(shader, props, true);
+        if unsafe_name {
+            let i = ter
+                .windows(14)
+                .position(|b| b == b"Asymmetric.PNG")
+                .unwrap();
+            ter[i] = b'/';
+        }
+        let f = Fixture::members(vec![
+            ("terrain.ter".into(), ter),
+            ("object.mod".into(), model("Unknown.fx", props, false)),
+        ]);
+        let r = inventory(&f);
+        assert_eq!(r.unsupported_required_materials, 1);
+        let lookup = r.materials[0].properties[0]
+            .archive_lookup
+            .as_ref()
+            .unwrap();
+        assert!(if unsafe_name {
+            matches!(lookup, ArchiveMemberLookup::UnsafeName)
+        } else {
+            matches!(lookup, ArchiveMemberLookup::Missing)
+        });
+        assert!(matches!(
+            r.materials[1].properties[0].archive_lookup,
+            Some(ArchiveMemberLookup::Missing)
+        ));
+    }
+}
+#[test]
+fn inventory_reuses_exact_typed_set_policy_and_keeps_duplicate_properties() {
+    let cases = [
+        vec![],
+        vec![("e_TextureDiffuse0", 0)],
+        vec![("unknown", 2)],
+        vec![("e_TextureDiffuse0", 2), ("e_TextureDiffuse0", 2)],
+    ];
+    for props in cases {
+        let r = inventory(&Fixture::new(FAMILIES[2].0, &props));
+        assert_eq!(r.unsupported_required_materials, 2);
+        for m in r.materials {
+            assert_eq!(m.properties.len(), props.len());
+        }
+    }
+}
+#[test]
+fn inventory_limits_and_case_ambiguity_refuse() {
+    let f = Fixture::new(FAMILIES[2].0, FAMILIES[2].1);
+    macro_rules! refuse {
+        ($field:ident) => {{
+            let mut l = EqgPbrLimits::default();
+            l.$field = 0;
+            assert!(
+                inspect_eqg_pbr_materials(&f.archive, DescriptorSource::Loose(&f.descriptor), &l)
+                    .is_err(),
+                stringify!($field)
+            );
+        }};
+    }
+    refuse!(max_archive_bytes);
+    refuse!(max_descriptor_bytes);
+    refuse!(max_member_bytes);
+    refuse!(max_archive_uncompressed_bytes);
+    refuse!(max_directory_bytes);
+    refuse!(max_archive_members);
+    refuse!(max_name_bytes);
+    refuse!(max_total_name_bytes);
+    refuse!(max_source_records);
+    refuse!(max_report_records);
+    refuse!(max_report_json_bytes);
+    let f = Fixture::members(vec![
+        (
+            "terrain.ter".into(),
+            model(FAMILIES[2].0, FAMILIES[2].1, true),
+        ),
+        (
+            "object.mod".into(),
+            model(FAMILIES[2].0, FAMILIES[2].1, false),
+        ),
+        ("Asymmetric.PNG".into(), png()),
+        ("asymmetric.png".into(), png()),
+    ]);
+    assert!(inspect_eqg_pbr_materials(
+        &f.archive,
+        DescriptorSource::Loose(&f.descriptor),
+        &EqgPbrLimits::default()
+    )
+    .is_err());
+}
+#[test]
+fn inventory_identity_is_deterministic_path_independent_and_content_bound() {
+    let f = Fixture::new(FAMILIES[2].0, FAMILIES[2].1);
+    let a = inventory(&f);
+    assert_eq!(a.inventory_revision, inventory(&f).inventory_revision);
+    let p = f._tmp.path().join("renamed.eqg");
+    let d = f._tmp.path().join("renamed.zon");
+    std::fs::copy(&f.archive, &p).unwrap();
+    std::fs::copy(&f.descriptor, &d).unwrap();
+    let b = inspect_eqg_pbr_materials(&p, DescriptorSource::Loose(&d), &EqgPbrLimits::default())
+        .unwrap();
+    assert_eq!(a.inventory_revision, b.inventory_revision);
+    let archive = inspect_eqg_pbr_materials(
+        &p,
+        DescriptorSource::Archive("ZONE.ZON"),
+        &EqgPbrLimits::default(),
+    )
+    .unwrap();
+    assert_ne!(a.inventory_revision, archive.inventory_revision);
+    std::fs::write(&d, sole_object_descriptor(1)).unwrap();
+    let c = inspect_eqg_pbr_materials(&p, DescriptorSource::Loose(&d), &EqgPbrLimits::default())
+        .unwrap();
+    assert_ne!(a.inventory_revision, c.inventory_revision);
+    assert_eq!(c.required_materials, 2);
+    assert!(
+        load_eqg_pbr_preview(&p, DescriptorSource::Loose(&d), &EqgPbrLimits::default()).is_err()
+    );
+    let public =
+        String::from_utf8(bounded_json(&c, EqgPbrLimits::default().max_report_json_bytes).unwrap())
+            .unwrap();
+    assert!(!public.contains(&f._tmp.path().display().to_string()));
+}
+
+#[test]
+fn inventory_material_keys_are_mesh_and_ordinal_even_with_duplicate_declared_ids() {
+    fn two_materials(mut b: Vec<u8>) -> Vec<u8> {
+        let sl = u32::from_le_bytes(b[8..12].try_into().unwrap()) as usize;
+        let start = if &b[..4] == b"EQGM" { 28 } else { 24 };
+        let record = start + sl;
+        let addition = b[record..record + 28].to_vec();
+        b.splice(record + 28..record + 28, addition);
+        b[12..16].copy_from_slice(&2u32.to_le_bytes());
+        let n = b.len();
+        b[n - 8..n - 4].copy_from_slice(&1u32.to_le_bytes());
+        b
+    }
+    let f = Fixture::members(vec![
+        (
+            "terrain.ter".into(),
+            two_materials(model(FAMILIES[2].0, FAMILIES[2].1, true)),
+        ),
+        (
+            "object.mod".into(),
+            two_materials(model(FAMILIES[2].0, FAMILIES[2].1, false)),
+        ),
+    ]);
+    let r = inventory(&f);
+    assert_eq!(r.required_materials, 4);
+    assert_eq!(r.materials.len(), 4);
+    let keys: Vec<_> = r
+        .materials
+        .iter()
+        .map(|m| {
+            assert_eq!(m.source_declared_id, 77);
+            assert!(m.required);
+            (m.source_mesh_index, m.source_material_ordinal)
+        })
+        .collect();
+    assert_eq!(keys, [(0, 0), (0, 1), (1, 0), (1, 1)]);
+}
+#[test]
+fn inventory_model_and_archive_content_hashes_change_with_raw_property_word() {
+    let f = Fixture::new(FAMILIES[0].0, FAMILIES[0].1);
+    let a = inventory(&f);
+    let mut changed = model(FAMILIES[0].0, FAMILIES[0].1, true);
+    let sl = u32::from_le_bytes(changed[8..12].try_into().unwrap()) as usize;
+    let value = 24 + sl + 16 + 3 * 12 + 8;
+    changed[value..value + 4].copy_from_slice(&0xff800000u32.to_le_bytes());
+    let g = Fixture::members(vec![
+        ("terrain.ter".into(), changed),
+        (
+            "object.mod".into(),
+            model(FAMILIES[0].0, FAMILIES[0].1, false),
+        ),
+        ("Asymmetric.PNG".into(), png()),
+        ("zone.zon".into(), descriptor()),
+    ]);
+    let b = inventory(&g);
+    assert_ne!(a.inventory_revision, b.inventory_revision);
+    assert_ne!(a.archive_blake3, b.archive_blake3);
+    assert_ne!(a.models[0].blake3, b.models[0].blake3);
+    assert_eq!(a.models[1].blake3, b.models[1].blake3);
+    assert_eq!(b.materials[0].properties[3].value_word, 0xff800000);
+}
+
+#[test]
+fn inventory_final_json_bound_includes_revision_and_ignores_inapplicable_visual_budgets() {
+    let f = Fixture::new(FAMILIES[2].0, FAMILIES[2].1);
+    let mut l = EqgPbrLimits {
+        max_preserved_resource_bytes: 0,
+        max_normalized_png_bytes: 0,
+        max_decoded_pixel_bytes: 0,
+        max_glb_bytes: 0,
+        ..EqgPbrLimits::default()
+    };
+    let r =
+        inspect_eqg_pbr_materials(&f.archive, DescriptorSource::Loose(&f.descriptor), &l).unwrap();
+    let size = bounded_json(&r, l.max_report_json_bytes).unwrap().len();
+    assert_eq!(r.budget.preserved_resource_bytes, 0);
+    assert_eq!(r.budget.decoded_pixel_bytes, 0);
+    l.max_report_json_bytes = size;
+    assert!(
+        inspect_eqg_pbr_materials(&f.archive, DescriptorSource::Loose(&f.descriptor), &l).is_ok()
+    );
+    l.max_report_json_bytes = size - 1;
+    assert!(
+        inspect_eqg_pbr_materials(&f.archive, DescriptorSource::Loose(&f.descriptor), &l).is_err()
+    );
+}
+
+#[test]
+fn inventory_refuses_multiple_distinct_terrain_meshes_before_assigning_required_facts() {
+    let mut desc = sole_object_descriptor(2);
+    let pos = desc.windows(10).position(|b| b == b"object.mod").unwrap();
+    desc[pos..pos + 10].copy_from_slice(b"second.ter");
+    let f = Fixture::members(vec![
+        (
+            "terrain.ter".into(),
+            model(FAMILIES[2].0, FAMILIES[2].1, true),
+        ),
+        (
+            "second.ter".into(),
+            model("OtherTerrain.fx", FAMILIES[2].1, true),
+        ),
+    ]);
+    std::fs::write(&f.descriptor, desc).unwrap();
+    let error = inspect_eqg_pbr_materials(
+        &f.archive,
+        DescriptorSource::Loose(&f.descriptor),
+        &EqgPbrLimits::default(),
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("exactly one terrain mesh"),
+        "{error:#}"
+    );
+}
+#[test]
+fn inventory_repeated_model_slots_for_one_terrain_are_unambiguous() {
+    let f = Fixture::members(vec![(
+        "terrain.ter".into(),
+        model(FAMILIES[2].0, FAMILIES[2].1, true),
+    )]);
+    let mut strings = Vec::new();
+    let terrain = string(&mut strings, "terrain.ter");
+    let mut descriptor = b"EQGZ".to_vec();
+    for n in [2, strings.len() as u32, 3, 0, 0, 0] {
+        word(&mut descriptor, n);
+    }
+    descriptor.extend(strings);
+    for _ in 0..3 {
+        word(&mut descriptor, terrain);
+    }
+    std::fs::write(&f.descriptor, descriptor).unwrap();
+    let r = inventory(&f);
+    assert_eq!(r.model_slots, [Some(0), Some(0), Some(0)]);
+    assert_eq!(r.models.len(), 1);
+    assert_eq!(r.required_materials, 1);
+}
+#[test]
+fn inventory_unselected_triangle_material_references_are_uninterpreted_until_required() {
+    let mut obj = model("UnknownUnused.fx", FAMILIES[2].1, false);
+    let n = obj.len();
+    obj[n - 28..n - 24].copy_from_slice(&17u32.to_le_bytes());
+    let f = Fixture::members(vec![
+        (
+            "terrain.ter".into(),
+            model(FAMILIES[2].0, FAMILIES[2].1, true),
+        ),
+        ("object.mod".into(), obj),
+    ]);
+    std::fs::write(&f.descriptor, sole_object_descriptor(2)).unwrap();
+    let r = inventory(&f);
+    assert_eq!(r.required_materials, 1);
+    assert!(!r.materials[1].required);
+    assert!(matches!(
+        r.materials[1].schema,
+        MaterialSchemaAssessment::UninterpretedUnused
+    ));
+    std::fs::write(&f.descriptor, sole_object_descriptor(1)).unwrap();
+    let error = inspect_eqg_pbr_materials(
+        &f.archive,
+        DescriptorSource::Loose(&f.descriptor),
+        &EqgPbrLimits::default(),
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("invalid required material reference"),
+        "{error:#}"
+    );
+}
+
+#[test]
+fn selected_source_assembly_reads_each_exact_model_once_in_slot_order() {
+    let terrain = model(FAMILIES[2].0, FAMILIES[2].1, true);
+    let object = model("UnknownObject.fx", FAMILIES[2].1, false);
+    struct CountingMembers {
+        terrain: Vec<u8>,
+        object: Vec<u8>,
+        reads: Vec<String>,
+    }
+    impl crate::eqg::zon::ZoneMembers for CountingMembers {
+        fn exact(&self, requested: &str) -> Result<String> {
+            Ok(match requested.to_ascii_lowercase().as_str() {
+                "terrain.ter" => "TERRAIN.TER".into(),
+                "object.mod" => "Object.MOD".into(),
+                _ => panic!("unexpected request"),
+            })
+        }
+        fn read(&mut self, exact: &str) -> Result<Vec<u8>> {
+            assert!(
+                !self.reads.contains(&exact.to_owned()),
+                "duplicate model read"
+            );
+            self.reads.push(exact.to_owned());
+            Ok(if exact == "TERRAIN.TER" {
+                self.terrain.clone()
+            } else {
+                self.object.clone()
+            })
+        }
+    }
+    let mut members = CountingMembers {
+        terrain,
+        object,
+        reads: Vec::new(),
+    };
+    let mut desc = descriptor();
+    let strings = u32::from_le_bytes(desc[8..12].try_into().unwrap()) as usize;
+    let alias = b"OBJECT.MOD\0";
+    desc.splice(28 + strings..28 + strings, alias.iter().copied());
+    let enlarged = strings + alias.len();
+    desc[8..12].copy_from_slice(&(enlarged as u32).to_le_bytes());
+    desc[28 + enlarged + 8..28 + enlarged + 12].copy_from_slice(&(strings as u32).to_le_bytes());
+    let source = crate::eqg::zon::assemble_binary_zone(
+        Path::new("unopened.eqg"),
+        "selected.zon".into(),
+        "archive",
+        &desc,
+        &mut members,
+    )
+    .unwrap();
+    assert_eq!(members.reads, ["TERRAIN.TER", "Object.MOD"]);
+    assert_eq!(source.model_slots, [Some(0), Some(1), Some(1), None]);
+    assert_eq!(source.meshes[0].source_name, "TERRAIN.TER");
+    assert_eq!(source.meshes[1].source_name, "Object.MOD");
+    assert_eq!(source.descriptor_name, "selected.zon");
+}
+
+#[test]
+fn selected_source_assembly_retains_handles_and_bytes_but_refuses_replaced_paths() {
+    for archived_descriptor in [false, true] {
+        let f = Fixture::new(FAMILIES[2].0, FAMILIES[2].1);
+        let l = EqgPbrLimits::default();
+        let mut archive = archive::Archive::open(&f.archive, &l).unwrap();
+        let selector = if archived_descriptor {
+            DescriptorSource::Archive("ZONE.ZON")
+        } else {
+            DescriptorSource::Loose(&f.descriptor)
+        };
+        let (bytes, _, mut loose, selected) = read_descriptor(&mut archive, selector, &l).unwrap();
+        let descriptor_read_calls = archive.read_calls;
+        let replacement = Fixture::new("Replacement.fx", FAMILIES[2].1);
+        std::fs::rename(&replacement.archive, &f.archive).unwrap();
+        std::fs::rename(&replacement.descriptor, &f.descriptor).unwrap();
+        std::fs::write(&f.descriptor, b"replaced descriptor").unwrap();
+        let (source, identities) = inventory::assemble_source(
+            &f.archive,
+            selector,
+            &bytes,
+            selected.as_deref(),
+            &mut archive,
+            &l,
+        )
+        .unwrap();
+        assert_eq!(source.model_slots, [Some(0), Some(1), Some(1), None]);
+        assert_eq!(identities.len(), 2);
+        assert_eq!(
+            archive.read_calls - descriptor_read_calls,
+            2,
+            "each distinct source model must be read once, including its hash"
+        );
+        for (i, terrain) in [true, false].into_iter().enumerate() {
+            assert_eq!(identities[i].mesh_index, i);
+            assert_eq!(identities[i].exact_name, source.meshes[i].source_name);
+            assert_eq!(
+                identities[i].blake3,
+                hash(&model(FAMILIES[2].0, FAMILIES[2].1, terrain))
+            );
+        }
+        assert!(format!("{:#}", archive.snapshot.verify().unwrap_err()).contains("pathname"));
+        if let Some(snapshot) = &mut loose {
+            assert!(format!("{:#}", snapshot.verify().unwrap_err()).contains("pathname"));
+        }
+    }
+}
+
+#[test]
+fn selected_source_assembly_applies_member_read_cap() {
+    let f = Fixture::new(FAMILIES[2].0, FAMILIES[2].1);
+    let mut l = EqgPbrLimits::default();
+    let mut archive = archive::Archive::open(&f.archive, &l).unwrap();
+    let selector = DescriptorSource::Loose(&f.descriptor);
+    let (bytes, _, _, selected) = read_descriptor(&mut archive, selector, &l).unwrap();
+    l.max_member_bytes = 1;
+    let error = inventory::assemble_source(
+        &f.archive,
+        selector,
+        &bytes,
+        selected.as_deref(),
+        &mut archive,
+        &l,
+    )
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("selected member byte limit exceeded"));
+}
+
+#[test]
+fn inventory_bad_string_offsets_are_structural_even_for_unused_unknown_rows() {
+    for required in [false, true] {
+        for field in [8usize, 16, 24] {
+            let mut object = model("Unknown.fx", FAMILIES[2].1, false);
+            let strings = u32::from_le_bytes(object[8..12].try_into().unwrap()) as usize;
+            let offset = 28 + strings + field;
+            object[offset..offset + 4].copy_from_slice(&0xffff_fffeu32.to_le_bytes());
+            let f = Fixture::members(vec![
+                (
+                    "terrain.ter".into(),
+                    model(FAMILIES[2].0, FAMILIES[2].1, true),
+                ),
+                ("object.mod".into(), object),
+            ]);
+            std::fs::write(
+                &f.descriptor,
+                sole_object_descriptor(if required { 1 } else { 2 }),
+            )
+            .unwrap();
+            let error = inspect_eqg_pbr_materials(
+                &f.archive,
+                DescriptorSource::Loose(&f.descriptor),
+                &EqgPbrLimits::default(),
+            )
+            .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("parse model geometry"),
+                "{error:#}"
+            );
+        }
+    }
+}
+
+#[test]
+fn preview_and_existing_bridge_refuse_multiple_distinct_terrains() {
+    let mut desc = sole_object_descriptor(2);
+    let pos = desc.windows(10).position(|b| b == b"object.mod").unwrap();
+    desc[pos..pos + 10].copy_from_slice(b"second.ter");
+    let f = Fixture::members(vec![
+        (
+            "terrain.ter".into(),
+            model(FAMILIES[2].0, FAMILIES[2].1, true),
+        ),
+        (
+            "second.ter".into(),
+            model(FAMILIES[2].0, FAMILIES[2].1, true),
+        ),
+        ("Asymmetric.PNG".into(), png()),
+    ]);
+    std::fs::write(&f.descriptor, desc).unwrap();
+    let preview_error = f.load().unwrap_err();
+    let diagnostic = format!("{preview_error:#}");
+    assert!(
+        diagnostic.contains("requires exactly one terrain mesh")
+            || diagnostic.contains("multiple distinct terrain meshes"),
+        "{diagnostic}"
+    );
+    let source = load_binary_zone(&f.archive, DescriptorSource::Loose(&f.descriptor)).unwrap();
+    let error = crate::eqg::static_scene::build_static_scene_with_unapplied_v2_lighting(
+        &source,
+        Default::default(),
+        &Default::default(),
+        &Default::default(),
+    )
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("multiple distinct terrain meshes"));
+}
+
+#[test]
+fn source_budget_precharges_rows_properties_names_shaders_and_kind2_strings() {
+    let f = Fixture::new(FAMILIES[2].0, FAMILIES[2].1);
+    let mut source = load_binary_zone(&f.archive, DescriptorSource::Loose(&f.descriptor)).unwrap();
+    let l = EqgPbrLimits::default();
+    let before = source_budget(&source, &l).unwrap();
+    let material = libeq_eqg::mesh::parse(&model(FAMILIES[2].0, FAMILIES[2].1, true))
+        .unwrap()
+        .materials
+        .remove(0);
+    // material (8), Opaque_MPLBasic.fx (18), e_TextureDiffuse0 (17), Asymmetric.PNG (14).
+    let resolved_bytes = 8 + 18 + 17 + 14;
+    let properties = 1;
+    source.meshes[0].materials.push(material);
+    let after = source_budget(&source, &l).unwrap();
+    assert_eq!(
+        after.report_records - before.report_records,
+        1 + 8 + properties
+    );
+    assert_eq!(
+        after.report_string_bytes - before.report_string_bytes,
+        1024 + resolved_bytes * 3
+    );
+    let mut limited = l.clone();
+    limited.max_report_records = after.report_records - 1;
+    assert!(source_budget(&source, &limited).is_err());
+    limited = l;
+    limited.max_total_name_bytes = after.report_string_bytes - 1;
+    assert!(source_budget(&source, &limited).is_err());
+}
+
+#[test]
+fn selected_source_assembly_precharges_streamed_model_identities() {
+    let f = Fixture::new(FAMILIES[2].0, FAMILIES[2].1);
+    for (records, strings, diagnostic) in [
+        (0, 4096, "inventory model record"),
+        (1, 4096, "inventory model record"),
+        (100, 0, "inventory model string"),
+        (100, 11 + 64, "inventory model string"),
+        (100, 148, "inventory model string"),
+    ] {
+        let mut l = EqgPbrLimits::default();
+        let mut archive = archive::Archive::open(&f.archive, &l).unwrap();
+        let selector = DescriptorSource::Loose(&f.descriptor);
+        let (bytes, _, _, selected) = read_descriptor(&mut archive, selector, &l).unwrap();
+        l.max_report_records = records;
+        l.max_total_name_bytes = strings;
+        let error = inventory::assemble_source(
+            &f.archive,
+            selector,
+            &bytes,
+            selected.as_deref(),
+            &mut archive,
+            &l,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains(diagnostic), "{error:#}");
+    }
+    let mut l = EqgPbrLimits::default();
+    let mut archive = archive::Archive::open(&f.archive, &l).unwrap();
+    let selector = DescriptorSource::Loose(&f.descriptor);
+    let (bytes, _, _, selected) = read_descriptor(&mut archive, selector, &l).unwrap();
+    l.max_report_records = 2;
+    l.max_total_name_bytes = 149;
+    let (_, models) = inventory::assemble_source(
+        &f.archive,
+        selector,
+        &bytes,
+        selected.as_deref(),
+        &mut archive,
+        &l,
+    )
+    .unwrap();
+    assert_eq!(models.len(), 2);
+}
+
+#[test]
+fn selected_source_assembly_checks_identity_caps_before_member_reads() {
+    let f = Fixture::new(FAMILIES[2].0, FAMILIES[2].1);
+    for (records, strings, diagnostic) in [
+        (0, 4096, "inventory model record"),
+        (100, 74, "inventory model string"),
+    ] {
+        let mut l = EqgPbrLimits::default();
+        let mut archive = archive::Archive::open(&f.archive, &l).unwrap();
+        let selector = DescriptorSource::Loose(&f.descriptor);
+        let (bytes, _, _, selected) = read_descriptor(&mut archive, selector, &l).unwrap();
+        let descriptor_read_calls = archive.read_calls;
+        l.max_member_bytes = 1;
+        l.max_report_records = records;
+        l.max_total_name_bytes = strings;
+        let error = inventory::assemble_source(
+            &f.archive,
+            selector,
+            &bytes,
+            selected.as_deref(),
+            &mut archive,
+            &l,
+        )
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains(diagnostic), "{message}");
+        assert!(!message.contains("selected member byte limit"), "{message}");
+        assert_eq!(
+            archive.read_calls, descriptor_read_calls,
+            "identity preflight must precede the member read"
+        );
+    }
 }
