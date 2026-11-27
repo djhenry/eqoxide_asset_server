@@ -148,6 +148,8 @@ pub struct ResolvedEqgPbrPreview {
     pub source: BinaryZoneScene,
     pub preserved_resources: Vec<PreservedResource>,
 }
+const NORMAL_ABSENCE_DECISION: &str =
+    "source absence: optional e_TextureNormal0 is exact \"None\"; no image requested";
 fn hash(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex().to_string()
 }
@@ -407,6 +409,7 @@ pub fn load_eqg_pbr_preview(
                     resource_index: None,
                 });
             }
+            let mut normal_source_absence = None;
             if is_used {
                 materials::validate(&shader, &properties)?;
                 for (pi, p) in properties
@@ -415,8 +418,24 @@ pub fn load_eqg_pbr_preview(
                     .filter(|(_, p)| p.kind == 2)
                 {
                     let requested = text(&m.string_table, p.value_word, l)?;
-                    let (exact, len) = archive.exact(&requested, l)?;
                     let role = materials::role(&p.name)?;
+                    if role == TextureRole::Normal && requested == "None" {
+                        charge(
+                            &mut budget.report_records,
+                            2,
+                            l.max_report_records,
+                            "normal absence projection record",
+                        )?;
+                        charge(
+                            &mut budget.report_string_bytes,
+                            NORMAL_ABSENCE_DECISION.len() + "ExactNone".len(),
+                            l.max_total_name_bytes,
+                            "normal absence projection string",
+                        )?;
+                        normal_source_absence = Some(report::NormalSourceAbsence::ExactNone);
+                        continue;
+                    }
+                    let (exact, len) = archive.exact(&requested, l)?;
                     let ri = if let Some(&i) = resource_index.get(&exact) {
                         i
                     } else {
@@ -484,6 +503,7 @@ pub fn load_eqg_pbr_preview(
                 coverage: "uninterpreted-unused".into(),
                 cutoff: None,
                 decisions: Vec::new(),
+                normal_source_absence,
                 base_color_factor: None,
                 surface: None,
                 double_sided: None,
@@ -569,6 +589,9 @@ pub fn load_eqg_pbr_preview(
         row.double_sided = Some(mat.double_sided);
         row.surface = Some(surface);
         row.decisions=vec!["direct: preserved diffuse RGBA and UV0".into(),"default: editable scalar nonmetal PBR".into(),"omitted: packed vertex RGB/alpha, source prelighting and UV1".into(),"omitted: source scalar/color arithmetic and normal/coverage/environment sampling; raw inputs retained".into()];
+        if row.normal_source_absence.is_some() {
+            row.decisions.push(NORMAL_ABSENCE_DECISION.into());
+        }
         if row.shader == "Opaque_MaxWater.fx" {
             row.decisions.push("approximated: static water alpha 0.55, roughness 0.2, double sided; motion/Fresnel/refraction/environment omitted".into());
         } else {

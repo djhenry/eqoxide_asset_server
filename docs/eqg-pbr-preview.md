@@ -32,7 +32,8 @@ The exact supported shader names are `Opaque_MPLFull2UV.fx`, `Opaque_MPLBump.fx`
 `Opaque_MPLBasic.fx`, `Opaque_MPLSB.fx`, `Opaque_MaxCB1.fx`,
 `Opaque_MaxCBSGE1.fx`, `Opaque_MaxC1.fx`, `Opaque_MaxCBSG1.fx`,
 `Opaque_MaxCBS1.fx`, `Chroma_MaxC1.fx`, `Chroma_MaxCB1.fx`, and
-`Opaque_MaxWater.fx`. Each has a mandatory exact typed property set. Missing,
+`Opaque_MaxWater.fx`, `Opaque_OpaqueSModelCB1Max.fx`, and
+`Opaque_OpaqueSModelCBGG1Max.fx`. Each has a mandatory exact typed property set. Missing,
 extra, duplicate, wrong-kind, and unknown required shader/property semantics
 refuse. Unknown unused material semantics remain retained and uninterpreted;
 structural source validity is still required globally.
@@ -44,6 +45,22 @@ alpha factor of 0.55, metallic 0, roughness 0.2, BLEND, and double sided renderi
 These editable water scalars are authored appearance defaults, not physical
 measurements or a claim of 55 percent effective pixel opacity. Water motion,
 Fresnel, refraction, and environment arithmetic are omitted.
+
+The two additional opaque spellings use the existing opaque scalar PBR defaults,
+with source interpretation verified against the native RoF2 client. The CB1
+spelling requires diffuse and normal texture properties; the CBGG1 spelling also
+requires kind-0 bumpiness and shininess. Those scalar words stay raw and unapplied.
+
+After validating a known used material's exact typed schema, the exact
+case-sensitive string `None` on `e_TextureNormal0` means an absent optional normal
+resource. Its raw source string/value remains unchanged, `resource_index` stays
+null, and `normal_source_absence: "ExactNone"` plus a decision records why no image
+is requested. Even a present archive member named `None` is ignored for that
+normal property. Other strings (including `none`, `NONE`, and `NoneExtra.PNG`)
+remain ordinary required image names. Diffuse, coverage, and environment
+properties receive no absence exemption. Unknown unused materials remain
+uninterpreted. This policy adds no descriptor-v1 admission or native appearance
+claim.
 
 All required diffuse, normal, coverage, and environment resources resolve only
 against the selected archive, using ASCII case folding with ambiguous member
@@ -77,7 +94,8 @@ separate. The CLI owns its load-to-write scope; editing the returned public scen
 or a GLB requires a future identity normalization/reimport contract.
 
 Report record and string counters are conservative projection work units, including
-generated decisions, lighting/geometry rows, and duplicated resource-use projections.
+generated decisions (including optional-normal absence), lighting/geometry rows,
+and duplicated resource-use projections.
 The JSON report owns bounded raw-word projections, resource hashes/uses, lighting
 record hashes/counts, geometry accounting, actual scalar choices, and omissions.
 Raw nonfinite scalar bits serialize as integers. The CLI stages the real common
