@@ -160,3 +160,14 @@ contribute to the library report fingerprint. The standard Cargo package include
 example; manually pruned source distributions are not a supported packaging path.
 The existing v2 preview continues to refuse multiple distinct terrain meshes,
 as its geometry bridge already required.
+
+The exact `Opaque_MaxCBSE1.fx` name also uses the existing opaque source profile,
+with the same five typed properties as `Opaque_MaxCBSGE1.fx`. Verified against
+the native RoF2 client, its source interpretation supports ordinary opaque
+coverage; this does not establish identical native shader appearance. Diffuse
+RGBA is emitted with white factors, metallic 0, roughness 1, and single sided
+rendering. Referenced normal and environment images must still validate and
+remain preserved with source property order and scalar words; their sampling
+and source arithmetic remain unapplied and are reported as omissions. Schema
+compatibility in inventory does not establish image, conversion, or rendering
+readiness, and the preview still requires descriptor version 2.
