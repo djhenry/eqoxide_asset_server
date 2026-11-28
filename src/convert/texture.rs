@@ -66,9 +66,12 @@ pub(crate) fn decode_rgba(
     } else {
         None
     };
-    if let Some(rgba) = super::dds::decode_with_limits(data, limits.as_ref())
-        .with_context(|| format!("decode texture {name}"))?
-    {
+    let dds = if let Some(limits) = &limits {
+        super::dds::decode_static_with_limits(data, limits)
+    } else {
+        super::dds::decode_with_limits(data, None)
+    };
+    if let Some(rgba) = dds.with_context(|| format!("decode texture {name}"))? {
         return Ok(DynamicImage::ImageRgba8(rgba));
     }
     if policy == TextureDecodePolicy::PaletteIndexZero {

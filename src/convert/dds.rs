@@ -1,6 +1,102 @@
-//! Bounded support for legacy, uncompressed 32-bit DDS textures.
+//! Bounded RGB32 DDS support and static-only A4R4G4B4 decoding.
 use anyhow::{ensure, Result};
 use image::RgbaImage;
+
+/// Static decoding adds only the exact A4R4G4B4 source format to RGB32 support.
+pub(super) fn decode_static_with_limits(
+    data: &[u8],
+    limits: &image::Limits,
+) -> Result<Option<RgbaImage>> {
+    if !data.starts_with(b"DDS ") {
+        return Ok(None);
+    }
+    ensure!(data.len() >= 128, "truncated DDS header");
+    let word = |offset| u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+    ensure!(word(4) == 124 && word(76) == 32, "invalid DDS header size");
+    // RGBBitCount is unused by FourCC formats, even if its stored value is 16.
+    if word(88) != 16 || word(80) & 4 != 0 || word(84) != 0 {
+        return decode_with_limits(data, Some(limits));
+    }
+    validate_static_2d(data, word)?;
+    ensure!(
+        word(8) & 0x800000 == 0,
+        "DDS depth declaration requires a separate representation"
+    );
+    ensure!(
+        word(80) == 0x41
+            && word(84) == 0
+            && [word(92), word(96), word(100), word(104)] == [0xf00, 0xf0, 0xf, 0xf000],
+        "unsupported A4R4G4B4 DDS pixel metadata"
+    );
+    ensure!(
+        word(8) & 6 == 6,
+        "A4R4G4B4 DDS requires width and height dimension flags"
+    );
+    let (width, height) = (word(16), word(12));
+    // Apply axis limits without reserving the decoded allocation yet.
+    let mut dimension_limits = limits.clone();
+    dimension_limits.max_alloc = None;
+    super::texture::check_dimensions(width, height, 4, Some(&dimension_limits))?;
+    let count = word(28).max(1);
+    let max_count = u32::BITS - width.max(height).leading_zeros();
+    ensure!(count <= max_count, "invalid A4R4G4B4 DDS mip count");
+    let row_bytes = usize::try_from(width)?
+        .checked_mul(2)
+        .ok_or_else(|| anyhow::anyhow!("DDS row size overflow"))?;
+    let pitch = if word(8) & 8 != 0 {
+        usize::try_from(word(20))?
+    } else {
+        row_bytes
+    };
+    ensure!(pitch >= row_bytes, "DDS pitch is smaller than a pixel row");
+    ensure!(
+        count == 1 || pitch == row_bytes,
+        "padded A4R4G4B4 DDS mip chains are unsupported"
+    );
+    let base_size = pitch
+        .checked_mul(usize::try_from(height)?)
+        .ok_or_else(|| anyhow::anyhow!("DDS base payload size overflow"))?;
+    let mut payload_size = base_size;
+    let (mut mip_width, mut mip_height) = (width, height);
+    for _ in 1..count {
+        mip_width = (mip_width / 2).max(1);
+        mip_height = (mip_height / 2).max(1);
+        let size = usize::try_from(mip_width)?
+            .checked_mul(usize::try_from(mip_height)?)
+            .and_then(|n| n.checked_mul(2))
+            .ok_or_else(|| anyhow::anyhow!("DDS mip payload size overflow"))?;
+        payload_size = payload_size
+            .checked_add(size)
+            .ok_or_else(|| anyhow::anyhow!("DDS mip chain size overflow"))?;
+    }
+    let body = &data[128..];
+    ensure!(
+        body.len() == payload_size,
+        "A4R4G4B4 DDS payload does not exactly match declared mip levels"
+    );
+    super::texture::check_dimensions(width, height, 4, Some(limits))?;
+    let output_size = usize::try_from(width)?
+        .checked_mul(usize::try_from(height)?)
+        .and_then(|n| n.checked_mul(4))
+        .ok_or_else(|| anyhow::anyhow!("DDS output size overflow"))?;
+    let mut pixels = Vec::new();
+    pixels.try_reserve_exact(output_size)?;
+    for row in body[..base_size].chunks_exact(pitch) {
+        for bytes in row[..row_bytes].as_chunks::<2>().0 {
+            let value = u16::from_le_bytes(*bytes);
+            pixels.extend_from_slice(&[
+                ((value >> 8) & 15) as u8 * 17,
+                ((value >> 4) & 15) as u8 * 17,
+                (value & 15) as u8 * 17,
+                ((value >> 12) & 15) as u8 * 17,
+            ]);
+        }
+    }
+    Ok(Some(
+        RgbaImage::from_raw(width, height, pixels)
+            .ok_or_else(|| anyhow::anyhow!("invalid DDS image dimensions"))?,
+    ))
+}
 
 /// Decode legacy RGB32 DDS data; leave other encodings to the general decoder.
 #[cfg(test)]
@@ -138,6 +234,40 @@ mod tests {
         }
         data.extend_from_slice(&[3, 2, 1, 4, 7, 6, 5, 8, 11, 10, 9, 12, 15, 14, 13, 16]);
         data
+    }
+
+    #[test]
+    fn static_packed_budget_boundaries_and_payload_preflight() {
+        let mut data = fixture();
+        for (offset, value) in [(88, 16), (92, 0xf00), (96, 0xf0), (100, 0xf), (104, 0xf000)] {
+            word(&mut data, offset, value);
+        }
+        data.truncate(128);
+        data.extend_from_slice(&[0x34, 0x12, 0x78, 0x56, 0xbc, 0x9a, 0xf0, 0xde]);
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(2);
+        limits.max_image_height = Some(2);
+        for budget in [16, 17] {
+            limits.max_alloc = Some(budget);
+            assert!(decode_static_with_limits(&data, &limits).unwrap().is_some());
+        }
+        limits.max_alloc = Some(15);
+        let error = decode_static_with_limits(&data, &limits).unwrap_err();
+        assert!(error.to_string().contains("allocation"));
+        let error = decode_static_with_limits(&data[..135], &limits).unwrap_err();
+        assert!(error.to_string().contains("payload"));
+        limits.max_image_width = Some(1);
+        assert!(decode_static_with_limits(&data, &limits)
+            .unwrap_err()
+            .to_string()
+            .contains("dimensions"));
+        limits.max_image_width = Some(2);
+        word(&mut data, 8, 0x100f);
+        word(&mut data, 20, u32::MAX);
+        assert!(decode_static_with_limits(&data, &limits)
+            .unwrap_err()
+            .to_string()
+            .contains("payload"));
     }
 
     #[test]
