@@ -589,3 +589,5 @@ fn dx10_bc2_and_bc3_preserve_straight_partial_alpha_but_reject_other_conventions
         .is_err());
     }
 }
+
+mod a4r4g4b4;
