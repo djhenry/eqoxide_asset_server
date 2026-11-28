@@ -122,7 +122,10 @@ pub(crate) fn decode_rgba(
     Ok(if sixteen {
         DynamicImage::ImageRgba16(decoded.into_rgba16())
     } else {
-        DynamicImage::ImageRgba8(decoded.into_rgba8())
+        let mut rgba = decoded.into_rgba8();
+        super::dds::restore_static_bc1_alpha(data, &mut rgba)
+            .with_context(|| format!("restore texture {name} BC1 alpha"))?;
+        DynamicImage::ImageRgba8(rgba)
     })
 }
 
@@ -218,4 +221,241 @@ fn decode_bmp_keyed(
         }
     }
     Ok(Some(img))
+}
+
+#[cfg(test)]
+mod bc1_tests {
+    use super::*;
+
+    fn word(data: &mut [u8], offset: usize, value: u32) {
+        data[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn fixture(width: u32, height: u32, dxgi: Option<u32>, blocks: &[(u16, u16, u32)]) -> Vec<u8> {
+        let mut data = vec![0; if dxgi.is_some() { 148 } else { 128 }];
+        data[..4].copy_from_slice(b"DDS ");
+        for (offset, value) in [
+            (4, 124),
+            (8, 0x81007),
+            (12, height),
+            (16, width),
+            (20, blocks.len() as u32 * 8),
+            (76, 32),
+            (80, 4),
+            (108, 0x1000),
+        ] {
+            word(&mut data, offset, value);
+        }
+        data[84..88].copy_from_slice(if dxgi.is_some() { b"DX10" } else { b"DXT1" });
+        if let Some(format) = dxgi {
+            for (offset, value) in [(128, format), (132, 3), (140, 1)] {
+                word(&mut data, offset, value);
+            }
+        }
+        for &(c0, c1, selectors) in blocks {
+            data.extend_from_slice(&c0.to_le_bytes());
+            data.extend_from_slice(&c1.to_le_bytes());
+            data.extend_from_slice(&selectors.to_le_bytes());
+        }
+        data
+    }
+
+    fn static_image(data: &[u8], policy: TextureDecodePolicy) -> image::RgbaImage {
+        decode_rgba(data, policy, "bc1", DecodeProfile::Static)
+            .unwrap()
+            .into_rgba8()
+    }
+
+    #[test]
+    fn bc1_classic_literal_cutout_retains_pinned_rgb_and_source_alpha() {
+        // Every row is black, white, midpoint gray, transparent black.
+        let data = fixture(4, 4, None, &[(0, 65535, 0xe4e4e4e4)]);
+        let before = data.clone();
+        for policy in [
+            TextureDecodePolicy::PreserveRgba,
+            TextureDecodePolicy::PaletteIndexZero,
+        ] {
+            let actual = static_image(&data, policy);
+            assert_eq!(
+                actual.as_raw(),
+                &[0, 0, 0, 255, 255, 255, 255, 255, 128, 128, 128, 255, 0, 0, 0, 0].repeat(4)
+            );
+        }
+        assert_eq!(data, before);
+    }
+
+    #[test]
+    fn bc1_dx10_cutout_accepts_existing_formats_and_alpha_conventions() {
+        for format in 70..=72 {
+            for convention in [0, 1] {
+                let mut data = fixture(4, 4, Some(format), &[(0, 65535, u32::MAX)]);
+                word(&mut data, 144, convention);
+                for policy in [
+                    TextureDecodePolicy::PreserveRgba,
+                    TextureDecodePolicy::PaletteIndexZero,
+                ] {
+                    assert!(
+                        static_image(&data, policy).pixels().all(|p| p[3] == 0),
+                        "format {format}, convention {convention}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bc1_every_selector_position_and_endpoint_order_preserves_rgb() {
+        for (c0, c1, transparent) in [
+            (0x1234, 0xabcd, true),
+            (0x1234, 0x1234, true),
+            (0xabcd, 0x1234, false),
+        ] {
+            for position in 0..16 {
+                for selector in 0..4 {
+                    let data = fixture(4, 4, None, &[(c0, c1, selector << (2 * position))]);
+                    let baseline = image::load_from_memory(&data).unwrap().into_rgb8();
+                    for policy in [
+                        TextureDecodePolicy::PreserveRgba,
+                        TextureDecodePolicy::PaletteIndexZero,
+                    ] {
+                        let actual = static_image(&data, policy);
+                        for (i, (rgb, rgba)) in baseline.pixels().zip(actual.pixels()).enumerate() {
+                            assert_eq!(&rgba.0[..3], &rgb.0, "RGB at {i}, position {position}");
+                            let expected = if transparent && selector == 3 && i == position {
+                                0
+                            } else {
+                                255
+                            };
+                            assert_eq!(rgba[3], expected, "alpha at {i}, position {position}, selector {selector}, endpoints {c0}/{c1}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bc1_multiblock_rows_and_optional_flags_ignore_unused_rgb_fields() {
+        for (width, blocks) in [
+            (4, vec![(0, 65535, 0x03020100), (65535, 0, u32::MAX)]),
+            (
+                8,
+                vec![
+                    (0, 65535, 0x03020100),
+                    (65535, 0, u32::MAX),
+                    (77, 77, 0x01234567),
+                    (0x1234, 0xabcd, 0xfedcba98),
+                ],
+            ),
+        ] {
+            for dxgi in [None, Some(71)] {
+                for flags in [4, 5] {
+                    let mut data = fixture(width, 8, dxgi, &blocks);
+                    word(&mut data, 80, flags);
+                    for (offset, value) in [
+                        (88, 16),
+                        (92, 123),
+                        (96, 456),
+                        (100, 789),
+                        (104, u32::MAX),
+                        (28, 3),
+                    ] {
+                        word(&mut data, offset, value);
+                    }
+                    // Existing compressed decoding consumes the base level, even with partial trailing mips.
+                    data.extend_from_slice(&[23, 42]);
+                    let baseline = image::load_from_memory(&data).unwrap().into_rgb8();
+                    let actual = static_image(&data, TextureDecodePolicy::PreserveRgba);
+                    for (x, y, rgba) in actual.enumerate_pixels() {
+                        let &(a, b, bits) = &blocks[((y / 4) * (width / 4) + x / 4) as usize];
+                        let index = (bits >> (2 * ((y % 4) * 4 + x % 4))) & 3;
+                        assert_eq!(rgba[3], if a <= b && index == 3 { 0 } else { 255 });
+                        assert_eq!(&rgba.0[..3], &baseline.get_pixel(x, y).0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bc1_legacy_projection_remains_opaque_and_other_compression_retains_alpha() {
+        for dxgi in [None, Some(71)] {
+            let data = fixture(4, 4, dxgi, &[(0, 65535, u32::MAX)]);
+            let baseline = image::load_from_memory(&data).unwrap().into_rgba8();
+            for policy in [
+                TextureDecodePolicy::PreserveRgba,
+                TextureDecodePolicy::PaletteIndexZero,
+            ] {
+                let actual = decode_rgba(&data, policy, "legacy", DecodeProfile::Legacy)
+                    .unwrap()
+                    .into_rgba8();
+                assert_eq!(actual, baseline);
+                assert!(actual.pixels().all(|p| p[3] == 255));
+            }
+        }
+        for fourcc in [b"DXT3", b"DXT5"] {
+            let mut data = fixture(4, 4, None, &[]);
+            data[84..88].copy_from_slice(fourcc);
+            // Nonzero fractional alpha followed by a BC1-shaped color block.
+            data.extend_from_slice(if fourcc == b"DXT3" {
+                &[0x77; 8]
+            } else {
+                &[77, 99, 0, 0, 0, 0, 0, 0]
+            });
+            data.extend_from_slice(&[0, 0, 255, 255, 255, 255, 255, 255]);
+            let baseline = image::load_from_memory(&data).unwrap().into_rgba8();
+            assert!(baseline.pixels().all(|p| p[3] > 0 && p[3] < 255));
+            assert_eq!(
+                static_image(&data, TextureDecodePolicy::PreserveRgba),
+                baseline
+            );
+        }
+    }
+
+    #[test]
+    fn bc1_invalid_shapes_metadata_and_truncation_still_refuse() {
+        let good = fixture(4, 4, Some(71), &[(0, 65535, u32::MAX)]);
+        for (offset, value) in [
+            (112, 0x200),
+            (112, 0x400),
+            (112, 0x200000),
+            (24, 2),
+            (132, 4),
+            (136, 4),
+            (140, 2),
+            (144, 2),
+            (144, 3),
+            (144, 4),
+            (144, 8),
+            (12, 0),
+            (16, 16385),
+            (4, 123),
+            (76, 31),
+        ] {
+            let mut data = good.clone();
+            word(&mut data, offset, value);
+            assert!(
+                decode_rgba(
+                    &data,
+                    TextureDecodePolicy::PreserveRgba,
+                    "bad",
+                    DecodeProfile::Static
+                )
+                .is_err(),
+                "offset {offset}, value {value}"
+            );
+        }
+        for length in [4, 80, 127, 128, 147, 148, 155] {
+            assert!(
+                decode_rgba(
+                    &good[..length],
+                    TextureDecodePolicy::PreserveRgba,
+                    "bad",
+                    DecodeProfile::Static
+                )
+                .is_err(),
+                "length {length}"
+            );
+        }
+    }
 }

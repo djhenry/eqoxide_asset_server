@@ -1,4 +1,4 @@
-//! Bounded RGB32 DDS support and static-only A4R4G4B4 decoding.
+//! Bounded RGB32 DDS support and static A4R4G4B4 decoding / BC1 alpha recovery.
 use anyhow::{ensure, Result};
 use image::RgbaImage;
 
@@ -204,6 +204,63 @@ fn validate_static_2d(data: &[u8], word: impl Fn(usize) -> u32) -> Result<()> {
     Ok(())
 }
 
+/// Restore BC1's one-bit alpha after the general decoder's RGB8 projection.
+/// RGB samples remain exactly as decoded; only the base level is normalized.
+pub(super) fn restore_static_bc1_alpha(data: &[u8], rgba: &mut RgbaImage) -> Result<()> {
+    if !data.starts_with(b"DDS ") {
+        return Ok(());
+    }
+    ensure!(data.len() >= 128, "truncated DDS header");
+    let word = |offset| u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+    ensure!(word(4) == 124 && word(76) == 32, "invalid DDS header size");
+    if word(80) & 4 == 0 {
+        return Ok(());
+    }
+    let offset = match &data[84..88] {
+        b"DXT1" => 128,
+        b"DX10" => {
+            ensure!(data.len() >= 148, "truncated DDS DX10 header");
+            if !matches!(word(128), 70..=72) {
+                return Ok(());
+            }
+            148
+        }
+        _ => return Ok(()),
+    };
+    validate_static_2d(data, &word)?;
+    let (width, height) = (word(16), word(12));
+    ensure!(
+        width != 0 && height != 0 && rgba.dimensions() == (width, height),
+        "BC1 DDS dimensions do not match decoded image"
+    );
+    let columns = usize::try_from(width.div_ceil(4))?;
+    let rows = usize::try_from(height.div_ceil(4))?;
+    let size = columns
+        .checked_mul(rows)
+        .and_then(|n| n.checked_mul(8))
+        .and_then(|n| n.checked_add(offset))
+        .ok_or_else(|| anyhow::anyhow!("BC1 DDS payload size overflow"))?;
+    // Complete preflight before any output alpha changes, including later blocks.
+    let blocks = data
+        .get(offset..size)
+        .ok_or_else(|| anyhow::anyhow!("truncated BC1 DDS base pixels"))?;
+    for (index, block) in blocks.as_chunks::<8>().0.iter().enumerate() {
+        let c0 = u16::from_le_bytes([block[0], block[1]]);
+        let c1 = u16::from_le_bytes([block[2], block[3]]);
+        let selectors = u32::from_le_bytes(block[4..8].try_into().unwrap());
+        let left = (index % columns) as u32 * 4;
+        let top = (index / columns) as u32 * 4;
+        for y in 0..4.min(height - top) {
+            for x in 0..4.min(width - left) {
+                let selector = (selectors >> (2 * (4 * y + x))) & 3;
+                rgba.get_pixel_mut(left + x, top + y)[3] =
+                    if c0 <= c1 && selector == 3 { 0 } else { 255 };
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,6 +291,83 @@ mod tests {
         }
         data.extend_from_slice(&[3, 2, 1, 4, 7, 6, 5, 8, 11, 10, 9, 12, 15, 14, 13, 16]);
         data
+    }
+
+    fn bc1_fixture() -> Vec<u8> {
+        let mut data = fixture();
+        for (offset, value) in [
+            (12, 4),
+            (16, 8),
+            (80, 4),
+            (84, u32::from_le_bytes(*b"DXT1")),
+        ] {
+            word(&mut data, offset, value);
+        }
+        data.truncate(128);
+        data.extend_from_slice(&[0, 0, 255, 255, 255, 255, 255, 255].repeat(2));
+        data
+    }
+
+    #[test]
+    fn bc1_alpha_preflight_never_partially_mutates_output() {
+        let good = bc1_fixture();
+        let original = RgbaImage::from_pixel(8, 4, image::Rgba([19, 37, 53, 71]));
+        for length in [4, 80, 127, 128, 136, 143] {
+            let mut output = original.clone();
+            assert!(restore_static_bc1_alpha(&good[..length], &mut output).is_err());
+            assert_eq!(output, original);
+        }
+        for (offset, value) in [
+            (4, 123),
+            (76, 31),
+            (12, 0),
+            (12, 8),
+            (16, u32::MAX),
+            (112, 0x200),
+            (24, 2),
+        ] {
+            let mut data = good.clone();
+            word(&mut data, offset, value);
+            let mut output = original.clone();
+            assert!(restore_static_bc1_alpha(&data, &mut output).is_err());
+            assert_eq!(output, original);
+        }
+        for (offset, value) in [(132, 4), (136, 4), (140, 2), (144, 3)] {
+            let mut data = good[..128].to_vec();
+            data.extend_from_slice(&[0; 20]);
+            data.extend_from_slice(&good[128..]);
+            for (at, v) in [
+                (84, u32::from_le_bytes(*b"DX10")),
+                (128, 71),
+                (132, 3),
+                (140, 1),
+                (offset, value),
+            ] {
+                word(&mut data, at, v);
+            }
+            let mut output = original.clone();
+            assert!(restore_static_bc1_alpha(&data, &mut output).is_err());
+            assert_eq!(output, original);
+        }
+    }
+
+    #[test]
+    fn bc1_alpha_helper_does_not_touch_other_formats_or_unused_fourcc() {
+        let original = RgbaImage::from_pixel(8, 4, image::Rgba([19, 37, 53, 71]));
+        for (offset, value) in [
+            (80, 0x41),
+            (84, u32::from_le_bytes(*b"DXT3")),
+            (84, u32::from_le_bytes(*b"DXT5")),
+        ] {
+            let mut data = bc1_fixture();
+            word(&mut data, offset, value);
+            let mut output = original.clone();
+            restore_static_bc1_alpha(&data, &mut output).unwrap();
+            assert_eq!(output, original);
+        }
+        let mut output = original.clone();
+        restore_static_bc1_alpha(b"not DDS", &mut output).unwrap();
+        assert_eq!(output, original);
     }
 
     #[test]
